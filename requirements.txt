@@ -1,0 +1,11 @@
+streamlit>=1.39,<2
+duckdb>=1.1,<2
+pandas>=2.2,<3
+pyarrow>=16,<22
+altair>=5.4,<6
+google-genai>=1.0,<2
+pydantic>=2.8,<3
+python-dotenv>=1.0,<2
+openpyxl>=3.1,<4
+xlrd>=2.0,<3
+requests>=2.31,<3
