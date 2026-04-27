@@ -1,4 +1,4 @@
-# CSV Intelligence Chat
+# Data Analysis Chatbot
 
 A local Streamlit chatbot for querying `/Users/rajasekharbandreddy/Downloads/sourcedata.csv` with high accuracy and low token use.
 

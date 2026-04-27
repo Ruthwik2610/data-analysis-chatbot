@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +21,14 @@ class DataSource:
     table_name: str = "orders"
     dataframe: pd.DataFrame | None = None
 
+    @property
+    def allowed_columns(self) -> set[str]:
+        return {col["name"] for col in self.schema.get("columns", [])}
+
+    @property
+    def row_count(self) -> int:
+        return int(self.schema.get("row_count", 0))
+
 
 def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     renamed = {}
@@ -36,6 +43,35 @@ def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=renamed)
 
 
+_DATE_NAME_HINTS = ("date", "datetime", "_at", "delivery", "timestamp", "_time")
+
+
+def coerce_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            continue
+        if df[col].dtype != object:
+            continue
+        lower = col.lower()
+        if not any(hint in lower for hint in _DATE_NAME_HINTS):
+            continue
+        non_null = df[col].dropna()
+        if non_null.empty:
+            continue
+        # Try both US (MM-DD-YYYY) and day-first (DD-MM-YYYY) parsings; pick whichever parses more.
+        us_parsed = pd.to_datetime(non_null, errors="coerce", utc=False)
+        df_parsed = pd.to_datetime(non_null, errors="coerce", utc=False, dayfirst=True)
+        us_ok = int(us_parsed.notna().sum())
+        df_ok = int(df_parsed.notna().sum())
+        best_ok = max(us_ok, df_ok)
+        # Only convert if at least half the non-null values look like dates.
+        if best_ok < max(1, len(non_null) // 2):
+            continue
+        dayfirst = df_ok > us_ok
+        df[col] = pd.to_datetime(df[col], errors="coerce", utc=False, dayfirst=dayfirst)
+    return df
+
+
 def prepare_csv_source(data_path: Path, cache_dir: Path, logger: Any, force: bool) -> DataSource:
     schema = ensure_cache(data_path, cache_dir, logger=logger, force=force)
     return DataSource(source_kind="CSV cache", schema=schema, display_name=data_path.name, db_path=str(cache_paths(cache_dir)["db"]))
@@ -44,8 +80,12 @@ def prepare_csv_source(data_path: Path, cache_dir: Path, logger: Any, force: boo
 def prepare_csv_memory_source(csv_path: Path, logger: Any) -> DataSource:
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
-    df = pd.read_csv(csv_path)
+    import duckdb
+
+    # DuckDB's CSV reader is ~5-10x faster than pandas on large files and infers types better.
+    df = duckdb.read_csv(str(csv_path)).to_df()
     df = normalize_dataframe_columns(df)
+    df = coerce_date_columns(df)
     memory_key = f"csv-memory::{csv_path.resolve()}::{csv_path.stat().st_mtime_ns}"
     schema = schema_from_dataframe(df, source_name="Uploaded CSV")
     log_event(logger, "csv_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(csv_path))
@@ -58,6 +98,7 @@ def prepare_excel_source(excel_path: Path, sheet_name: str | int | None, logger:
     selected_sheet: str | int = 0 if sheet_name in {None, ""} else sheet_name
     df = pd.read_excel(excel_path, sheet_name=selected_sheet)
     df = normalize_dataframe_columns(df)
+    df = coerce_date_columns(df)
     memory_key = f"excel::{excel_path.resolve()}::{excel_path.stat().st_mtime_ns}::{selected_sheet}"
     schema = schema_from_dataframe(df, source_name=f"Excel sheet {selected_sheet}")
     log_event(logger, "excel_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(excel_path))
@@ -78,18 +119,23 @@ def prepare_duckdb_source(db_path: Path, table_name: str, logger: Any) -> DataSo
     return DataSource(source_kind="DuckDB file", schema=schema, display_name=db_path.name, db_path=str(db_path), table_name=table_name)
 
 
-def prepare_api_source(api_url: str, logger: Any) -> DataSource:
+def prepare_api_source(api_url: str, logger: Any, auth_header: str | None = None) -> DataSource:
     if not api_url:
         raise ValueError("API URL is required.")
     import requests
 
-    response = requests.get(api_url, timeout=30)
+    headers = {}
+    if auth_header:
+        token = auth_header.strip()
+        headers["Authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+    response = requests.get(api_url, timeout=30, headers=headers)
     response.raise_for_status()
     payload = response.json()
     records = payload if isinstance(payload, list) else payload.get("data", payload.get("records", []))
     if not isinstance(records, list) or not records:
         raise ValueError("API response must be a non-empty JSON list or contain data/records.")
     df = normalize_dataframe_columns(pd.DataFrame(records))
+    df = coerce_date_columns(df)
     memory_key = f"api::{api_url}::{hash(json.dumps(records[:25], default=str))}"
     schema = schema_from_dataframe(df, source_name="API JSON response")
     log_event(logger, "api_loaded_in_memory", rows=len(df), columns=len(df.columns), url=api_url)
@@ -148,7 +194,7 @@ def prepare_uploaded_source(
             records = records.get("data", records.get("records", []))
         if not isinstance(records, list) or not records:
             raise ValueError("Uploaded JSON must be a non-empty list or contain data/records.")
-        df = normalize_dataframe_columns(pd.DataFrame(records))
+        df = coerce_date_columns(normalize_dataframe_columns(pd.DataFrame(records)))
         schema = schema_from_dataframe(df, source_name="Uploaded JSON")
         log_event(logger, "json_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(destination))
         if ingest_method == "sql":
@@ -176,7 +222,7 @@ def prepare_local_file_source(path: Path, cache_dir: Path, logger: Any, table_na
             records = records.get("data", records.get("records", []))
         if not isinstance(records, list) or not records:
             raise ValueError("JSON file must be a non-empty list or contain data/records.")
-        df = normalize_dataframe_columns(pd.DataFrame(records))
+        df = coerce_date_columns(normalize_dataframe_columns(pd.DataFrame(records)))
         schema = schema_from_dataframe(df, source_name="Local JSON file")
         if ingest_method == "sql":
             return dataframe_to_duckdb_source(df, cache_dir, logger, path.name, "JSON SQL cache")
@@ -189,48 +235,10 @@ def parse_records_to_source(records: Any, cache_dir: Path, logger: Any, display_
         records = records.get("data", records.get("records", []))
     if not isinstance(records, list) or not records:
         raise ValueError("Connector output must be a non-empty JSON list or contain data/records.")
-    df = normalize_dataframe_columns(pd.DataFrame(records))
+    df = coerce_date_columns(normalize_dataframe_columns(pd.DataFrame(records)))
     if ingest_method == "sql":
         return dataframe_to_duckdb_source(df, cache_dir, logger, display_name, f"{source_kind} SQL cache")
     schema = schema_from_dataframe(df, source_name=source_kind)
     return DataSource(source_kind=source_kind, schema=schema, display_name=display_name, memory_key=f"{source_kind}::{display_name}", dataframe=df)
 
 
-def prepare_terminal_source(command: str, cache_dir: Path, logger: Any, ingest_method: str = "direct") -> DataSource:
-    completed = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60, check=False)
-    if completed.returncode != 0:
-        raise ValueError("Terminal connector command failed. Check logs for details.")
-    output = completed.stdout.strip()
-    if not output:
-        raise ValueError("Terminal connector command produced no output.")
-    try:
-        records = json.loads(output)
-        source = parse_records_to_source(records, cache_dir, logger, "terminal output", "Terminal connector", ingest_method)
-    except json.JSONDecodeError:
-        from io import StringIO
-
-        df = normalize_dataframe_columns(pd.read_csv(StringIO(output)))
-        source = dataframe_to_duckdb_source(df, cache_dir, logger, "terminal output", "Terminal SQL cache") if ingest_method == "sql" else DataSource(
-            source_kind="Terminal connector",
-            schema=schema_from_dataframe(df, source_name="Terminal connector"),
-            display_name="terminal output",
-            memory_key="terminal-output",
-            dataframe=df,
-        )
-    log_event(logger, "terminal_connector_loaded", command=command[:160], rows=source.schema.get("row_count"))
-    return source
-
-
-def prepare_connector_source(connector_input: str, cache_dir: Path, logger: Any, ingest_method: str = "direct", connector_kind: str = "auto") -> DataSource:
-    value = connector_input.strip()
-    if not value:
-        raise ValueError("Connector input is required.")
-    if connector_kind == "terminal":
-        return prepare_terminal_source(value, cache_dir, logger, ingest_method=ingest_method)
-    if value.startswith("http://") or value.startswith("https://"):
-        source = prepare_api_source(value, logger)
-        if ingest_method == "sql" and source.dataframe is not None:
-            return dataframe_to_duckdb_source(source.dataframe, cache_dir, logger, value, "API SQL cache")
-        return source
-    path = Path(value).expanduser()
-    return prepare_local_file_source(path, cache_dir, logger=logger, table_name="orders", sheet_name=None, force=False, ingest_method=ingest_method)

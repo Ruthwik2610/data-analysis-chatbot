@@ -40,8 +40,8 @@ class AppConfig:
             data_path=Path(os.getenv("DATA_PATH", "/Users/rajasekharbandreddy/Downloads/sourcedata.csv")),
             cache_dir=Path(os.getenv("CACHE_DIR", ".cache/chatbot")),
             gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
-            default_model=os.getenv("GEMINI_DEFAULT_MODEL", "gemini-3-flash-preview"),
-            escalation_model=os.getenv("GEMINI_ESCALATION_MODEL", "gemini-3-flash-preview"),
-            fallback_model=os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash"),
+            default_model=os.getenv("GEMINI_DEFAULT_MODEL", "gemini-2.5-flash"),
+            escalation_model=os.getenv("GEMINI_ESCALATION_MODEL", "gemini-2.5-flash"),
+            fallback_model=os.getenv("GEMINI_FALLBACK_MODEL", "gemma-4-31b-it"),
             prompt_char_budget=int(os.getenv("PROMPT_CHAR_BUDGET", "24000")),
         )

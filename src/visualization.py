@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pandas as pd
 
 
+_EXPLICIT_VIZ_RE = re.compile(r"\b(pie|donut|bar|line|table|chart|graph)\b", re.I)
+
+
 def explicit_visualization(question: str) -> str | None:
-    q = question.lower()
-    for chart in ["pie", "donut", "bar", "line", "table"]:
-        if chart in q:
-            return "pie" if chart == "donut" else chart
-    if "chart" in q or "graph" in q:
+    match = _EXPLICIT_VIZ_RE.search(question)
+    if not match:
+        return None
+    word = match.group(1).lower()
+    if word == "donut":
+        return "pie"
+    if word in {"chart", "graph"}:
         return "bar"
-    return None
+    return word
 
 
 def choose_visualization(question: str, intent: dict[str, Any], df: pd.DataFrame) -> str:
@@ -26,18 +32,37 @@ def choose_visualization(question: str, intent: dict[str, Any], df: pd.DataFrame
         return "table"
     if intent.get("intent_type") == "lookup":
         return "table"
-    if "period" in df.columns:
-        return "line"
-    if len(df) == 1:
-        return "card"
-    limit = int(intent.get("limit") or len(df))
+
+    cols = list(df.columns)
+    n_rows = len(df)
     q = question.lower()
-    if "top" in q and limit <= 3:
-        return "table"
-    if any(term in q for term in ["share", "percentage", "percent", "distribution", "breakdown"]) and 2 <= len(df) <= 8:
-        return "pie"
-    if len(df) >= 5:
-        return "bar"
+
+    if "period" in cols:
+        return "line"
+    if n_rows == 1 and len(cols) <= 3:
+        return "card"
+
+    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+    dim_cols = [c for c in cols if c not in numeric_cols]
+
+    # 2+ dimensions + 1 numeric → stacked bar (frontend will pivot)
+    if len(dim_cols) >= 2 and len(numeric_cols) >= 1:
+        return "table" if n_rows > 200 else "bar"
+
+    # 1 dimension + 1 numeric
+    if len(dim_cols) == 1 and len(numeric_cols) >= 1:
+        non_negative = bool(df[numeric_cols[0]].dropna().ge(0).all()) if not df[numeric_cols[0]].dropna().empty else True
+        if (
+            2 <= n_rows <= 8
+            and non_negative
+            and any(t in q for t in ["share", "percentage", "percent", "distribution", "breakdown", "split", "composition"])
+        ):
+            return "pie"
+        if n_rows > 25:
+            return "table"
+        if n_rows >= 2:
+            return "bar"
+
     return "table"
 
 

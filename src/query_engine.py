@@ -169,7 +169,7 @@ def infer_date_grain(question: str, provided: Any = None) -> str | None:
 def heuristic_intent(question: str, allowed_columns: set[str]) -> dict[str, Any]:
     q = question.lower()
     lookup = extract_lookup_filters(question)
-    if lookup:
+    if lookup and not looks_aggregate(question):
         return {
             "intent_type": "lookup",
             "metric": None,
@@ -187,7 +187,7 @@ def heuristic_intent(question: str, allowed_columns: set[str]) -> dict[str, Any]
         "intent_type": "trend" if any(term in q for term in ["trend", "over time", "monthly", "daily", "weekly"]) else "aggregate",
         "metric": infer_metric(question),
         "dimensions": infer_dimensions(question, [], allowed_columns),
-        "filters": [],
+        "filters": lookup,
         "date_grain": infer_date_grain(question),
         "limit": infer_limit(question, 100),
         "sort_direction": "desc",
@@ -198,20 +198,51 @@ def heuristic_intent(question: str, allowed_columns: set[str]) -> dict[str, Any]
     }
 
 
+_PREFIXED_ID_PATTERNS = [
+    ("order_key", r"\bORD-(\d+)\b", "ORD-"),
+    ("cust_key", r"\bCUST-(\d+)\b", "CUST-"),
+    ("prod_key", r"\bPROD-(\d+)\b", "PROD-"),
+]
+
+_BARE_KEY_PATTERNS = [
+    ("order_key", r"\bord(?:er)?[_\s-]?key\s*[=:]\s*['\"]?(\d+)['\"]?", "ORD-"),
+    ("cust_key", r"\bcust(?:omer)?[_\s-]?key\s*[=:]\s*['\"]?(\d+)['\"]?", "CUST-"),
+    ("prod_key", r"\bprod(?:uct)?[_\s-]?key\s*[=:]\s*['\"]?(\d+)['\"]?", "PROD-"),
+]
+
+
 def extract_lookup_filters(question: str) -> list[dict[str, Any]]:
-    patterns = [
-        ("order_key", r"\bORD-\d+\b"),
-        ("cust_key", r"\bCUST-\d+\b"),
-        ("prod_key", r"\bPROD-\d+\b"),
-        ("cust_email", r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"),
-    ]
-    filters = []
-    for column, pattern in patterns:
-        for match in re.findall(pattern, question, flags=re.I):
-            filters.append({"column": column, "operator": "=", "value": match})
+    filters: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(column: str, value: str) -> None:
+        key = (column, value)
+        if key in seen:
+            return
+        seen.add(key)
+        filters.append({"column": column, "operator": "=", "value": value})
+
+    for column, pattern, prefix in _PREFIXED_ID_PATTERNS:
+        for digits in re.findall(pattern, question, flags=re.I):
+            add(column, f"{prefix}{digits}")
+    for column, pattern, prefix in _BARE_KEY_PATTERNS:
+        for digits in re.findall(pattern, question, flags=re.I):
+            add(column, f"{prefix}{digits}")
+    for match in re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", question, flags=re.I):
+        add("cust_email", match)
     for match in re.findall(r"\b(?=[A-Z0-9]*\d)[A-Z0-9]{10,16}\b", question):
-        filters.append({"column": "transaction_id", "operator": "=", "value": match})
+        add("transaction_id", match)
     return filters
+
+
+_AGGREGATE_HINT_RE = re.compile(
+    r"\b(total|sum|average|avg|mean|count|how\s+many|revenue|sales|earnings|spend|by\s+\w|per\s+\w|across|breakdown|trend|over\s+time)\b",
+    re.I,
+)
+
+
+def looks_aggregate(question: str) -> bool:
+    return bool(_AGGREGATE_HINT_RE.search(question))
 
 
 def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set[str]) -> QueryPlan:
@@ -222,9 +253,22 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
         raise ValueError("I can only answer questions grounded in the CSV data.")
 
     lookup_filters = extract_lookup_filters(question)
-    if intent_type == "lookup" or lookup_filters:
+    aggregate_intents = {"aggregate", "trend", "comparison", "chart_request"}
+    wants_aggregate = intent_type in aggregate_intents or looks_aggregate(question)
+
+    if intent_type == "lookup" or (lookup_filters and not wants_aggregate):
         filters = lookup_filters or intent.get("filters") or []
         return build_lookup_plan(filters, intent, allowed_columns)
+
+    if lookup_filters:
+        merged = list(intent.get("filters") or [])
+        existing = {(canonical_column(f.get("column", "")), str(f.get("value"))) for f in merged}
+        for lf in lookup_filters:
+            key = (canonical_column(lf["column"]), str(lf["value"]))
+            if key not in existing:
+                merged.append(lf)
+                existing.add(key)
+        intent = {**intent, "filters": merged}
 
     metric = infer_metric(question, intent.get("metric"))
     dimensions = infer_dimensions(question, intent.get("dimensions") or [], allowed_columns)
@@ -236,7 +280,7 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
     groups: list[str] = []
     metric_sql, order_alias = metric_expression(metric, allowed_columns)
     if date_grain and "order_datetime" in allowed_columns:
-        selects.append(f"date_trunc('{date_grain}', \"order_datetime\") AS period")
+        selects.append(f"date_trunc('{date_grain}', TRY_CAST(\"order_datetime\" AS TIMESTAMP)) AS period")
         groups.append("period")
     for dim in dimensions:
         selects.append(f"{quote_ident(dim)} AS {quote_ident(dim)}")
@@ -263,7 +307,7 @@ def metric_expression(metric: str, allowed_columns: set[str]) -> tuple[str, str]
     if metric == "order_count":
         return "COUNT(*) AS order_count", "order_count"
     if metric == "delivery_delay_days" and {"expected_delivery", "actual_delivery"} <= allowed_columns:
-        return 'AVG(date_diff(\'day\', "expected_delivery", "actual_delivery")) AS avg_delivery_delay_days', "avg_delivery_delay_days"
+        return 'AVG(date_diff(\'day\', TRY_CAST("expected_delivery" AS TIMESTAMP), TRY_CAST("actual_delivery" AS TIMESTAMP))) AS avg_delivery_delay_days', "avg_delivery_delay_days"
     if metric == "avg_order_value":
         column = first_available(METRIC_CANDIDATES["avg_order_value"], allowed_columns)
         if column:
@@ -334,6 +378,38 @@ def make_title(metric: str, dimensions: list[str], date_grain: str | None, limit
     if dimensions:
         return f"Top {limit} {dimensions[0].replace('_', ' ').title()} By {metric_name}"
     return metric_name
+
+
+_GRAND_TOTAL_PATTERNS = [
+    r"\bgrand total\b",
+    r"\boverall total\b",
+    r"\boverall sum\b",
+    r"\bsum across\b",
+    r"\btotal across\b",
+    r"\bin total\b",
+    r"\band\s+(?:the\s+)?total\b",
+    r"\btotals?\s+and\s+(?:grand\s+)?total\b",
+    r"\btotals?\s+and\b",
+    r"\btotal\s+for\s+all\b",
+    r"\ball\s+\w+\s+totals?\b",
+]
+
+
+def wants_grand_total(question: str) -> bool:
+    q = question.lower()
+    return any(re.search(p, q) for p in _GRAND_TOTAL_PATTERNS)
+
+
+def build_total_plan(intent: dict[str, Any], allowed_columns: set[str]) -> QueryPlan:
+    metric = infer_metric("", intent.get("metric"))
+    metric_sql, alias = metric_expression(metric, allowed_columns)
+    where_sql, params = build_filters(intent.get("filters") or [], allowed_columns)
+    sql = f"SELECT {metric_sql} FROM orders"
+    if where_sql:
+        sql += f" WHERE {where_sql}"
+    title = f"{metric.replace('_', ' ').title()} Grand Total"
+    how = f"Aggregate of {metric} across all matching rows (no grouping or limit)."
+    return QueryPlan(sql=sql, params=params, display_type="card", title=title, how=how)
 
 
 def validate_readonly_sql(sql: str) -> None:

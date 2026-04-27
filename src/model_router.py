@@ -4,14 +4,29 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .logging_config import log_event
-from .prompting import build_answer_prompt, build_intent_prompt, estimate_tokens
+from .prompting import build_answer_prompt, build_intent_prompt, build_mcp_agent_system_prompt, estimate_tokens
+
+MAX_TOOL_ROUNDS = 8
 
 
 class LLMUnavailable(RuntimeError):
     pass
+
+
+FallbackCallback = Callable[[str, str, str], None]
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).upper()
+    return (
+        "429" in msg
+        or "RESOURCE_EXHAUSTED" in msg
+        or "RATE LIMIT" in msg
+        or "QUOTA" in msg
+    )
 
 
 @dataclass
@@ -94,28 +109,35 @@ class GeminiRouter:
         user_question: str,
         schema_context: dict[str, Any],
         conversation_summary: str,
+        on_fallback: FallbackCallback | None = None,
+        mcp_summary: str = "",
+        local_source_name: str = "the loaded dataset",
     ) -> tuple[dict[str, Any], str]:
         prompt = build_intent_prompt(
             schema_context=schema_context,
             conversation_summary=conversation_summary,
             user_question=user_question,
             char_budget=self.char_budget,
+            mcp_summary=mcp_summary,
+            local_source_name=local_source_name,
         )
-        models_to_try = [self.models.primary]
-        if looks_complex(user_question):
-            models_to_try = [self.models.escalation, self.models.primary]
-        models_to_try.append(self.models.fallback)
-
+        models_to_try = [self.models.primary, self.models.escalation, self.models.fallback]
+        canonical_primary = models_to_try[0]
+        fallback_reason: str | None = None
         last_error: Exception | None = None
         for model in dict.fromkeys(models_to_try):
             try:
                 intent = self._generate_json(model, prompt, request_id)
+                if fallback_reason and on_fallback and model != canonical_primary:
+                    on_fallback(canonical_primary, model, fallback_reason)
                 if intent.get("needs_escalation") and model != self.models.escalation:
                     intent = self._generate_json(self.models.escalation, prompt, request_id)
                     return intent, self.models.escalation
                 return intent, model
             except Exception as exc:  # pragma: no cover - network/API dependent
                 last_error = exc
+                if not fallback_reason and _is_rate_limit_error(exc):
+                    fallback_reason = "rate_limit"
                 log_event(self.logger, "llm_failure", request_id=request_id, model=model, error=str(exc))
         raise LLMUnavailable(str(last_error) if last_error else "No model produced a response.")
 
@@ -127,6 +149,7 @@ class GeminiRouter:
         intent: dict[str, Any],
         result_sample: list[dict[str, Any]],
         row_count: int,
+        sql: str | None = None,
     ) -> str:
         prompt = build_answer_prompt(
             user_question=user_question,
@@ -134,9 +157,10 @@ class GeminiRouter:
             result_sample=result_sample,
             row_count=row_count,
             char_budget=self.char_budget,
+            sql=sql,
         )
         last_error: Exception | None = None
-        for model in dict.fromkeys([self.models.primary, self.models.fallback]):
+        for model in dict.fromkeys([self.models.primary, self.models.escalation, self.models.fallback]):
             try:
                 return self._generate_text(model, prompt, request_id)
             except Exception as exc:  # pragma: no cover - network/API dependent
@@ -144,8 +168,154 @@ class GeminiRouter:
                 log_event(self.logger, "llm_summary_failure", request_id=request_id, model=model, error=str(exc))
         raise LLMUnavailable(str(last_error) if last_error else "No model produced a summary.")
 
+    def summarize_answer_stream(
+        self,
+        *,
+        request_id: str,
+        user_question: str,
+        intent: dict[str, Any],
+        result_sample: list[dict[str, Any]],
+        row_count: int,
+        sql: str | None = None,
+        total_row: dict[str, Any] | None = None,
+        on_fallback: FallbackCallback | None = None,
+    ):
+        prompt = build_answer_prompt(
+            user_question=user_question,
+            intent=intent,
+            result_sample=result_sample,
+            row_count=row_count,
+            char_budget=self.char_budget,
+            sql=sql,
+            total_row=total_row,
+        )
+        client = self._client_or_raise()
+        models = list(dict.fromkeys([self.models.primary, self.models.escalation, self.models.fallback]))
+        canonical_primary = models[0]
+        fallback_reason: str | None = None
+        last_error: Exception | None = None
+        for model in models:
+            try:
+                start = time.perf_counter()
+                log_event(self.logger, "llm_stream_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+                stream = client.models.generate_content_stream(
+                    model=model,
+                    contents=prompt,
+                    config={"temperature": 0.1},
+                )
+                for chunk in stream:
+                    text = getattr(chunk, "text", None)
+                    if text:
+                        yield text
+                elapsed_ms = int((time.perf_counter() - start) * 1000)
+                log_event(self.logger, "llm_stream_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+                if fallback_reason and on_fallback and model != canonical_primary:
+                    on_fallback(canonical_primary, model, fallback_reason)
+                return
+            except Exception as exc:  # pragma: no cover - network/API dependent
+                last_error = exc
+                if not fallback_reason and _is_rate_limit_error(exc):
+                    fallback_reason = "rate_limit"
+                log_event(self.logger, "llm_stream_failure", request_id=request_id, model=model, error=str(exc))
+        raise LLMUnavailable(str(last_error) if last_error else "No model produced a streamed summary.")
 
-def looks_complex(question: str) -> bool:
-    q = question.lower()
-    complex_terms = ["why", "correlat", "compare", "versus", "vs", "trend", "forecast", "relationship", "cohort"]
-    return any(term in q for term in complex_terms)
+    async def agent_loop_stream(
+        self,
+        *,
+        request_id: str,
+        user_question: str,
+        conversation_summary: str,
+        tool_specs: list[dict[str, Any]],
+        connector_summary: str,
+        on_tool_call,
+    ):
+        """Run a function-calling agent loop. Yields events:
+            {"kind": "tool_call", "name", "args", "connector_id"}
+            {"kind": "tool_result", "name", "text", "error"}
+            {"kind": "text", "delta"}
+
+        `on_tool_call(tool_name, args) -> awaitable[(text_result, error_or_none, connector_id)]`.
+        """
+        from google.genai import types as gtypes
+
+        client = self._client_or_raise()
+        async_client = client.aio
+
+        function_decls = []
+        for spec in tool_specs:
+            schema = spec.get("input_schema") or {"type": "object", "properties": {}}
+            function_decls.append(gtypes.FunctionDeclaration(
+                name=spec["name"],
+                description=spec.get("description") or "",
+                parameters_json_schema=schema,
+            ))
+        tools_config = [gtypes.Tool(function_declarations=function_decls)] if function_decls else None
+
+        system_text = build_mcp_agent_system_prompt(connector_summary)
+        if conversation_summary:
+            system_text += "\n\n## Recent conversation\n" + conversation_summary[-2000:]
+
+        contents: list[Any] = [gtypes.Content(role="user", parts=[gtypes.Part.from_text(text=user_question)])]
+        models = list(dict.fromkeys([self.models.primary, self.models.escalation, self.models.fallback]))
+
+        async def _generate_once(streaming: bool):
+            last_err: Exception | None = None
+            for model in models:
+                try:
+                    config = gtypes.GenerateContentConfig(
+                        temperature=0.1,
+                        system_instruction=system_text,
+                        tools=tools_config,
+                        automatic_function_calling=gtypes.AutomaticFunctionCallingConfig(disable=True),
+                    )
+                    if streaming:
+                        return model, await async_client.models.generate_content_stream(
+                            model=model, contents=contents, config=config,
+                        )
+                    return model, await async_client.models.generate_content(
+                        model=model, contents=contents, config=config,
+                    )
+                except Exception as exc:
+                    last_err = exc
+                    log_event(self.logger, "agent_llm_failure", request_id=request_id, model=model, streaming=streaming, error=str(exc))
+            raise LLMUnavailable(str(last_err) if last_err else "No model responded to the agent step.")
+
+        for round_idx in range(MAX_TOOL_ROUNDS):
+            model_used, response = await _generate_once(streaming=False)
+            function_calls = getattr(response, "function_calls", None) or []
+            log_event(self.logger, "agent_round", request_id=request_id, round=round_idx, model=model_used, tool_calls=len(function_calls))
+
+            if not function_calls:
+                # No more tool calls — re-issue the same prompt as a stream for the final text answer.
+                _, stream = await _generate_once(streaming=True)
+                async for chunk in stream:
+                    text = getattr(chunk, "text", None)
+                    if text:
+                        yield {"kind": "text", "delta": text}
+                return
+
+            # Append the model's tool-call turn so subsequent calls have full history.
+            model_content = response.candidates[0].content if response.candidates else None
+            if model_content is not None:
+                contents.append(model_content)
+
+            response_parts = []
+            for fc in function_calls:
+                tool_name = fc.name
+                args = dict(fc.args or {})
+                yield {"kind": "tool_call", "name": tool_name, "args": args}
+                try:
+                    result_text, error, connector_id = await on_tool_call(tool_name, args)
+                except Exception as exc:
+                    result_text, error, connector_id = "", str(exc), None
+                yield {"kind": "tool_result", "name": tool_name, "text": result_text, "error": error, "connector_id": connector_id}
+                payload = {"error": error} if error else {"result": result_text}
+                response_parts.append(gtypes.Part.from_function_response(name=tool_name, response=payload))
+            contents.append(gtypes.Content(role="tool", parts=response_parts))
+
+        # Hit the cap — ask once more for a final answer with no tools allowed.
+        _, stream = await _generate_once(streaming=True)
+        async for chunk in stream:
+            text = getattr(chunk, "text", None)
+            if text:
+                yield {"kind": "text", "delta": text}

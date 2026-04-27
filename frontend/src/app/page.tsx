@@ -1,0 +1,410 @@
+"use client";
+
+import { useEffect, useState, useCallback, useRef } from "react";
+import { flushSync } from "react-dom";
+import { Sidebar } from "@/components/Sidebar";
+import { Topbar } from "@/components/Topbar";
+import { MessageList } from "@/components/MessageList";
+import { InputBar } from "@/components/InputBar";
+import { api, streamQuery } from "@/lib/api";
+import type { ChatSummary, Source, Message, ResultPayload, Pending } from "@/lib/types";
+
+const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
+
+export default function Home() {
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [chatTitle, setChatTitle] = useState("New chat");
+  const [loading, setLoading] = useState(false);
+  const connectorClickRef = useRef<() => void>(() => {});
+  const queryAbortRef = useRef<AbortController | null>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+
+  const refreshSources = useCallback(async () => {
+    try { setSources(await api.listSources()); } catch {}
+  }, []);
+  const refreshChats = useCallback(async () => {
+    try { setChats(await api.listChats()); } catch {}
+  }, []);
+
+  useEffect(() => { refreshSources(); refreshChats(); }, [refreshSources, refreshChats]);
+
+  // Auto-restore the most recent chat on first load so reload always shows your last result.
+  const didAutoRestore = useRef(false);
+  useEffect(() => {
+    if (didAutoRestore.current) return;
+    if (currentChatId) return;
+    if (messages.length > 0) return;
+    if (chats.length === 0) return;
+    didAutoRestore.current = true;
+    handleSelectChat(chats[0].id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chats]);
+
+  const activeSource = sources.find((s) => s.active);
+
+  const addMessage = useCallback((m: Message) => setMessages((prev) => [...prev, m]), []);
+  const updateMessage = useCallback((id: string, patch: Partial<Message>) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? ({ ...m, ...patch } as Message) : m)));
+  }, []);
+
+  // -------- file pick: upload, show pending question if needed --------
+  const handlePickFile = useCallback(
+    async (file: File) => {
+      const placeholderId = `local_${Date.now()}`;
+      const sizeMB = Math.round(file.size / (1024 * 1024));
+      const sizeNote = sizeMB > 50 ? ` (${sizeMB} MB — this can take a moment)` : "";
+      addMessage({
+        id: placeholderId,
+        role: "assistant",
+        content: "",
+        thinking: `Uploading ${file.name}${sizeNote}`,
+        progress: 0,
+      });
+      uploadAbortRef.current?.abort();
+      uploadAbortRef.current = new AbortController();
+      setLoading(true);
+      try {
+        const res = await api.uploadFile(
+          file,
+          (pct) => updateMessage(placeholderId, {
+            // Drop the progress bar once the bytes are sent — the server still has work to do
+            // (parsing/caching), so keep the dot animation alive but stop showing 100%.
+            progress: pct < 100 ? pct : null,
+            thinking: pct < 100 ? `Uploading ${file.name}` : `Reading ${file.name} on the server (this can take a minute for large files)`,
+          }),
+          uploadAbortRef.current.signal,
+        );
+        updateMessage(placeholderId, { progress: null });
+        if ("pending" in res && res.pending) {
+          const p = res.pending;
+          if (p.kind === "sheet_pick" && p.sheets) {
+            updateMessage(placeholderId, {
+              thinking: null,
+              content: `Got **${p.file_name}**. It has ${p.sheets.length} sheets — which one should I read?`,
+              pending: {
+                resolver: "sheet_pick",
+                hint: "Pick a sheet",
+                options: p.sheets.map((s) => ({ label: s, value: s })),
+                args: { upload_id: p.upload_id },
+              },
+            });
+          } else if (p.kind === "table_pick" && p.tables) {
+            updateMessage(placeholderId, {
+              thinking: null,
+              content: `Got **${p.file_name}**. It has ${p.tables.length} tables — which one should I open?`,
+              pending: {
+                resolver: "table_pick",
+                hint: "Pick a table",
+                options: p.tables.map((t) => ({ label: t, value: t })),
+                args: { upload_id: p.upload_id },
+              },
+            });
+          } else if (p.kind === "ingest_pick") {
+            updateMessage(placeholderId, {
+              thinking: null,
+              content: `**${p.file_name}** is ${p.size_mb} MB. How should I load it?`,
+              pending: {
+                resolver: "ingest_pick",
+                hint: "Pick how to load",
+                options: [
+                  { label: "Query directly (uses RAM)", value: "direct" },
+                  { label: "Build a cache (faster later)", value: "sql" },
+                ],
+                args: { upload_id: p.upload_id },
+              },
+            });
+          }
+        } else if ("id" in res && res.id) {
+          updateMessage(placeholderId, {
+            thinking: null,
+            progress: null,
+            content: `Got **${res.name}** — ${res.rows?.toLocaleString()} rows ready. Ask me anything about it.`,
+          });
+          refreshSources();
+        }
+      } catch (e: any) {
+        if (e?.name === "AbortError") {
+          updateMessage(placeholderId, { thinking: null, progress: null, content: `Upload of ${file.name} was stopped.` });
+        } else {
+          updateMessage(placeholderId, {
+            thinking: null,
+            progress: null,
+            content: `Couldn't load ${file.name}: ${e?.message || "unknown error"}`,
+            error: true,
+          });
+        }
+      } finally {
+        setLoading(false);
+        uploadAbortRef.current = null;
+      }
+    },
+    [addMessage, updateMessage, refreshSources],
+  );
+
+  // -------- pending choice: resolve via backend --------
+  const handlePendingChoice = useCallback(
+    async (messageId: string, value: string) => {
+      const msg = messages.find((m) => m.id === messageId);
+      if (!msg || msg.role !== "assistant" || !msg.pending) return;
+      const pending = msg.pending;
+
+      if (pending.resolver === "connect_url") {
+        if (value === "connect") {
+          updateMessage(messageId, { resolved: true, content: `${msg.content}\n\nConnecting…`, thinking: "Connecting" });
+          try {
+            const src = await api.attachAPI(pending.args.url, null, false);
+            updateMessage(messageId, {
+              thinking: null,
+              content: `Connected to **${src.name}** — ${src.rows.toLocaleString()} rows. Ask away.`,
+            });
+            refreshSources();
+          } catch (e: any) {
+            updateMessage(messageId, { thinking: null, content: `Couldn't connect: ${e?.message || "unknown error"}`, error: true });
+          }
+        } else {
+          updateMessage(messageId, { resolved: true, content: msg.content + "\n\nOK, I'll send it as a question." });
+          handleSend(pending.args.original);
+        }
+        return;
+      }
+
+      // sheet_pick / table_pick / ingest_pick → resolve_pending
+      updateMessage(messageId, { resolved: true, thinking: "Loading", content: msg.content });
+      try {
+        const src = await api.resolvePending(pending.args.upload_id, value);
+        updateMessage(messageId, {
+          thinking: null,
+          content: `Got **${src.name}** — ${src.rows.toLocaleString()} rows. Ask me anything about it.`,
+        });
+        refreshSources();
+      } catch (e: any) {
+        updateMessage(messageId, { thinking: null, content: `Couldn't finish loading: ${e?.message || "unknown"}`, error: true });
+      }
+    },
+    [messages, updateMessage, refreshSources],
+  );
+
+  // -------- send: NL detection, then SSE query --------
+  const handleSend = useCallback(
+    async (question: string) => {
+      const urlMatch = question.match(URL_RE);
+
+      // URL with no active source → propose connect
+      if (urlMatch && !activeSource) {
+        const url = urlMatch[0];
+        addMessage({ id: `local_u_${Date.now()}`, role: "user", content: question });
+        addMessage({
+          id: `local_a_${Date.now() + 1}`,
+          role: "assistant",
+          content: `Looks like you want to connect to ${url}. Want me to?`,
+          pending: {
+            resolver: "connect_url",
+            hint: "I'll fetch the JSON and use it as a data source.",
+            options: [
+              { label: "Connect this API", value: "connect" },
+              { label: "Just send it as a question", value: "question" },
+            ],
+            args: { url, original: question },
+          },
+        });
+        return;
+      }
+
+      // Plain question — needs an active source
+      if (!activeSource) {
+        addMessage({ id: `local_u_${Date.now()}`, role: "user", content: question });
+        addMessage({
+          id: `local_a_${Date.now() + 1}`,
+          role: "assistant",
+          content: "I'll need a source first. Drop a file or paste a URL.",
+        });
+        return;
+      }
+
+      // Send as query
+      const userMsg: Message = { id: `local_u_${Date.now()}`, role: "user", content: question };
+      const assistantId = `local_a_${Date.now() + 1}`;
+      const assistantMsg: Message = { id: assistantId, role: "assistant", content: "", streaming: true, thinking: "Thinking" };
+      setMessages((m) => [...m, userMsg, assistantMsg]);
+      setLoading(true);
+      queryAbortRef.current?.abort();
+      queryAbortRef.current = new AbortController();
+
+      let fullText = "";
+      try {
+        for await (const ev of streamQuery({ chat_id: currentChatId, question }, queryAbortRef.current.signal)) {
+          // flushSync forces React to commit before the next await — without this,
+          // updates inside async iteration get batched until the loop finishes,
+          // and the user sees "Thinking…" until the entire stream completes.
+          flushSync(() => {
+            if (ev.event === "meta") {
+              setCurrentChatId(ev.data.chat_id);
+              updateMessage(assistantId, { source: ev.data.source });
+            } else if (ev.event === "thinking") {
+              updateMessage(assistantId, { thinking: ev.data.step });
+            } else if (ev.event === "result") {
+              updateMessage(assistantId, { result: ev.data as ResultPayload, thinking: null });
+              setLoading(false);
+            } else if (ev.event === "text") {
+              fullText += ev.data.delta;
+              const snapshot = fullText;
+              updateMessage(assistantId, { content: snapshot, thinking: null });
+            } else if (ev.event === "clarify") {
+              updateMessage(assistantId, { content: ev.data.content, thinking: null });
+              setLoading(false);
+            } else if (ev.event === "error") {
+              updateMessage(assistantId, { content: ev.data.message, error: true, thinking: null });
+              setLoading(false);
+            } else if (ev.event === "notice") {
+              updateMessage(assistantId, { notice: ev.data });
+            } else if (ev.event === "done") {
+              updateMessage(assistantId, { streaming: false, thinking: null });
+              if (ev.data.chat_id) setCurrentChatId(ev.data.chat_id);
+            }
+          });
+          if (ev.event === "done") refreshChats();
+        }
+      } catch (e: any) {
+        if (e?.name === "AbortError") {
+          updateMessage(assistantId, {
+            content: fullText ? `${fullText}\n\n_(stopped)_` : "_(stopped)_",
+            streaming: false,
+            thinking: null,
+          });
+        } else {
+          updateMessage(assistantId, { content: e?.message || "Network error", error: true, streaming: false, thinking: null });
+        }
+      } finally {
+        setLoading(false);
+        queryAbortRef.current = null;
+      }
+    },
+    [activeSource, currentChatId, addMessage, updateMessage, refreshChats],
+  );
+
+  const handleStop = useCallback(() => {
+    queryAbortRef.current?.abort();
+    uploadAbortRef.current?.abort();
+  }, []);
+
+  const abortInFlight = useCallback(() => {
+    queryAbortRef.current?.abort();
+    uploadAbortRef.current?.abort();
+    setLoading(false);
+  }, []);
+
+  const handleNewChat = useCallback(() => {
+    abortInFlight();
+    setMessages([]);
+    setCurrentChatId(null);
+    setChatTitle("New chat");
+  }, [abortInFlight]);
+
+  const handleSelectChat = useCallback(async (id: string) => {
+    abortInFlight();
+    try {
+      const chat = await api.getChat(id);
+      const restored: Message[] = chat.messages.map((m: any) => {
+        if (m.role === "user") return { id: m.id, role: "user", content: m.content };
+        const isError = m.payload?.kind === "error";
+        return {
+          id: m.id,
+          role: "assistant",
+          content: m.content,
+          result: m.payload?.result,
+          error: isError || undefined,
+        };
+      });
+      setCurrentChatId(id);
+      setMessages(restored);
+      setChatTitle(chat.title || "Chat");
+    } catch {}
+  }, [abortInFlight]);
+
+  const handleDeleteChat = useCallback(async (id: string) => {
+    await api.deleteChat(id);
+    if (id === currentChatId) {
+      abortInFlight();
+      setMessages([]);
+      setCurrentChatId(null);
+    }
+    refreshChats();
+  }, [currentChatId, refreshChats, abortInFlight]);
+
+  const handleActivateSource = useCallback(async (id: string) => {
+    await api.activateSource(id);
+    refreshSources();
+  }, [refreshSources]);
+
+  const handleDeleteSource = useCallback(async (id: string) => {
+    await api.deleteSource(id);
+    refreshSources();
+  }, [refreshSources]);
+
+  const handleAttachedFromInput = useCallback((s: Source) => {
+    addMessage({
+      id: `local_${Date.now()}`,
+      role: "assistant",
+      content: `Connected to **${s.name}** — ${s.rows.toLocaleString()} rows. Ask away.`,
+    });
+    refreshSources();
+  }, [addMessage, refreshSources]);
+
+  useEffect(() => {
+    if (!currentChatId) {
+      setChatTitle("New chat");
+      return;
+    }
+    const c = chats.find((x) => x.id === currentChatId);
+    if (c) setChatTitle(c.title || "New chat");
+  }, [currentChatId, chats]);
+
+  // Greeting card "Connect" button delegates to InputBar's connector flyout
+  // by triggering a click on the InputBar's plug button via a ref.
+  // For simplicity: the greeting just toggles a state that nudges InputBar.
+  // (Cheap workaround: simulate by opening the popover via hash or local storage)
+  // Simpler approach: emit a custom event that InputBar listens for.
+  useEffect(() => {
+    connectorClickRef.current = () => {
+      const evt = new CustomEvent("data-chat:open-connector");
+      window.dispatchEvent(evt);
+    };
+  }, []);
+
+  return (
+    <div className="flex h-screen w-screen overflow-hidden">
+      <Sidebar
+        chats={chats}
+        currentChatId={currentChatId}
+        sources={sources}
+        onNewChat={handleNewChat}
+        onSelectChat={handleSelectChat}
+        onDeleteChat={handleDeleteChat}
+        onActivateSource={handleActivateSource}
+        onDeleteSource={handleDeleteSource}
+      />
+      <main className="flex flex-col flex-1 min-w-0" style={{ background: "var(--color-background-primary)" }}>
+        <Topbar title={chatTitle} activeSource={activeSource} />
+        <MessageList
+          messages={messages}
+          loading={loading}
+          onPendingChoice={handlePendingChoice}
+          onPickFile={handlePickFile}
+          onConnectClick={() => connectorClickRef.current()}
+        />
+        <InputBar
+          onSend={handleSend}
+          onStop={handleStop}
+          onPickFile={handlePickFile}
+          onAttached={handleAttachedFromInput}
+          loading={loading}
+          disabled={false}
+          placeholder={activeSource ? "Ask about your data, or paste a URL…" : "Drop a file, paste a URL, or describe what you want…"}
+        />
+      </main>
+    </div>
+  );
+}
