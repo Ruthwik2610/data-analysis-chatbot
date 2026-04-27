@@ -92,11 +92,40 @@ def prepare_csv_memory_source(csv_path: Path, logger: Any) -> DataSource:
     return DataSource(source_kind="Uploaded CSV", schema=schema, display_name=csv_path.name, memory_key=memory_key, dataframe=df)
 
 
+def _read_xlsx_via_duckdb(excel_path: Path, sheet: str | int) -> pd.DataFrame:
+    # DuckDB's excel extension reads cell formatting metadata, so dates land as DATE/TIMESTAMP
+    # and numbers as DOUBLE/BIGINT — types that pandas+openpyxl drops on the floor.
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        try:
+            con.execute("LOAD excel")
+        except Exception:
+            con.execute("INSTALL excel")
+            con.execute("LOAD excel")
+        if isinstance(sheet, int):
+            sheet_names = pd.ExcelFile(excel_path).sheet_names
+            sheet_name = sheet_names[sheet] if 0 <= sheet < len(sheet_names) else sheet_names[0]
+        else:
+            sheet_name = str(sheet)
+        return con.execute(
+            "SELECT * FROM read_xlsx(?, header=true, ignore_errors=true, sheet=?)",
+            [str(excel_path), sheet_name],
+        ).df()
+    finally:
+        con.close()
+
+
 def prepare_excel_source(excel_path: Path, sheet_name: str | int | None, logger: Any) -> DataSource:
     if not excel_path.exists():
         raise FileNotFoundError(f"Excel file not found: {excel_path}")
     selected_sheet: str | int = 0 if sheet_name in {None, ""} else sheet_name
-    df = pd.read_excel(excel_path, sheet_name=selected_sheet)
+    if excel_path.suffix.lower() == ".xlsx":
+        df = _read_xlsx_via_duckdb(excel_path, selected_sheet)
+    else:
+        # Legacy .xls — DuckDB's excel extension only reads .xlsx, so fall back to pandas.
+        df = pd.read_excel(excel_path, sheet_name=selected_sheet)
     df = normalize_dataframe_columns(df)
     df = coerce_date_columns(df)
     memory_key = f"excel::{excel_path.resolve()}::{excel_path.stat().st_mtime_ns}::{selected_sheet}"

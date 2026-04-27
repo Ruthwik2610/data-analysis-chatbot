@@ -62,7 +62,7 @@ class QueryPlanTests(unittest.TestCase):
         allowed = {"location", "revenue"}
         intent = heuristic_intent("give me a table by location", allowed)
         plan = build_query_plan(intent, "give me a table by location", allowed)
-        self.assertIn('SUM("revenue")', plan.sql)
+        self.assertIn('SUM(TRY_CAST("revenue" AS DOUBLE))', plan.sql)
         self.assertEqual(plan.sql.count('"location" AS "location"'), 1)
 
 

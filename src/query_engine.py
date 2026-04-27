@@ -311,12 +311,12 @@ def metric_expression(metric: str, allowed_columns: set[str]) -> tuple[str, str]
     if metric == "avg_order_value":
         column = first_available(METRIC_CANDIDATES["avg_order_value"], allowed_columns)
         if column:
-            return f"AVG({quote_ident(column)}) AS avg_order_value", "avg_order_value"
+            return f"AVG(TRY_CAST({quote_ident(column)} AS DOUBLE)) AS avg_order_value", "avg_order_value"
         return "COUNT(*) AS order_count", "order_count"
     column = first_available(METRIC_CANDIDATES.get(metric, []), allowed_columns)
     if column:
         alias = metric if metric in {"revenue", "quantity", "discount", "tax"} else column
-        return f"SUM({quote_ident(column)}) AS {quote_ident(alias)}", alias
+        return f"SUM(TRY_CAST({quote_ident(column)} AS DOUBLE)) AS {quote_ident(alias)}", alias
     return "COUNT(*) AS order_count", "order_count"
 
 

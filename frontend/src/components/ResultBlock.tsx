@@ -626,9 +626,6 @@ function prettyLabel(s: string): string {
 
 function formatNumber(v: number): string {
   if (!Number.isFinite(v)) return "—";
-  if (Math.abs(v) >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B`;
-  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
   if (Math.abs(v) < 1 && v !== 0) return v.toFixed(3);
   return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
