@@ -36,6 +36,15 @@ class ModelChoice:
     fallback: str
 
 
+def provider_for_model(model: str) -> str:
+    """Pick a provider from a model name. Groq hosts llama/mixtral/qwen/gemma2;
+    everything else falls through to the Gemini provider."""
+    name = (model or "").lower()
+    if name.startswith(("llama", "mixtral", "qwen")) or "groq" in name or name.startswith("gemma2"):
+        return "groq"
+    return "gemini"
+
+
 def extract_json(text: str) -> dict[str, Any]:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -51,16 +60,25 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 class GeminiRouter:
-    def __init__(self, api_key: str | None, models: ModelChoice, logger: Any, char_budget: int) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        models: ModelChoice,
+        logger: Any,
+        char_budget: int,
+        groq_api_key: str | None = None,
+    ) -> None:
         self.api_key = api_key
+        self.groq_api_key = groq_api_key
         self.models = models
         self.logger = logger
         self.char_budget = char_budget
         self._client = None
+        self._groq_client = None
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key) or bool(self.groq_api_key)
 
     def _client_or_raise(self):
         if not self.api_key:
@@ -73,7 +91,20 @@ class GeminiRouter:
             self._client = genai.Client(api_key=self.api_key)
         return self._client
 
+    def _groq_client_or_raise(self):
+        if not self.groq_api_key:
+            raise LLMUnavailable("Groq API key is not configured.")
+        if self._groq_client is None:
+            try:
+                from groq import Groq
+            except Exception as exc:  # pragma: no cover - depends on optional package
+                raise LLMUnavailable("groq SDK is not installed.") from exc
+            self._groq_client = Groq(api_key=self.groq_api_key)
+        return self._groq_client
+
     def _generate_json(self, model: str, prompt: str, request_id: str) -> dict[str, Any]:
+        if provider_for_model(model) == "groq":
+            return self._generate_json_groq(model, prompt, request_id)
         client = self._client_or_raise()
         start = time.perf_counter()
         log_event(self.logger, "llm_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
@@ -88,7 +119,25 @@ class GeminiRouter:
         log_event(self.logger, "llm_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
         return parsed
 
+    def _generate_json_groq(self, model: str, prompt: str, request_id: str) -> dict[str, Any]:
+        client = self._groq_client_or_raise()
+        start = time.perf_counter()
+        log_event(self.logger, "llm_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        text = (response.choices[0].message.content or "") if response.choices else ""
+        parsed = extract_json(text)
+        log_event(self.logger, "llm_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+        return parsed
+
     def _generate_text(self, model: str, prompt: str, request_id: str) -> str:
+        if provider_for_model(model) == "groq":
+            return self._generate_text_groq(model, prompt, request_id)
         client = self._client_or_raise()
         start = time.perf_counter()
         log_event(self.logger, "llm_summary_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
@@ -101,6 +150,37 @@ class GeminiRouter:
         text = (getattr(response, "text", "") or "").strip()
         log_event(self.logger, "llm_summary_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
         return text
+
+    def _generate_text_groq(self, model: str, prompt: str, request_id: str) -> str:
+        client = self._groq_client_or_raise()
+        start = time.perf_counter()
+        log_event(self.logger, "llm_summary_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+        )
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        text = ((response.choices[0].message.content or "").strip()) if response.choices else ""
+        log_event(self.logger, "llm_summary_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+        return text
+
+    def _generate_text_stream_groq(self, model: str, prompt: str, request_id: str):
+        client = self._groq_client_or_raise()
+        start = time.perf_counter()
+        log_event(self.logger, "llm_stream_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+        stream = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                yield delta
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        log_event(self.logger, "llm_stream_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
 
     def classify_intent(
         self,
@@ -179,6 +259,7 @@ class GeminiRouter:
         sql: str | None = None,
         total_row: dict[str, Any] | None = None,
         on_fallback: FallbackCallback | None = None,
+        prefer_model: str | None = None,
     ):
         prompt = build_answer_prompt(
             user_question=user_question,
@@ -189,26 +270,34 @@ class GeminiRouter:
             sql=sql,
             total_row=total_row,
         )
-        client = self._client_or_raise()
-        models = list(dict.fromkeys([self.models.primary, self.models.escalation, self.models.fallback]))
-        canonical_primary = models[0]
+        cascade = [self.models.primary, self.models.escalation, self.models.fallback]
+        canonical_primary = cascade[0]
+        # When intent classification just had to fall back, the caller passes the
+        # winning model so we don't pay the same Gemini 503/429 round-trip again.
+        if prefer_model and prefer_model in cascade and prefer_model != cascade[0]:
+            cascade = [prefer_model] + [m for m in cascade if m != prefer_model]
+        models = list(dict.fromkeys(cascade))
         fallback_reason: str | None = None
         last_error: Exception | None = None
         for model in models:
             try:
-                start = time.perf_counter()
-                log_event(self.logger, "llm_stream_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
-                stream = client.models.generate_content_stream(
-                    model=model,
-                    contents=prompt,
-                    config={"temperature": 0.1},
-                )
-                for chunk in stream:
-                    text = getattr(chunk, "text", None)
-                    if text:
-                        yield text
-                elapsed_ms = int((time.perf_counter() - start) * 1000)
-                log_event(self.logger, "llm_stream_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+                if provider_for_model(model) == "groq":
+                    yield from self._generate_text_stream_groq(model, prompt, request_id)
+                else:
+                    client = self._client_or_raise()
+                    start = time.perf_counter()
+                    log_event(self.logger, "llm_stream_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+                    stream = client.models.generate_content_stream(
+                        model=model,
+                        contents=prompt,
+                        config={"temperature": 0.1},
+                    )
+                    for chunk in stream:
+                        text = getattr(chunk, "text", None)
+                        if text:
+                            yield text
+                    elapsed_ms = int((time.perf_counter() - start) * 1000)
+                    log_event(self.logger, "llm_stream_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
                 if fallback_reason and on_fallback and model != canonical_primary:
                     on_fallback(canonical_primary, model, fallback_reason)
                 return
@@ -256,7 +345,11 @@ class GeminiRouter:
             system_text += "\n\n## Recent conversation\n" + conversation_summary[-2000:]
 
         contents: list[Any] = [gtypes.Content(role="user", parts=[gtypes.Part.from_text(text=user_question)])]
-        models = list(dict.fromkeys([self.models.primary, self.models.escalation, self.models.fallback]))
+        # MCP agent loop uses Gemini's function-calling schema; skip non-Gemini models.
+        models = [m for m in dict.fromkeys([self.models.primary, self.models.escalation, self.models.fallback])
+                  if provider_for_model(m) == "gemini"]
+        if not models:
+            raise LLMUnavailable("No Gemini model is configured for the MCP agent loop.")
 
         async def _generate_once(streaming: bool):
             last_err: Exception | None = None

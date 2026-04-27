@@ -84,18 +84,18 @@ def build_intent_prompt(
     {routing_rule}
     <rule>Bias strongly toward answering DATA questions. Return intent_type="clarification" ONLY when (a) the question is on-topic but impossible to answer with the available sources (references a column that does not exist, contradicts itself, has no plausible mapping), or (b) routing is genuinely ambiguous between local and MCP. Do NOT clarify just because details are missing — apply the defaults below silently.</rule>
     <rule>Silent defaults (apply without asking) — these apply to LOCAL routing only:
-      - Missing metric → "revenue".
-      - Words like "sales", "earnings", "income", "money", "value", "amount", "total" with no other qualifier → "revenue".
-      - Words like "orders", "transactions", "purchases", "count", "how many" → "order_count".
-      - Words like "units", "items sold", "qty" → "quantity".
-      - Missing time range → no date filter (all time).
-      - Missing grouping → one overall total (no dimensions).
+      - "metric_column" MUST be the EXACT name of a real column from <local_schema>/<schema_context>. Do NOT invent column names. If the user names a measure ("unit price", "revenue", "shipping cost", "mrp", "list price"), pick the schema column whose name matches most closely (e.g. "unit price" → unit_price; "revenue" → revenue or total_order_val if revenue is absent; "shipping" → shipping_cost). Treat metric_column as a numeric measure to aggregate — NEVER put it in dimensions and NEVER treat it as a date.
+      - "aggregation" defaults to "sum". Use "avg" for "average/avg/mean", "count" for "how many/number of/count" (in which case metric_column is null), "max" for "max/maximum", "min" for "min/minimum".
+      - "Total X", "sum of X", "X across Y" → aggregation "sum" with metric_column=X.
+      - "How many orders/rows/records" with no measure → aggregation "count", metric_column null.
+      - Missing time range → no date filter (all time). Missing grouping → one overall total (no dimensions).
       - "highest", "top", "best", "most", "largest" → sort_direction "desc", limit 10 unless a number is given.
       - "lowest", "worst", "bottom", "least", "smallest" → sort_direction "asc", limit 10.
-      - Phrases like "by X", "per X", "across X", "sort by X", "broken down by X", "split by X" → X is the dimension; this is NEVER a clarification trigger.
-      - "payment method/mode/type" → payment_mode dimension. "category" → prod_category. "city/location" → ship_city. "customer/segment" → cust_segment. "product" → prod_name. "carrier" → carrier_name. "country" → ship_country.
-      - When a metric is mentioned without an aggregation (e.g. "revenue by category"), treat as SUM of that metric.
-      - If the user phrases the question as a sort ("sort by payment method by highest revenue"), the metric is the thing being sorted ("revenue"), the dimension is the grouping ("payment_mode"), sort is desc.
+      - Phrases like "by X", "per X", "across X", "sort by X", "broken down by X", "split by X" → X is the dimension; this is NEVER a clarification trigger. The dimension MUST be a real column name from the schema.
+      - TIME GROUPING is a separate concept from dimensions. If the user says "by month", "monthly", "month wise / month-wise", "each month", "per month" — and equivalents for day / week / quarter / year — set `date_grain` to the matching grain ("day"|"week"|"month"|"quarter"|"year") and do NOT put "month"/"year"/"date" in dimensions. The grouping happens implicitly on the schema's date column (e.g. order_datetime, order_date, invoice_date). Words like "trend" or "over time" with no explicit grain default to date_grain="month". Only put a column in dimensions if it is a real non-time column in the schema.
+      - If the user phrases the question as a sort ("sort by payment method by highest revenue"), metric_column is the thing being sorted (e.g. revenue), the dimension is the grouping (e.g. payment_mode), sort is desc.
+      - Filters must use real column names from the schema. Date filters use the date column from the schema (often named order_datetime/order_date/created_at/...) with ISO values like "2025-10-01". For "October 2025" → between "2025-10-01" and "2025-10-31"; for "in 2025" → between "2025-01-01" and "2025-12-31".
+      - IDENTIFIER FILTERS: when the user writes an identifier value (email, "PREFIX-1234", long alphanumeric token, or "<column> <number>"), emit it as an equality filter on the schema column whose name + role matches the value's shape. Use the EXACT value the user typed; never reformat or invent IDs. If no schema column aligns, drop the filter rather than guessing. Bare numbers ("12345") need an explicit column word in the question ("customer 12345" → cust_key=12345); never filter on a lone number. Set intent_type="lookup" only when the question is essentially "show the record matching this identifier" with no aggregation; otherwise keep the aggregate intent and add the identifier to filters.
     </rule>
     <rule>Prefer the lightest representation. A top 3 answer should be a compact table/card unless the user explicitly asks for a chart.</rule>
     <rule>PII can be included only when the user explicitly asks for a row-level lookup or personal field.</rule>
@@ -106,7 +106,8 @@ def build_intent_prompt(
   <output_contract>
     {{
       {route_field}"intent_type": "aggregate|lookup|trend|comparison|chart_request|clarification|unsupported",
-      "metric": "revenue|order_count|quantity|avg_order_value|shipping_cost|discount|tax|delivery_delay_days|null",
+      "metric_column": "<real_column_name_from_schema_or_null>",
+      "aggregation": "sum|avg|count|min|max",
       "dimensions": ["column_name"],
       "filters": [{{"column":"column_name","operator":"=|in|contains|between|>=|<=|>|<","value":"string_or_number_or_array"}}],
       "date_grain": "day|week|month|quarter|year|null",
@@ -136,16 +137,18 @@ def build_answer_prompt(
     truncated = row_count > sample_size
     total_xml = xml_escape(compact_json(total_row)) if total_row else ""
     prompt = f"""<answer_instruction>
-  <role>You write concise, business-friendly answers from verified DuckDB results.</role>
+  <role>You write very short, business-friendly answers from verified DuckDB results. The user already sees the full data as a chart or table beneath your answer — your job is to add a one-line headline, NOT to re-enumerate the rows.</role>
   <system_rules>
+    <rule>BREVITY: Default to ONE sentence (max two). Surface the headline only — peak/top item, grand total, notable pattern, or the answer to the specific question. The chart/table renders every row already; do NOT repeat it as a bulleted list.</rule>
+    <rule>NEVER produce long bulleted/numbered lists of rows for breakdown or time-series answers (by month, by category, top N, etc.). One sentence with the highlight is correct. Listing more than 3 rows is almost always wrong.</rule>
+    <rule>Single-value answers (count, sum, average, lookup of one record): give the value in one short sentence. No preamble, no "Here is the answer:".</rule>
+    <rule>Only enumerate rows when ALL of: row_count is 5 or fewer AND the user explicitly asked to "list", "show each", or similar AND there is no chart context. Otherwise summarize.</rule>
     <rule>Answer only from result_sample, row_count, and total_row. Do not invent rows or values. Do not use general knowledge, training data, or external facts — if the question can't be answered from the data shown, say so plainly.</rule>
-    <rule>NEVER compute totals, sums, averages, counts, min, or max by adding or aggregating values across result_sample rows. The sample is at most 50 rows and may be a slice of a larger result. Only quote an aggregate if it appears as a single value in result_sample or total_row (i.e. the SQL itself returned the aggregate).</rule>
-    <rule>If <total_row> is non-empty, that single value IS the authoritative grand total computed by a separate aggregate query over all matching rows; quote it directly when the user asks for a total. Combine it naturally with the per-row breakdown — typically: list the rows, then say "Grand total: $X" using the value from total_row.</rule>
-    <rule>ONLY if the user's question explicitly asks for a total (contains "grand total", "overall total", "total across", "sum across", or similar) AND <total_row> is empty AND the SQL is a per-row breakdown, then add ONE short line at the end: "Tip: ask 'what is the total {{metric}} for ...?' for the exact grand total." Do NOT add this line for normal breakdown questions that don't mention a total. Do NOT fabricate the total by summing the visible rows.</rule>
-    <rule>If row_count is greater than the number of rows shown, say "showing top {{shown}} of {{row_count}}" before the list.</rule>
-    <rule>For multi-row breakdown answers (lists, time-series, per-category, per-product, etc.), end with a single line that gives the grand total of the metric using <total_row> — even if the user did not explicitly ask. Format: "Total {{metric}}: $X". If <total_row> is empty, omit this line — do NOT sum the sample to fabricate a total.</rule>
-    <rule>Do not expose chain-of-thought. Do NOT add a "How I answered" line, a "Methodology" line, or any meta-explanation of how you produced the answer — the user can see the SQL in the result block.</rule>
-    <rule>Do not write code. If the result is empty, say the data returned no matching rows. Do not invent causes beyond the data.</rule>
+    <rule>NEVER compute totals, sums, averages, counts, min, or max by adding or aggregating values across result_sample rows. The sample is at most 50 rows and may be a slice of a larger result. Only quote an aggregate if it appears as a single value in result_sample or total_row.</rule>
+    <rule>If <total_row> is non-empty, that single value IS the authoritative grand total. Mention it inline within your one-sentence summary (e.g. "...total 48,620 orders."). Do NOT add a separate "Total: ..." line.</rule>
+    <rule>If row_count is greater than sample_size, you MAY add "(showing top {{sample_size}} of {{row_count}})" inline — but still keep the answer to one sentence.</rule>
+    <rule>Do not expose chain-of-thought, methodology, or "How I answered" lines. The user sees the SQL in the result block.</rule>
+    <rule>Do not write code. If the result is empty, say "No matching rows." in one short sentence.</rule>
   </system_rules>
   <user_question>{xml_escape(user_question)}</user_question>
   <intent>{xml_escape(compact_json(intent))}</intent>

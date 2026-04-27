@@ -30,7 +30,7 @@ class PromptTests(unittest.TestCase):
             schema_context={"columns": [{"name": "prod_category"}]},
             conversation_summary="",
             user_question='top <3 "products"',
-            char_budget=5000,
+            char_budget=24000,
         )
         self.assertIn("&lt;3", prompt)
         self.assertIn("&quot;products&quot;", prompt)

@@ -59,30 +59,48 @@ class MCPPool:
         self._health_task: asyncio.Task[None] | None = None
 
     async def _open_session(self, url: str) -> tuple[contextlib.AsyncExitStack, ClientSession, list[dict[str, Any]]]:
-        """Open a streamable-HTTP session, falling back to SSE on failure for /sse URLs."""
-        stack = contextlib.AsyncExitStack()
-        try:
+        """Open an MCP session. Dispatches by URL: `/sse` → legacy SSE transport,
+        anything else → Streamable HTTP with SSE as a fallback."""
+        is_sse_url = url.endswith("/sse") or "/sse/" in url
+
+        async def _try(transport: str) -> tuple[contextlib.AsyncExitStack, ClientSession, list[dict[str, Any]]]:
+            stack = contextlib.AsyncExitStack()
             try:
-                streams = await stack.enter_async_context(streamablehttp_client(url))
-            except Exception:
-                # SSE fallback for legacy bridges that only speak SSE
-                if url.endswith("/sse") or "/sse/" in url:
-                    await stack.aclose()
-                    stack = contextlib.AsyncExitStack()
+                if transport == "sse":
                     streams = await stack.enter_async_context(sse_client(url))
                 else:
-                    raise
-            # streamablehttp_client returns 3-tuple (read, write, get_session_id);
-            # sse_client returns 2-tuple. Take the first two either way.
-            read_stream, write_stream = streams[0], streams[1]
-            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-            await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT_SECONDS)
-            tools_resp = await session.list_tools()
-            tools = [_tool_to_dict(t) for t in (tools_resp.tools or [])]
-            return stack, session, tools
-        except Exception:
-            await stack.aclose()
-            raise
+                    streams = await stack.enter_async_context(streamablehttp_client(url))
+                # streamablehttp_client returns 3-tuple (read, write, get_session_id);
+                # sse_client returns 2-tuple. Take the first two either way.
+                read_stream, write_stream = streams[0], streams[1]
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT_SECONDS)
+                tools_resp = await session.list_tools()
+                tools = [_tool_to_dict(t) for t in (tools_resp.tools or [])]
+                return stack, session, tools
+            except BaseException:
+                await stack.aclose()
+                raise
+
+        if is_sse_url:
+            return await _try("sse")
+        try:
+            return await _try("streamable_http")
+        except Exception as exc:
+            # Only fall back when the server appears to reject Streamable HTTP at the
+            # protocol level (405/406/"not supported"). Network errors, timeouts, and
+            # auth failures should propagate so the real cause isn't masked.
+            msg = str(exc).lower()
+            protocol_rejection = (
+                isinstance(exc, NotImplementedError)
+                or "405" in msg
+                or "406" in msg
+                or "method not allowed" in msg
+                or "not supported" in msg
+            )
+            if not protocol_rejection:
+                raise
+            return await _try("sse")
 
     async def connect(self, url: str, name: str | None = None, *, connector_id: str | None = None) -> str:
         cid = connector_id or _generate_id()
@@ -126,11 +144,10 @@ class MCPPool:
         state = self.connectors.get(connector_id)
         if not state or state.status != "connected" or not state._session:
             raise RuntimeError(f"Connector {connector_id} is not connected (status={state.status if state else 'missing'})")
-        async with state._lock:
-            return await asyncio.wait_for(
-                state._session.call_tool(tool_name, arguments=arguments),
-                timeout=TOOL_CALL_TIMEOUT_SECONDS,
-            )
+        return await asyncio.wait_for(
+            state._session.call_tool(tool_name, arguments=arguments),
+            timeout=TOOL_CALL_TIMEOUT_SECONDS,
+        )
 
     def list_status(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -179,8 +196,8 @@ class MCPPool:
             name = entry.get("name") or entry.get("id") or url
             if not url:
                 continue
-            # Skip if already connected by name match
-            if any(c.name == name for c in self.connectors.values()):
+            # Skip if a connector for this URL is already in the pool — name is a display label, URL is identity.
+            if any(c.url == url for c in self.connectors.values()):
                 continue
             await self.connect(url, name)
 

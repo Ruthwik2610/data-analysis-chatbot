@@ -55,10 +55,11 @@ class Storage:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as con:
             con.executescript(SCHEMA)
+            con.execute("PRAGMA journal_mode=WAL")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
-        con = sqlite3.connect(self.db_path)
+        con = sqlite3.connect(self.db_path, timeout=10)
         con.execute("PRAGMA foreign_keys = ON")
         con.row_factory = sqlite3.Row
         try:

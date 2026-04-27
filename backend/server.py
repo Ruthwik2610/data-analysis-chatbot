@@ -46,8 +46,9 @@ from src.query_engine import (
     build_query_plan,
     build_total_plan,
     heuristic_intent,
+    is_underspecified,
+    underspecified_clarification,
     validate_readonly_sql,
-    wants_grand_total,
 )
 from src.utils import conversation_summary, params_key
 from src.visualization import choose_visualization, deterministic_summary
@@ -61,7 +62,26 @@ DB = Storage(CONFIG.cache_dir / "app.sqlite")
 SOURCES: dict[str, DataSource] = {}
 UPLOAD_DIR = CONFIG.cache_dir / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-PENDING: dict[str, dict[str, Any]] = {}  # upload_id -> { path, kind, file_name, ... }
+PENDING: dict[str, dict[str, Any]] = {}  # upload_id -> { path, kind, file_name, created_at, ... }
+PENDING_TTL_SECONDS = 1800
+
+
+def _cleanup_pending(max_age_seconds: int = PENDING_TTL_SECONDS) -> None:
+    cutoff = time.time() - max_age_seconds
+    stale = [uid for uid, rec in list(PENDING.items()) if rec.get("created_at", 0) < cutoff]
+    for uid in stale:
+        rec = PENDING.pop(uid, {})
+        path = rec.get("path")
+        if not path:
+            continue
+        try:
+            p = Path(path)
+            if p.exists():
+                p.unlink(missing_ok=True)
+            if p.parent.exists() and not any(p.parent.iterdir()):
+                p.parent.rmdir()
+        except Exception:
+            pass
 
 API_KEY = os.getenv("API_KEY", "").strip()
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv(
@@ -78,6 +98,7 @@ if not API_KEY:
 # Singleton — re-creating per request reloads the genai client and wastes time.
 ROUTER = GeminiRouter(
     api_key=CONFIG.gemini_api_key,
+    groq_api_key=CONFIG.groq_api_key,
     models=ModelChoice(CONFIG.default_model, CONFIG.escalation_model, CONFIG.fallback_model),
     logger=LOGGERS["llm"],
     char_budget=CONFIG.prompt_char_budget,
@@ -371,6 +392,7 @@ def _save_upload_sync(file_obj: Any, dest: Path) -> None:
 
 @app.post("/sources/upload")
 async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
+    _cleanup_pending()
     if not file.filename:
         raise HTTPException(status_code=400, detail="File is required")
     upload_id = uuid.uuid4().hex[:10]
@@ -388,7 +410,7 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
         if suffix in {".xlsx", ".xls"}:
             sheets = await asyncio.to_thread(_list_excel_sheets, dest)
             if len(sheets) > 1:
-                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "sheets": sheets, "kind": "xlsx"}
+                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "sheets": sheets, "kind": "xlsx", "created_at": time.time()}
                 return {"pending": {
                     "kind": "sheet_pick",
                     "upload_id": upload_id,
@@ -403,7 +425,7 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
         if suffix in {".duckdb", ".db"}:
             tables = await asyncio.to_thread(_list_duckdb_tables, dest)
             if len(tables) > 1:
-                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "tables": tables, "kind": "duckdb"}
+                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "tables": tables, "kind": "duckdb", "created_at": time.time()}
                 return {"pending": {
                     "kind": "table_pick",
                     "upload_id": upload_id,
@@ -417,7 +439,7 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
 
         if suffix == ".csv":
             if size_mb > 100:
-                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "size_mb": size_mb, "kind": "csv"}
+                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "size_mb": size_mb, "kind": "csv", "created_at": time.time()}
                 return {"pending": {
                     "kind": "ingest_pick",
                     "upload_id": upload_id,
@@ -543,6 +565,7 @@ def list_mcp_connectors() -> list[dict[str, Any]]:
 async def add_mcp_connector(body: MCPConnect) -> dict[str, Any]:
     if not body.url.strip():
         raise HTTPException(status_code=400, detail="url is required")
+    _assert_public_url(body.url.strip())
     cid = await get_pool().connect(body.url.strip(), body.name or body.url.strip())
     state = get_pool().connectors.get(cid)
     if state and state.status == "error":
@@ -563,6 +586,7 @@ async def update_mcp_connector(connector_id: str, body: MCPUpdate) -> dict[str, 
     if not state:
         raise HTTPException(status_code=404, detail="Connector not found")
     if body.url and body.url.strip() and body.url.strip() != state.url:
+        _assert_public_url(body.url.strip())
         await pool.connect(body.url.strip(), body.name or state.name, connector_id=connector_id)
         state = pool.connectors[connector_id]
         if state.status == "error":
@@ -864,8 +888,15 @@ async def query(body: QueryRequest):
                 notices.append({"from": from_model, "to": to_model, "reason": reason})
 
         if source is None:
-            async for ev in _run_mcp_agent(chat_id, question, history, request_id):
-                yield ev
+            try:
+                async for ev in _run_mcp_agent(chat_id, question, history, request_id):
+                    yield ev
+            except Exception as exc:
+                log_event(LOGGERS["errors"], "mcp_agent_error", request_id=request_id, error=str(exc))
+                err_msg = "An unexpected error occurred while contacting the MCP source."
+                DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
+                yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+                yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
             return
 
         try:
@@ -899,6 +930,13 @@ async def query(body: QueryRequest):
                 msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used})
                 yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
                 yield {"event": "done", "data": json.dumps({"message_id": msg["id"]})}
+                return
+
+            if is_underspecified(intent, question, source.allowed_columns):
+                content = underspecified_clarification(source.allowed_columns, active_row["name"])
+                msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used})
+                yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
+                yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
                 return
 
             if intent.get("intent_type") == "unsupported":
@@ -954,7 +992,7 @@ async def query(body: QueryRequest):
                 and (intent.get("dimensions") or len(df) > 1)
             ):
                 try:
-                    total_plan = build_total_plan(intent, source.allowed_columns)
+                    total_plan = build_total_plan(intent, source.allowed_columns, question=question)
                     validate_readonly_sql(total_plan.sql)
                     total_df, total_ms = await loop.run_in_executor(None, lambda: _run_query(total_plan, source))
                     if not total_df.empty:
@@ -981,6 +1019,7 @@ async def query(body: QueryRequest):
                         sql=plan.sql,
                         total_row=total_row,
                         on_fallback=collect_fallback,
+                        prefer_model=model_used,
                     )
                     while True:
                         chunk = await loop.run_in_executor(None, lambda it=chunks_iter: next(it, None))
