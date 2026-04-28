@@ -1,8 +1,6 @@
 # Data Analysis Chatbot
 
-A local Streamlit chatbot for querying `/Users/rajasekharbandreddy/Downloads/sourcedata.csv` with high accuracy and low token use.
-
-The app uses Gemini for intent understanding and concise answer wording, while DuckDB performs every calculation locally. It builds a persistent cache on first run so the 228 MB CSV does not need to be reparsed for every chat turn.
+A local FastAPI + Next.js chatbot for asking plain-English questions over uploaded files, API responses, and connected MCP data bridges. DuckDB performs the tabular work locally; OpenRouter-backed models handle intent parsing, multi-step planning, and concise answer wording.
 
 ## Setup
 
@@ -13,44 +11,100 @@ uv pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and set `GEMINI_API_KEY`. The app also works in a limited offline heuristic mode without the key.
+Edit `.env` and set:
 
-Default model routing is Gemini 3 Flash first, then Gemini 2.5 Flash if the Gemini 3 call fails:
+```bash
+OPENROUTER_API_KEY=your_openrouter_api_key
+OPENROUTER_PROVIDER_ORDER=DeepSeek
+MODEL=openrouter/deepseek/deepseek-v4-pro
+AGENT_MODEL=openrouter/deepseek/deepseek-v4-pro
+```
 
-- `GEMINI_DEFAULT_MODEL=gemini-3-flash-preview`
-- `GEMINI_FALLBACK_MODEL=gemini-2.5-flash`
+`API_KEY` is optional for local-only use. If you set it, set the same value in the frontend as `NEXT_PUBLIC_API_KEY`.
 
-## Run
+## Run Locally
+
+Backend:
 
 ```bash
 source .venv/bin/activate
-streamlit run app.py
+uvicorn backend.server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-The first run creates `.cache/chatbot/orders.duckdb`. Rebuild happens only when the source CSV path, size, mtime, schema hash, or cache version changes.
+Frontend:
 
-## Input Routes
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-The sidebar supports four input routes:
+Open `http://localhost:3000`.
 
-- `Upload`: upload CSV, XLSX, XLS, JSON, DuckDB, or DB files from the main chat surface.
-- `Connector`: connect to an API endpoint, an MCP/exported file path, or a local terminal command that returns JSON or CSV.
-- `Local path`: point to a file available on this machine.
+## Sources
 
-Each source can use either `Analyze directly` for in-memory querying or `Convert to SQL cache` to materialize the source into a local DuckDB table. Uploaded DuckDB files are queried directly.
+The app supports:
+
+- CSV uploads
+- Excel uploads (`.xlsx`, `.xls`)
+- JSON uploads
+- DuckDB database files
+- JSON APIs with optional bearer auth
+- MCP bridges, such as BigQuery/Salesforce-style tool servers
+
+Multiple sources can be selected in the sidebar. Single-source questions use the deterministic DuckDB query path. Multi-source or MCP-mixed questions use a per-chat DuckDB workspace so results can be joined, filtered, aggregated, and charted locally.
+
+## Multi-Source Querying
+
+For cross-source questions, select more than one source in the sidebar, then ask a question like:
+
+- `Join customers.csv with orders.csv and show revenue by customer segment`
+- `Compare uploaded sales with the API forecast by month`
+- `Use the connected warehouse source and my CSV to find missing customer IDs`
+
+Uploaded/API sources are copied into chat-scoped DuckDB workspace tables. MCP tool results are fetched live, and tabular results are cached into the same workspace for that chat so follow-up joins are faster.
+
+When matching columns are obvious, the agent can join directly. If a join relationship is unclear, it should ask which columns relate before guessing.
+
+## MCP Bridges
+
+Use the plug button, open the `MCP Bridge` tab, and enter a bridge URL such as:
+
+```text
+https://example.com/mcp
+```
+
+Connected bridges appear in the source list as `mcp`. Select it to ask MCP-only questions, or select it alongside uploaded/API sources for mixed queries.
+
+Troubleshooting:
+
+- If a bridge shows `error`, use the reconnect button in the connector popover.
+- If a question says no tools are available, confirm the bridge is connected and exposes tools.
+- If no chart/table appears, the tool may have returned text instead of tabular JSON/CSV.
+- If the model is unavailable, MCP and multi-source agent queries cannot run until OpenRouter is reachable.
 
 ## Safety And Accuracy
 
-- Raw CSV rows are never sent to Gemini.
-- Dynamic prompt content is XML-escaped.
-- Gemini must return structured JSON intent.
-- DuckDB executes validated read-only SQL.
-- Raw errors are logged in `logs/` and replaced with safe user-facing messages.
-- A "How I answered" panel shows the model, query ID, filters, display choice, and optional SQL.
+- Raw rows are queried locally with DuckDB wherever possible.
+- Prompt content is XML-escaped.
+- Generated SQL is constrained to read-only `SELECT` statements.
+- Upload filenames are normalized before writing to disk.
+- API and MCP bridge URLs reject private/internal addresses by default; set `ALLOW_PRIVATE_API_URLS=1` only for trusted local/internal development.
+- The “How I answered” panel shows source, model, SQL, display choice, and query details when available.
 
-## Visualization Defaults
+## Verification
 
-- Top 3 style questions render as compact tables/cards by default.
-- Bar charts are used for larger rankings.
-- Line charts are used for time trends.
-- Pie charts are used for share or distribution questions with a small category count.
+Backend:
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -s tests -p 'test*.py' -v
+python -m pytest -q
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm run build
+```

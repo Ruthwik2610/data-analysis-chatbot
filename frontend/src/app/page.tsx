@@ -18,6 +18,7 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatTitle, setChatTitle] = useState("New chat");
   const [loading, setLoading] = useState(false);
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -43,7 +44,24 @@ export default function Home() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chats]);
 
-  const activeSource = sources.find((s) => s.active);
+  useEffect(() => {
+    setSelectedSourceIds((prev) => {
+      const known = new Set(sources.map((s) => s.id));
+      const kept = prev.filter((id) => known.has(id));
+      if (kept.length > 0) return kept;
+      const fallback = sources.find((s) => s.active) || sources.find((s) => s.kind === "mcp");
+      return fallback ? [fallback.id] : [];
+    });
+  }, [sources]);
+
+  useEffect(() => {
+    const handler = () => refreshSources();
+    window.addEventListener("data-chat:sources-changed", handler as EventListener);
+    return () => window.removeEventListener("data-chat:sources-changed", handler as EventListener);
+  }, [refreshSources]);
+
+  const selectedSources = sources.filter((s) => selectedSourceIds.includes(s.id));
+  const activeSource = selectedSources[0] || sources.find((s) => s.active);
 
   const addMessage = useCallback((m: Message) => setMessages((prev) => [...prev, m]), []);
   const updateMessage = useCallback((id: string, patch: Partial<Message>) => {
@@ -118,6 +136,7 @@ export default function Home() {
             });
           }
         } else if ("id" in res && res.id) {
+          setSelectedSourceIds((ids) => Array.from(new Set([...ids, res.id as string])));
           updateMessage(placeholderId, {
             thinking: null,
             progress: null,
@@ -156,6 +175,7 @@ export default function Home() {
           updateMessage(messageId, { resolved: true, content: `${msg.content}\n\nConnecting…`, thinking: "Connecting" });
           try {
             const src = await api.attachAPI(pending.args.url, null, false);
+            setSelectedSourceIds((ids) => Array.from(new Set([...ids, src.id])));
             updateMessage(messageId, {
               thinking: null,
               content: `Connected to **${src.name}** — ${src.rows.toLocaleString()} rows. Ask away.`,
@@ -175,6 +195,7 @@ export default function Home() {
       updateMessage(messageId, { resolved: true, thinking: "Loading", content: msg.content });
       try {
         const src = await api.resolvePending(pending.args.upload_id, value);
+        setSelectedSourceIds((ids) => Array.from(new Set([...ids, src.id])));
         updateMessage(messageId, {
           thinking: null,
           content: `Got **${src.name}** — ${src.rows.toLocaleString()} rows. Ask me anything about it.`,
@@ -193,7 +214,7 @@ export default function Home() {
       const urlMatch = question.match(URL_RE);
 
       // URL with no active source → propose connect
-      if (urlMatch && !activeSource) {
+      if (urlMatch && selectedSourceIds.length === 0) {
         const url = urlMatch[0];
         addMessage({ id: `local_u_${Date.now()}`, role: "user", content: question });
         addMessage({
@@ -214,12 +235,12 @@ export default function Home() {
       }
 
       // Plain question — needs an active source
-      if (!activeSource) {
+      if (selectedSourceIds.length === 0) {
         addMessage({ id: `local_u_${Date.now()}`, role: "user", content: question });
         addMessage({
           id: `local_a_${Date.now() + 1}`,
           role: "assistant",
-          content: "I'll need a source first. Drop a file or paste a URL.",
+          content: "I'll need a source first. Drop a file, paste a URL, or connect an MCP bridge.",
         });
         return;
       }
@@ -235,7 +256,7 @@ export default function Home() {
 
       let fullText = "";
       try {
-        for await (const ev of streamQuery({ chat_id: currentChatId, question }, queryAbortRef.current.signal)) {
+        for await (const ev of streamQuery({ chat_id: currentChatId, question, source_ids: selectedSourceIds }, queryAbortRef.current.signal)) {
           // flushSync forces React to commit before the next await — without this,
           // updates inside async iteration get batched until the loop finishes,
           // and the user sees "Thinking…" until the entire stream completes.
@@ -282,7 +303,7 @@ export default function Home() {
         queryAbortRef.current = null;
       }
     },
-    [activeSource, currentChatId, addMessage, updateMessage, refreshChats],
+    [selectedSourceIds, currentChatId, addMessage, updateMessage, refreshChats],
   );
 
   const handleStop = useCallback(() => {
@@ -334,17 +355,24 @@ export default function Home() {
     refreshChats();
   }, [currentChatId, refreshChats, abortInFlight]);
 
-  const handleActivateSource = useCallback(async (id: string) => {
-    await api.activateSource(id);
-    refreshSources();
+  const handleToggleSource = useCallback(async (id: string) => {
+    setSelectedSourceIds((prev) => (
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    ));
+    if (id !== "mcp") {
+      await api.activateSource(id).catch(() => {});
+      refreshSources();
+    }
   }, [refreshSources]);
 
   const handleDeleteSource = useCallback(async (id: string) => {
     await api.deleteSource(id);
+    setSelectedSourceIds((prev) => prev.filter((x) => x !== id));
     refreshSources();
   }, [refreshSources]);
 
   const handleAttachedFromInput = useCallback((s: Source) => {
+    setSelectedSourceIds((ids) => Array.from(new Set([...ids, s.id])));
     addMessage({
       id: `local_${Date.now()}`,
       role: "assistant",
@@ -380,10 +408,11 @@ export default function Home() {
         chats={chats}
         currentChatId={currentChatId}
         sources={sources}
+        selectedSourceIds={selectedSourceIds}
         onNewChat={handleNewChat}
         onSelectChat={handleSelectChat}
         onDeleteChat={handleDeleteChat}
-        onActivateSource={handleActivateSource}
+        onToggleSource={handleToggleSource}
         onDeleteSource={handleDeleteSource}
       />
       <main className="flex flex-col flex-1 min-w-0" style={{ background: "var(--color-background-primary)" }}>
@@ -402,7 +431,7 @@ export default function Home() {
           onAttached={handleAttachedFromInput}
           loading={loading}
           disabled={false}
-          placeholder={activeSource ? "Ask about your data, or paste a URL…" : "Drop a file, paste a URL, or describe what you want…"}
+          placeholder={selectedSources.length ? "Ask across the selected sources, or paste a URL…" : "Drop a file, paste a URL, or connect an MCP bridge…"}
         />
       </main>
     </div>

@@ -8,10 +8,11 @@ interface SidebarProps {
   chats: ChatSummary[];
   currentChatId: string | null;
   sources: Source[];
+  selectedSourceIds: string[];
   onNewChat: () => void;
   onSelectChat: (id: string) => void;
   onDeleteChat: (id: string) => void;
-  onActivateSource: (id: string) => void;
+  onToggleSource: (id: string) => void;
   onDeleteSource: (id: string) => void;
 }
 
@@ -22,6 +23,7 @@ const KIND_COLOR: Record<string, string> = {
   duckdb: "var(--color-text-warning)",
   api: "var(--color-text-info)",
   mcp: "var(--color-text-warning)",
+  multi: "var(--color-text-warning)",
 };
 
 export function Sidebar(p: SidebarProps) {
@@ -102,7 +104,8 @@ export function Sidebar(p: SidebarProps) {
           <KbRow
             key={src.id}
             source={src}
-            onActivate={() => p.onActivateSource(src.id)}
+            selected={p.selectedSourceIds.includes(src.id)}
+            onToggle={() => p.onToggleSource(src.id)}
             onDelete={() => p.onDeleteSource(src.id)}
           />
         ))}
@@ -162,38 +165,43 @@ function ChatRow({
 
 function KbRow({
   source,
-  onActivate,
+  selected,
+  onToggle,
   onDelete,
 }: {
   source: Source;
-  onActivate: () => void;
+  selected: boolean;
+  onToggle: () => void;
   onDelete: () => void;
 }) {
   return (
     <div className="group flex items-center gap-1.5 py-[5px]">
       <button
-        onClick={onActivate}
+        onClick={onToggle}
         className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-[12px]"
         style={{ color: "var(--color-text-secondary)" }}
-        title={`${source.kind.toUpperCase()} · ${source.rows.toLocaleString()} rows`}
+        title={`${source.kind.toUpperCase()} · ${source.rows.toLocaleString()} ${source.kind === "mcp" ? "tools" : "rows"}`}
       >
         <div
-          className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+          className="w-3 h-3 rounded-[4px] flex-shrink-0"
           style={{
-            background: source.active ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "var(--color-border-secondary)",
+            background: selected ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "transparent",
+            border: `1px solid ${selected ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "var(--color-border-secondary)"}`,
           }}
         />
-        <span className="truncate" style={{ color: source.active ? "var(--color-text-primary)" : undefined }}>
+        <span className="truncate" style={{ color: selected ? "var(--color-text-primary)" : undefined }}>
           {source.name}
         </span>
       </button>
-      <button
-        onClick={onDelete}
-        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/5"
-        title="Remove"
-      >
-        <X size={11} stroke="var(--color-text-tertiary)" />
-      </button>
+      {source.kind !== "mcp" && (
+        <button
+          onClick={onDelete}
+          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/5"
+          title="Remove"
+        >
+          <X size={11} stroke="var(--color-text-tertiary)" />
+        </button>
+      )}
     </div>
   );
 }

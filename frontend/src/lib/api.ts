@@ -98,7 +98,7 @@ export const api = {
 };
 
 export async function* streamQuery(
-  body: { chat_id: string | null; question: string },
+  body: { chat_id: string | null; question: string; source_ids?: string[] },
   signal?: AbortSignal,
 ): AsyncGenerator<SSEEvent> {
   const res = await fetch(`${BASE}/query`, {

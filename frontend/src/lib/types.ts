@@ -1,4 +1,4 @@
-export type SourceKind = "csv" | "xlsx" | "duckdb" | "api" | "json" | "mcp";
+export type SourceKind = "csv" | "xlsx" | "duckdb" | "api" | "json" | "mcp" | "multi";
 
 export interface Source {
   id: string;
@@ -66,7 +66,7 @@ export type Message =
       streaming?: boolean;
       thinking?: string | null;
       progress?: number | null;
-      source?: { id: string; name: string; kind: string; rows: number };
+      source?: { id: string | null; name: string; kind: string; rows: number };
       result?: ResultPayload;
       error?: boolean;
       pending?: Pending;
@@ -75,7 +75,7 @@ export type Message =
     };
 
 export type SSEEvent =
-  | { event: "meta"; data: { chat_id: string; source: { id: string; name: string; kind: string; rows: number } } }
+  | { event: "meta"; data: { chat_id: string; source: { id: string | null; name: string; kind: string; rows: number } } }
   | { event: "thinking"; data: { step: string } }
   | { event: "result"; data: ResultPayload }
   | { event: "text"; data: { delta: string } }

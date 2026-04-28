@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import socket
 import sys
@@ -48,6 +49,7 @@ from src.query_engine import (
     build_total_plan,
     heuristic_intent,
     is_underspecified,
+    quote_ident,
     underspecified_clarification,
     validate_readonly_sql,
 )
@@ -139,7 +141,7 @@ app.add_middleware(
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
     # CORS preflight is handled by CORSMiddleware before this runs.
-    if not API_KEY or request.url.path in PUBLIC_PATHS:
+    if request.method == "OPTIONS" or not API_KEY or request.url.path in PUBLIC_PATHS:
         return await call_next(request)
     if request.headers.get("authorization") != f"Bearer {API_KEY}":
         return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
@@ -148,6 +150,78 @@ async def api_key_middleware(request: Request, call_next):
 
 def _make_id(prefix: str = "src") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+def _safe_upload_filename(filename: str) -> str:
+    name = Path(filename or "").name.strip()
+    if not name:
+        raise ValueError("Uploaded file name is empty")
+    if name in {".", ".."}:
+        raise ValueError("Uploaded file name is invalid")
+    return name
+
+
+def _workspace_table_name(source_id: str, display_name: str) -> str:
+    stem = Path(display_name or "").stem
+    slug = re.sub(r"[^0-9a-zA-Z]+", "_", stem).strip("_").lower()
+    if not slug:
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", source_id).strip("_").lower() or "source"
+    if not slug.startswith("src_"):
+        slug = f"src_{slug}"
+    return slug[:48]
+
+
+def _column_type_family(col_type: Any) -> str:
+    text = str(col_type or "").lower()
+    if any(t in text for t in ("int", "double", "float", "decimal", "numeric", "real")):
+        return "number"
+    if any(t in text for t in ("date", "time")):
+        return "time"
+    return "text"
+
+
+def _join_key_score(name: str) -> int:
+    lowered = name.lower()
+    score = 0
+    if lowered == "id" or lowered.endswith("_id") or lowered.endswith("_key"):
+        score += 4
+    if any(term in lowered for term in ("customer", "cust", "user", "account", "order", "product", "prod", "sku")):
+        score += 2
+    return score
+
+
+def _detect_join_candidates(source_summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for i, left in enumerate(source_summaries):
+        for right in source_summaries[i + 1:]:
+            for lcol in left.get("columns", []):
+                lname = lcol.get("name")
+                if not lname:
+                    continue
+                lfamily = _column_type_family(lcol.get("type"))
+                for rcol in right.get("columns", []):
+                    rname = rcol.get("name")
+                    if not rname:
+                        continue
+                    if lname != rname:
+                        continue
+                    if lfamily != _column_type_family(rcol.get("type")):
+                        continue
+                    score = _join_key_score(lname)
+                    if score <= 0:
+                        continue
+                    candidates.append({
+                        "left_source": left.get("id"),
+                        "left_name": left.get("name"),
+                        "left_table": left.get("table"),
+                        "left_column": lname,
+                        "right_source": right.get("id"),
+                        "right_name": right.get("name"),
+                        "right_table": right.get("table"),
+                        "right_column": rname,
+                        "confidence": min(0.95, 0.55 + score * 0.1),
+                    })
+    return sorted(candidates, key=lambda c: c["confidence"], reverse=True)
 
 
 def _assert_public_url(url: str) -> None:
@@ -243,6 +317,22 @@ def _serialize_source(source_id: str, source: DataSource, kind: str, active: boo
     }
 
 
+def _serialize_mcp_source() -> dict[str, Any] | None:
+    connected = [s for s in get_pool().connectors.values() if s.status == "connected"]
+    if not connected:
+        return None
+    tool_count = sum(len(s.tools) for s in connected)
+    return {
+        "id": "mcp",
+        "name": ", ".join(s.name for s in connected),
+        "kind": "mcp",
+        "rows": tool_count,
+        "columns": [],
+        "active": False,
+        "loaded": True,
+    }
+
+
 # -- models ----------------------------------------------------------------
 class AttachCSVPath(BaseModel):
     path: str
@@ -286,6 +376,7 @@ class MCPUpdate(BaseModel):
 class QueryRequest(BaseModel):
     chat_id: str | None = None
     question: str
+    source_ids: list[str] | None = None
 
 
 # -- health ----------------------------------------------------------------
@@ -308,6 +399,9 @@ def list_sources() -> list[dict[str, Any]]:
             "active": bool(row["active"]),
             "loaded": row["id"] in SOURCES,
         })
+    mcp_source = _serialize_mcp_source()
+    if mcp_source:
+        out.insert(0, mcp_source)
     return out
 
 
@@ -397,15 +491,19 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
     _cleanup_pending()
     if not file.filename:
         raise HTTPException(status_code=400, detail="File is required")
+    try:
+        safe_name = _safe_upload_filename(file.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     upload_id = uuid.uuid4().hex[:10]
     upload_dir = UPLOAD_DIR / upload_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    dest = upload_dir / file.filename
+    dest = upload_dir / safe_name
     # Stream the upload to disk on a worker thread so the event loop stays responsive.
     await asyncio.to_thread(_save_upload_sync, file.file, dest)
 
     suffix = dest.suffix.lower()
-    file_name = file.filename
+    file_name = safe_name
     size_mb = round(dest.stat().st_size / (1024 * 1024), 1)
 
     try:
@@ -578,6 +676,7 @@ async def add_mcp_connector(body: MCPConnect) -> dict[str, Any]:
         "url": body.url,
         "status": state.status if state else "error",
         "tools": state.tools if state and state.status == "connected" else [],
+        "last_error": state.last_error if state else "Connector state was not created",
     }
 
 
@@ -587,16 +686,18 @@ async def update_mcp_connector(connector_id: str, body: MCPUpdate) -> dict[str, 
     state = pool.connectors.get(connector_id)
     if not state:
         raise HTTPException(status_code=404, detail="Connector not found")
-    if body.url and body.url.strip() and body.url.strip() != state.url:
-        _assert_public_url(body.url.strip())
-        await pool.connect(body.url.strip(), body.name or state.name, connector_id=connector_id)
+    requested_url = body.url.strip() if body.url and body.url.strip() else state.url
+    requested_name = body.name or state.name
+    if body.url is not None:
+        _assert_public_url(requested_url)
+        await pool.connect(requested_url, requested_name, connector_id=connector_id)
         state = pool.connectors[connector_id]
         if state.status == "error":
             raise HTTPException(status_code=400, detail=state.last_error or "Reconnect failed")
     elif body.name:
         await pool.rename(connector_id, body.name)
     state = pool.connectors[connector_id]
-    return {"id": state.id, "name": state.name, "url": state.url, "status": state.status, "tools": state.tools}
+    return {"id": state.id, "name": state.name, "url": state.url, "status": state.status, "tools": state.tools, "last_error": state.last_error}
 
 
 @app.delete("/mcp/connectors/{connector_id}")
@@ -690,6 +791,119 @@ def _run_query(plan, source: DataSource) -> tuple[pd.DataFrame, int]:
         raise RuntimeError("No executable source")
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     return df, elapsed_ms
+
+
+def _table_schema_from_duckdb(con: Any, table_name: str) -> list[dict[str, str]]:
+    rows = con.execute(f"PRAGMA table_info({quote_ident(table_name)})").fetchall()
+    return [{"name": str(r[1]), "type": str(r[2])} for r in rows]
+
+
+def _prepare_workspace_sync(chat_id: str, selected: list[tuple[dict[str, Any], DataSource]]) -> list[dict[str, Any]]:
+    import duckdb
+
+    work_dir = CONFIG.cache_dir / "workspaces"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    work_path = work_dir / f"{chat_id}.duckdb"
+    con = duckdb.connect(str(work_path))
+    summaries: list[dict[str, Any]] = []
+    used_tables: set[str] = set()
+    try:
+        for idx, (row, source) in enumerate(selected):
+            base_table = _workspace_table_name(row["id"], row["name"])
+            table = base_table
+            suffix = 2
+            while table in used_tables:
+                table = f"{base_table[:42]}_{suffix}"
+                suffix += 1
+            used_tables.add(table)
+
+            if source.db_path:
+                alias = f"db_{idx}"
+                db_path = str(source.db_path).replace("'", "''")
+                with contextlib.suppress(Exception):
+                    con.execute(f"DETACH {quote_ident(alias)}")
+                con.execute(f"ATTACH '{db_path}' AS {quote_ident(alias)} (READ_ONLY)")
+                con.execute(
+                    f"CREATE OR REPLACE TABLE {quote_ident(table)} AS "
+                    f"SELECT * FROM {quote_ident(alias)}.{quote_ident(source.table_name)}"
+                )
+            elif source.dataframe is not None:
+                temp_name = f"df_{idx}"
+                con.register(temp_name, source.dataframe)
+                con.execute(f"CREATE OR REPLACE TABLE {quote_ident(table)} AS SELECT * FROM {quote_ident(temp_name)}")
+                con.unregister(temp_name)
+            else:
+                continue
+
+            columns = _table_schema_from_duckdb(con, table)
+            summaries.append({
+                "id": row["id"],
+                "name": row["name"],
+                "kind": row["kind"],
+                "table": table,
+                "rows": source.row_count,
+                "columns": columns,
+            })
+    finally:
+        con.close()
+    return summaries
+
+
+def _run_workspace_sql_sync(chat_id: str, sql: str) -> tuple[pd.DataFrame, int]:
+    import duckdb
+
+    work_path = CONFIG.cache_dir / "workspaces" / f"{chat_id}.duckdb"
+    start = time.perf_counter()
+    con = duckdb.connect(str(work_path), read_only=True)
+    try:
+        df = con.execute(sql).fetchdf()
+    finally:
+        con.close()
+    return df, int((time.perf_counter() - start) * 1000)
+
+
+def _materialize_workspace_df_sync(chat_id: str, table_name: str, df: pd.DataFrame) -> dict[str, Any]:
+    import duckdb
+
+    work_path = CONFIG.cache_dir / "workspaces" / f"{chat_id}.duckdb"
+    con = duckdb.connect(str(work_path))
+    try:
+        con.register("mcp_df", df)
+        con.execute(f"CREATE OR REPLACE TABLE {quote_ident(table_name)} AS SELECT * FROM mcp_df")
+        con.unregister("mcp_df")
+        columns = _table_schema_from_duckdb(con, table_name)
+    finally:
+        con.close()
+    return {"table": table_name, "rows": int(len(df)), "columns": columns}
+
+
+def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary: str, join_candidates: list[dict[str, Any]]) -> str:
+    source_lines: list[str] = []
+    for src in source_summaries:
+        cols = ", ".join(f"{c['name']}:{c['type']}" for c in src.get("columns", [])[:40])
+        source_lines.append(f"- {src['name']} as table {src['table']} ({src['rows']} rows): {cols}")
+    join_lines = [
+        f"- {c['left_table']}.{c['left_column']} = {c['right_table']}.{c['right_column']} (confidence {c['confidence']:.2f})"
+        for c in join_candidates[:10]
+    ]
+    return f"""You are a multi-source data analyst. Use tools to retrieve data and run DuckDB SQL.
+
+## Local workspace tables
+{chr(10).join(source_lines) if source_lines else "- No local tables loaded yet. Use connected tools to fetch data first."}
+
+## Suggested join keys
+{chr(10).join(join_lines) if join_lines else "- No confident join keys detected. If a join is needed, ask the user which columns relate before guessing."}
+
+## Connected live sources
+{connector_summary or "(no MCP bridges connected)"}
+
+## Rules
+- For local workspace data, call run_sql with SELECT statements against the table names above.
+- For live MCP/API-style data, call the relevant tool first. Tabular tool results are cached into workspace tables and the tool response will name the new table.
+- When a question needs a join and the relationship is unclear, ask one short clarification question instead of guessing.
+- Never mention MCP, tool internals, or function calls in the final answer unless the user asks.
+- Keep final answers to one short sentence. The result table/chart appears below your answer.
+"""
 
 
 def _build_mcp_summary(pool) -> str:
@@ -950,6 +1164,155 @@ async def _run_local_agent(
     yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
 
 
+async def _run_multi_source_agent(
+    chat_id: str,
+    question: str,
+    selected: list[tuple[dict[str, Any], DataSource]],
+    history: list[dict[str, Any]],
+    request_id: str,
+) -> AsyncIterator[dict[str, Any]]:
+    pool = get_pool()
+    specs, routing = pool.aggregate_tools()
+    loop = asyncio.get_running_loop()
+    source_summaries = await loop.run_in_executor(None, lambda: _prepare_workspace_sync(chat_id, selected))
+    join_candidates = _detect_join_candidates(source_summaries)
+
+    connector_summary_lines: list[str] = []
+    name_lookup: dict[str, str] = {}
+    by_connector: dict[str, list[str]] = {}
+    for s in pool.connectors.values():
+        if s.status == "connected":
+            name_lookup[s.id] = s.name
+            by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
+    for cid, tnames in by_connector.items():
+        connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
+    connector_summary = "\n\n".join(connector_summary_lines)
+
+    tool_specs = [{
+        "name": "run_sql",
+        "description": "Execute a read-only DuckDB SELECT against the per-chat workspace tables. Use this for joins, aggregation, filtering, and final result shaping.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "DuckDB SELECT query against workspace tables."}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }] + specs
+
+    if len(tool_specs) == 1 and not source_summaries:
+        msg_text = "I don't have any usable sources yet. Attach a file, connect an API, or add an MCP bridge first."
+        msg = DB.add_message(chat_id, "assistant", msg_text, payload={"kind": "error"})
+        yield {"event": "text", "data": json.dumps({"delta": msg_text})}
+        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+        return
+
+    collected: list[tuple[str, pd.DataFrame, int]] = []
+    materialized_count = 0
+
+    async def on_tool_call(tool_name: str, args: dict[str, Any]):
+        nonlocal materialized_count
+        if tool_name == "run_sql":
+            sql = (args.get("query") or "").strip()
+            try:
+                validate_readonly_sql(sql)
+            except Exception as exc:
+                return "", f"SQL rejected: {exc}", None
+            try:
+                df, elapsed_ms = await loop.run_in_executor(None, lambda: _run_workspace_sql_sync(chat_id, sql))
+            except Exception as exc:
+                return "", str(exc), None
+            collected.append((sql, df, elapsed_ms))
+            text = json.dumps(df.head(50).to_dict(orient="records"), default=str)
+            if len(text) > 6000:
+                text = text[:6000] + f"\n[truncated, total rows: {len(df)}]"
+            return text, None, "workspace"
+
+        connector_id = routing.get(tool_name)
+        if not connector_id:
+            return "", f"Tool '{tool_name}' is not available.", None
+        try:
+            result = await pool.call_tool(connector_id, tool_name, args)
+            text = extract_text_content(result)
+            df = parse_tool_result_to_dataframe(text)
+            if df is not None:
+                materialized_count += 1
+                table = f"mcp_{re.sub(r'[^0-9a-zA-Z]+', '_', tool_name).strip('_').lower()[:28]}_{materialized_count}"
+                info = await loop.run_in_executor(None, lambda: _materialize_workspace_df_sync(chat_id, table, df))
+                source_summaries.append({
+                    "id": f"mcp:{tool_name}:{materialized_count}",
+                    "name": f"{tool_name} result",
+                    "kind": "mcp",
+                    **info,
+                })
+                cols = ", ".join(f"{c['name']}:{c['type']}" for c in info["columns"][:30])
+                text += f"\n\n[Cached this tabular result as workspace table {table} with {info['rows']} rows. Columns: {cols}]"
+            if len(text) > 6000:
+                text = text[:6000] + f"\n\n[truncated at 6000 of {len(text)} chars]"
+            return text, None, connector_id
+        except Exception as exc:
+            return "", str(exc), connector_id
+
+    full_text_parts: list[str] = []
+    try:
+        async for ev in ROUTER.agent_loop_stream(
+            request_id=request_id,
+            user_question=question,
+            conversation_summary=conversation_summary(history),
+            tool_specs=tool_specs,
+            connector_summary=connector_summary,
+            on_tool_call=on_tool_call,
+            system_prompt=_workspace_prompt(source_summaries, connector_summary, join_candidates),
+        ):
+            kind = ev["kind"]
+            if kind == "tool_call":
+                if ev["name"] == "run_sql":
+                    sql_arg = (ev.get("args") or {}).get("query", "")
+                    preview = sql_arg.replace("\n", " ").strip()[:120]
+                    yield {"event": "thinking", "data": json.dumps({"step": f"Querying workspace: {preview}{'…' if len(sql_arg) > 120 else ''}"})}
+                else:
+                    connector_id = routing.get(ev["name"])
+                    cname = name_lookup.get(connector_id, "connected source")
+                    yield {"event": "thinking", "data": json.dumps({"step": f"Fetching data from {cname}"})}
+            elif kind == "tool_result":
+                if ev.get("error"):
+                    yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned an error — adjusting"})}
+                else:
+                    yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
+            elif kind == "text":
+                delta = ev.get("delta") or ""
+                full_text_parts.append(delta)
+                yield {"event": "text", "data": json.dumps({"delta": delta})}
+    except LLMUnavailable as exc:
+        err_msg = "The language model is unavailable, so I can't run a multi-source agent query right now."
+        msg = DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
+        yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+        return
+
+    full_text = "".join(full_text_parts).strip() or "(no answer)"
+    result_payload: dict[str, Any] | None = None
+    if collected:
+        sql, df, elapsed_ms = collected[-1]
+        viz = choose_visualization(question, {}, df)
+        result_payload = {
+            "title": "Multi-source Result",
+            "viz": viz,
+            "elapsed_ms": elapsed_ms,
+            "sql": sql,
+            "how": f"Sources: {', '.join(s['name'] for s in source_summaries[:8])}. Display: {viz}.",
+            **_df_to_payload(df),
+        }
+        yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+    elif source_summaries:
+        full_text = full_text if full_text != "(no answer)" else "I fetched data, but did not get a final table to show."
+
+    payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "multi-source-agent"}
+    if result_payload:
+        payload["result"] = result_payload
+    msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
+    yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+
+
 def _load_history(chat_id: str | None) -> list[dict[str, Any]]:
     if not chat_id:
         return []
@@ -957,6 +1320,34 @@ def _load_history(chat_id: str | None) -> list[dict[str, Any]]:
     if not chat:
         return []
     return [{"role": m["role"], "content": m["content"]} for m in chat["messages"]]
+
+
+async def _load_query_sources(
+    source_ids: list[str],
+    active_row: dict[str, Any] | None,
+    *,
+    use_active_fallback: bool,
+) -> list[tuple[dict[str, Any], DataSource]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source_id in source_ids:
+        if source_id == "mcp" or source_id in seen:
+            continue
+        row = DB.get_source(source_id)
+        if row:
+            rows.append(row)
+            seen.add(source_id)
+    if not rows and active_row and use_active_fallback:
+        rows.append(active_row)
+
+    loaded: list[tuple[dict[str, Any], DataSource]] = []
+    for row in rows:
+        source = SOURCES.get(row["id"])
+        if source is None:
+            source = await _rehydrate_source(row)
+            SOURCES[row["id"]] = source
+        loaded.append((row, source))
+    return loaded
 
 
 @app.post("/query")
@@ -969,17 +1360,20 @@ async def query(body: QueryRequest):
     active_row = DB.get_active_source()
     pool = get_pool()
     has_mcp = any(s.status == "connected" for s in pool.connectors.values())
+    requested_source_ids = body.source_ids or []
+    selected_mcp = "mcp" in requested_source_ids
+    selected_sources = await _load_query_sources(
+        requested_source_ids,
+        active_row,
+        use_active_fallback=not body.source_ids,
+    )
 
-    if not active_row and not has_mcp:
+    if not selected_sources and not has_mcp:
         raise HTTPException(status_code=400, detail="Attach a source first")
 
-    source: DataSource | None = None
-    if active_row:
-        source = SOURCES.get(active_row["id"])
-        if source is None:
-            # Server probably restarted — rebuild from saved origin.
-            source = await _rehydrate_source(active_row)
-            SOURCES[active_row["id"]] = source
+    active_for_legacy = selected_sources[0] if len(selected_sources) == 1 else None
+    active_row = active_for_legacy[0] if active_for_legacy else active_row
+    source: DataSource | None = active_for_legacy[1] if active_for_legacy else None
 
     DB.add_message(chat_id, "user", question)
     chat = DB.get_chat(chat_id)
@@ -992,34 +1386,45 @@ async def query(body: QueryRequest):
     async def event_stream() -> AsyncIterator[dict[str, Any]]:
         loop = asyncio.get_running_loop()
 
-        if source is not None and active_row is not None:
-            meta_source = {
-                "id": active_row["id"],
-                "name": active_row["name"],
-                "kind": active_row["kind"],
-                "rows": active_row["rows"],
-            }
-        else:
-            connected = [s for s in pool.connectors.values() if s.status == "connected"]
+        if selected_sources:
+            if len(selected_sources) == 1:
+                row, selected_source = selected_sources[0]
+                meta_source = {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "kind": row["kind"],
+                    "rows": row["rows"],
+                }
+            else:
+                total_rows = sum(int(row.get("rows") or 0) for row, _ in selected_sources)
+                meta_source = {
+                    "id": "multi",
+                    "name": ", ".join(row["name"] for row, _ in selected_sources[:3]) + ("…" if len(selected_sources) > 3 else ""),
+                    "kind": "multi",
+                    "rows": total_rows,
+                }
+        elif has_mcp:
             meta_source = {
                 "id": None,
-                "name": ", ".join(s.name for s in connected) or "MCP",
+                "name": ", ".join(s.name for s in pool.connectors.values() if s.status == "connected") or "MCP",
                 "kind": "mcp",
                 "rows": 0,
             }
+        else:
+            meta_source = {"id": None, "name": "No source", "kind": "none", "rows": 0}
         yield {
             "event": "meta",
             "data": json.dumps({"chat_id": chat_id, "source": meta_source}),
         }
         yield {"event": "thinking", "data": json.dumps({"step": "Reading your question"})}
 
-        if source is None:
+        if len(selected_sources) > 1 or selected_mcp or (source is None and has_mcp):
             try:
-                async for ev in _run_mcp_agent(chat_id, question, history, request_id):
+                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id):
                     yield ev
             except Exception as exc:
-                log_event(LOGGERS["errors"], "mcp_agent_error", request_id=request_id, error=str(exc))
-                err_msg = "An unexpected error occurred while contacting the MCP source."
+                log_event(LOGGERS["errors"], "multi_source_agent_error", request_id=request_id, error=str(exc))
+                err_msg = "An unexpected error occurred while working across the selected sources."
                 DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
                 yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
                 yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
@@ -1046,7 +1451,7 @@ async def query(body: QueryRequest):
 
             # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
             if route == "mcp" and has_mcp:
-                async for ev in _run_mcp_agent(chat_id, question, history, request_id):
+                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id):
                     yield ev
                 return
 

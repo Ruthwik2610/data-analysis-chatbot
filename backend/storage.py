@@ -179,6 +179,11 @@ class Storage:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_source(self, source_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+        return dict(row) if row else None
+
     def delete_source(self, source_id: str) -> None:
         with self._conn() as con:
             con.execute("DELETE FROM sources WHERE id = ?", (source_id,))

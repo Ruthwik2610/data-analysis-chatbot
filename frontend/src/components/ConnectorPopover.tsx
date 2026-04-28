@@ -24,6 +24,11 @@ function writeSavedMCPs(list: SavedMCP[]) {
   window.localStorage.setItem(MCP_STORAGE_KEY, JSON.stringify(list));
 }
 
+function notifySourcesChanged() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("data-chat:sources-changed"));
+}
+
 interface ConnectorPopoverProps {
   open: boolean;
   onClose: () => void;
@@ -74,7 +79,10 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
           // ignore — health loop will retry
         }
       }
-      if (!cancelled) await refreshMCP();
+      if (!cancelled) {
+        await refreshMCP();
+        notifySourcesChanged();
+      }
     })();
     return () => {
       cancelled = true;
@@ -137,6 +145,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         setBridgeName("");
         setSave(false);
         await refreshMCP();
+        notifySourcesChanged();
         // Don't close — let the user see the green dot appear in the saved list.
         if (conn.status !== "connected") {
           setError(conn.last_error || "Connector reported a non-connected status");
@@ -171,6 +180,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         writeSavedMCPs(readSavedMCPs().filter((s) => s.url !== target.url));
       }
       await refreshMCP();
+      notifySourcesChanged();
     } catch (e: any) {
       setError(e?.message || "Failed to disconnect");
     } finally {
@@ -183,6 +193,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
     try {
       await api.updateMCPConnector(c.id, { url: c.url, name: c.name });
       await refreshMCP();
+      notifySourcesChanged();
     } catch (e: any) {
       setError(e?.message || "Reconnect failed");
     } finally {

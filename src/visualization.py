@@ -48,6 +48,8 @@ def choose_visualization(question: str, intent: dict[str, Any], df: pd.DataFrame
         return "line"
     if n_rows == 1 and len(cols) <= 3:
         return "card"
+    if n_rows <= 3 and re.search(r"\btop\s+3\b|\btop three\b", q):
+        return "table"
 
     # 2+ dimensions + 1 numeric → stacked bar (frontend will pivot)
     if len(dim_cols) >= 2 and len(numeric_cols) >= 1:

@@ -487,8 +487,14 @@ def build_total_plan(intent: dict[str, Any], allowed_columns: set[str], question
 
 def validate_readonly_sql(sql: str) -> None:
     lowered = re.sub(r"\s+", " ", sql).strip().lower()
+    if ";" in lowered:
+        raise ValueError("Only one SELECT statement is allowed.")
     if not lowered.startswith("select "):
         raise ValueError("Only SELECT queries are allowed.")
-    forbidden = [" insert ", " update ", " delete ", " drop ", " alter ", " create ", " attach ", " copy ", "pragma "]
+    forbidden = [
+        " insert ", " update ", " delete ", " drop ", " alter ", " create ", " attach ", " copy ", "pragma ",
+        " read_csv", " read_json", " read_parquet", " read_xlsx", " read_text", " parquet_scan",
+        " csv_scan", " sqlite_scan", " glob(", "httpfs", " from '/", " from '~/", " from 'http",
+    ]
     if any(token in f" {lowered} " for token in forbidden):
         raise ValueError("Unsafe SQL was rejected.")

@@ -234,7 +234,7 @@ def parse_tool_result_to_dataframe(text: str):
     """Try to coerce a tool's text result into a DataFrame.
 
     Accepts JSON array of objects, JSON {rows, columns}, JSON {data: [...]},
-    or CSV. Returns None if nothing parses to >=2 rows AND >=2 columns.
+    or CSV. Returns None if nothing parses to >=1 row AND >=2 columns.
     """
     import pandas as pd
 
@@ -268,7 +268,7 @@ def parse_tool_result_to_dataframe(text: str):
 
     if df is None:
         return None
-    if len(df) < 2 or len(df.columns) < 2:
+    if len(df) < 1 or len(df.columns) < 2:
         return None
     return df
 
