@@ -41,7 +41,8 @@ from src.data_sources import (
 )
 from src.logging_config import log_event, setup_loggers
 from src.mcp_pool import extract_text_content, get_pool, parse_tool_result_to_dataframe
-from src.model_router import GeminiRouter, LLMUnavailable, ModelChoice
+from src.model_router import LLMRouter, LLMUnavailable
+from src.prompting import build_local_agent_system_prompt
 from src.query_engine import (
     build_query_plan,
     build_total_plan,
@@ -96,11 +97,11 @@ if not API_KEY:
     )
 
 # Singleton — re-creating per request reloads the genai client and wastes time.
-ROUTER = GeminiRouter(
-    api_key=CONFIG.gemini_api_key,
-    groq_api_key=CONFIG.groq_api_key,
-    deepseek_api_key=CONFIG.deepseek_api_key,
-    models=ModelChoice(CONFIG.default_model, CONFIG.escalation_model, CONFIG.fallback_model),
+ROUTER = LLMRouter(
+    openrouter_api_key=CONFIG.openrouter_api_key,
+    openrouter_provider_order=CONFIG.openrouter_provider_order,
+    model=CONFIG.model,
+    agent_model=CONFIG.agent_model,
     logger=LOGGERS["llm"],
     char_budget=CONFIG.prompt_char_budget,
 )
@@ -714,8 +715,10 @@ async def _run_mcp_agent(
     request_id: str,
 ) -> AsyncIterator[dict[str, Any]]:
     """Drive the function-calling agent loop, stream SSE events, and persist the
-    final assistant message. Picks the largest tabular tool result (>=2 rows,
-    >=2 cols) and emits it as a `result` event so ResultBlock renders a chart."""
+    final assistant message. Picks the LAST tabular tool result (>=2 rows,
+    >=2 cols) and emits it as a `result` event so ResultBlock renders a chart.
+    The agent's natural sequence is explore (describe/list) → fetch (query/get) →
+    answer; the data the user actually asked for is always the last fetch."""
     pool = get_pool()
     specs, routing = pool.aggregate_tools()
     if not specs:
@@ -749,7 +752,7 @@ async def _run_mcp_agent(
             df = parse_tool_result_to_dataframe(text)
             if df is not None:
                 collected_dfs.append((tool_name, df))
-            # Truncate text fed back to LLM to keep context lean (DMV uses 6000).
+            # Truncate text fed back to LLM to keep context lean.
             if len(text) > 6000:
                 text = text[:6000] + f"\n\n[truncated at 6000 of {len(text)} chars]"
             return text, None, connector_id
@@ -794,12 +797,11 @@ async def _run_mcp_agent(
 
     full_text = "".join(full_text_parts).strip() or "(no answer)"
 
-    # Pick the largest tabular result for charting; emit a `result` event so the
-    # frontend's existing ResultBlock can render it.
+    # Pick the LAST tabular tool result for charting (see docstring for rationale).
     result_payload: dict[str, Any] | None = None
     if collected_dfs:
-        tool_name, df = max(collected_dfs, key=lambda p: len(p[1]))
-        viz = "table" if len(df) > 25 else "bar"
+        tool_name, df = collected_dfs[-1]
+        viz = choose_visualization(question, {}, df)
         connector_id = routing.get(tool_name)
         cname = name_lookup.get(connector_id, "MCP")
         result_payload = {
@@ -816,6 +818,135 @@ async def _run_mcp_agent(
     if result_payload:
         assistant_payload["result"] = result_payload
     msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
+    yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+
+
+async def _run_local_agent(
+    chat_id: str,
+    question: str,
+    source: DataSource,
+    history: list[dict[str, Any]],
+    request_id: str,
+    model_used: str,
+) -> AsyncIterator[dict[str, Any]]:
+    """Drive a function-calling loop against the local DuckDB source.
+
+    Used when the intent classifier picks intent_type="multi_step" — the question
+    chains two queries where the second depends on the first's result. The LLM
+    calls run_sql once to find the anchor (e.g. peak month), reads the result,
+    then calls run_sql again parameterized by that anchor."""
+    system_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
+
+    tool_specs = [{
+        "name": "run_sql",
+        "description": "Execute a read-only DuckDB SELECT against the local dataset (table name 'orders'). Returns matching rows as JSON records.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "DuckDB SELECT query."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }]
+
+    collected: list[tuple[str, pd.DataFrame]] = []
+    loop = asyncio.get_event_loop()
+
+    def _run_sql_blocking(sql: str) -> pd.DataFrame:
+        import duckdb
+        if source.db_path:
+            con = duckdb.connect(source.db_path, read_only=True)
+            try:
+                if source.table_name != "orders":
+                    safe = '"' + source.table_name.replace('"', '""') + '"'
+                    con.execute(f"CREATE TEMP VIEW orders AS SELECT * FROM {safe}")
+                return con.execute(sql).fetchdf()
+            finally:
+                con.close()
+        if source.dataframe is not None:
+            con = duckdb.connect(":memory:")
+            try:
+                con.register("orders", source.dataframe)
+                return con.execute(sql).fetchdf()
+            finally:
+                con.close()
+        raise RuntimeError("No executable source")
+
+    async def on_tool_call(tool_name: str, args: dict[str, Any]):
+        if tool_name != "run_sql":
+            return "", f"Unknown tool: {tool_name}", None
+        sql = (args.get("query") or "").strip()
+        try:
+            validate_readonly_sql(sql)
+        except Exception as exc:
+            return "", f"SQL rejected: {exc}", None
+        try:
+            df = await loop.run_in_executor(None, _run_sql_blocking, sql)
+        except Exception as exc:
+            return "", str(exc), None
+        if not df.empty:
+            collected.append((sql, df))
+        records = df.head(50).to_dict(orient="records")
+        text = json.dumps(records, default=str)
+        if len(text) > 6000:
+            text = text[:6000] + f"\n[truncated, total rows: {len(df)}]"
+        return text, None, "local"
+
+    full_text_parts: list[str] = []
+
+    try:
+        async for ev in ROUTER.agent_loop_stream(
+            request_id=request_id,
+            user_question=question,
+            conversation_summary=conversation_summary(history),
+            tool_specs=tool_specs,
+            connector_summary="",
+            on_tool_call=on_tool_call,
+            system_prompt=system_prompt,
+        ):
+            kind = ev["kind"]
+            if kind == "tool_call":
+                sql_arg = (ev.get("args") or {}).get("query", "")
+                preview = sql_arg.replace("\n", " ").strip()[:120]
+                step = f"Querying: {preview}{'…' if len(sql_arg) > 120 else ''}"
+                yield {"event": "thinking", "data": json.dumps({"step": step})}
+            elif kind == "tool_result":
+                if ev.get("error"):
+                    yield {"event": "thinking", "data": json.dumps({"step": "Query returned an error — adjusting"})}
+                else:
+                    yield {"event": "thinking", "data": json.dumps({"step": "Got data"})}
+            elif kind == "text":
+                full_text_parts.append(ev["delta"])
+                yield {"event": "text", "data": json.dumps({"delta": ev["delta"]})}
+    except LLMUnavailable as exc:
+        err_msg = "All language models are rate-limited right now. Wait a minute and retry."
+        DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
+        yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+        yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
+        return
+
+    full_text = "".join(full_text_parts).strip() or "(no answer)"
+
+    # The last successful query's result is the chart card.
+    result_payload: dict[str, Any] | None = None
+    if collected:
+        sql, df = collected[-1]
+        viz = choose_visualization(question, {}, df)
+        result_payload = {
+            "title": "Multi-step Result",
+            "viz": viz,
+            "elapsed_ms": 0,
+            "sql": sql,
+            "how": f"Source: {source.source_kind}. Model: {model_used}. Multi-step query (final). Display: {viz}.",
+            **_df_to_payload(df),
+        }
+        yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+
+    payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": model_used}
+    if result_payload:
+        payload["result"] = result_payload
+    msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
     yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
 
 
@@ -882,12 +1013,6 @@ async def query(body: QueryRequest):
         }
         yield {"event": "thinking", "data": json.dumps({"step": "Reading your question"})}
 
-        notices: list[dict[str, str]] = []
-
-        def collect_fallback(from_model: str, to_model: str, reason: str) -> None:
-            if not any(n["to"] == to_model for n in notices):
-                notices.append({"from": from_model, "to": to_model, "reason": reason})
-
         if source is None:
             try:
                 async for ev in _run_mcp_agent(chat_id, question, history, request_id):
@@ -910,7 +1035,6 @@ async def query(body: QueryRequest):
                         user_question=question,
                         schema_context=source.schema,
                         conversation_summary=conversation_summary(history),
-                        on_fallback=collect_fallback,
                         mcp_summary=mcp_summary_text,
                         local_source_name=active_row["name"],
                     ),
@@ -923,6 +1047,12 @@ async def query(body: QueryRequest):
             # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
             if route == "mcp" and has_mcp:
                 async for ev in _run_mcp_agent(chat_id, question, history, request_id):
+                    yield ev
+                return
+
+            # Compound question that needs sequential SQL — route to local agent loop.
+            if intent.get("intent_type") == "multi_step" and source is not None:
+                async for ev in _run_local_agent(chat_id, question, source, history, request_id, model_used):
                     yield ev
                 return
 
@@ -956,10 +1086,13 @@ async def query(body: QueryRequest):
                 yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
                 return
 
-            yield {"event": "thinking", "data": json.dumps({"step": f"Searching {active_row['name']}"})}
-
             plan = build_query_plan(intent, question, source.allowed_columns)
             validate_readonly_sql(plan.sql)
+
+            filter_count = len(intent.get("filters") or [])
+            filter_note = f" · {filter_count} filter{'s' if filter_count != 1 else ''}" if filter_count else ""
+            yield {"event": "thinking", "data": json.dumps({"step": f"Understood: {plan.title}{filter_note}"})}
+            yield {"event": "thinking", "data": json.dumps({"step": f"Querying {active_row['name']}"})}
 
             df, elapsed_ms = await loop.run_in_executor(None, lambda: _run_query(plan, source))
             log_event(LOGGERS["query"], "query_executed", request_id=request_id, source=source.source_kind, sql_hash=plan.cache_key, rows=len(df), elapsed_ms=elapsed_ms)
@@ -1019,8 +1152,6 @@ async def query(body: QueryRequest):
                         row_count=len(df),
                         sql=plan.sql,
                         total_row=total_row,
-                        on_fallback=collect_fallback,
-                        prefer_model=model_used,
                     )
                     while True:
                         chunk = await loop.run_in_executor(None, lambda it=chunks_iter: next(it, None))
@@ -1044,14 +1175,6 @@ async def query(body: QueryRequest):
                 "result": result_payload,
             }
             msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
-            if notices:
-                n = notices[-1]
-                yield {"event": "notice", "data": json.dumps({
-                    "kind": "model_fallback",
-                    "from": n["from"],
-                    "to": n["to"],
-                    "reason": n["reason"],
-                })}
             yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
         except Exception as exc:
             log_event(LOGGERS["errors"], "query_error", request_id=request_id, error=str(exc))

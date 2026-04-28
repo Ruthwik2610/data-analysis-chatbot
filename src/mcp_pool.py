@@ -1,9 +1,8 @@
 """
 Persistent pool of MCP client sessions.
 
-Mirrors the DMV-connect Node.js architecture: every connector gets a long-lived
-ClientSession held open via AsyncExitStack. Tool calls reuse the same session,
-not a fresh JSON-RPC round-trip per call.
+Every connector gets a long-lived ClientSession held open via AsyncExitStack.
+Tool calls reuse the same session, not a fresh JSON-RPC round-trip per call.
 
 All ops run on the FastAPI event loop (the lifespan task starts the pool there).
 """
@@ -23,7 +22,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.sse import sse_client
 
 
-HEALTH_INTERVAL_SECONDS = 600  # 10 min, matches DMV
+HEALTH_INTERVAL_SECONDS = 600  # 10 min
 CONNECT_TIMEOUT_SECONDS = 20
 TOOL_CALL_TIMEOUT_SECONDS = 60
 
@@ -171,7 +170,7 @@ class MCPPool:
                 continue
             for t in s.tools:
                 tname = t["name"]
-                # Last-write wins on name collisions across connectors. DMV does the same.
+                # Last-write wins on name collisions across connectors.
                 routing[tname] = s.id
                 specs.append({
                     "name": tname,
@@ -275,7 +274,7 @@ def parse_tool_result_to_dataframe(text: str):
 
 
 def extract_text_content(result: Any) -> str:
-    """Pulls a plain string out of an MCP CallToolResult — mirrors DMV's extractMcpContent."""
+    """Pulls a plain string out of an MCP CallToolResult."""
     content = getattr(result, "content", None)
     if content is None:
         return ""

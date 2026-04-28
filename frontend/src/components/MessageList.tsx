@@ -135,15 +135,18 @@ function timeOfDayGreeting(): string {
 function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => void; onConnectClick: () => void }) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-8 py-10 gap-6 fade-in">
-      <div className="text-center max-w-[440px]">
+      <div className="text-center max-w-[480px]">
         <h2 className="text-[26px] font-medium mb-2" style={{ color: "var(--color-text-primary)" }}>
           {timeOfDayGreeting()}
         </h2>
         <p className="text-[14px]" style={{ color: "var(--color-text-secondary)" }}>
-          Drop a file, paste a URL, or just describe what you want to know.
-          <br />
-          I&apos;ll figure out the rest.
+          Ask plain-English questions about your data — I&apos;ll write the SQL, run it, and chart the result.
         </p>
+        <ul className="text-[12.5px] mt-4 space-y-1 text-left inline-block" style={{ color: "var(--color-text-tertiary)" }}>
+          <li>• Analyze CSV / Excel uploads — totals, trends, top-N, breakdowns</li>
+          <li>• Query connected sources like Salesforce</li>
+          <li>• Connect to APIs on the fly by pasting a URL</li>
+        </ul>
       </div>
 
       <div className="flex gap-3 w-full max-w-[480px]">

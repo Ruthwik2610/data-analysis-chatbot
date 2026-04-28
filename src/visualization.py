@@ -37,13 +37,17 @@ def choose_visualization(question: str, intent: dict[str, Any], df: pd.DataFrame
     n_rows = len(df)
     q = question.lower()
 
+    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+    dim_cols = [c for c in cols if c not in numeric_cols]
+
+    # No numeric column means there's nothing to chart — render as table.
+    if not numeric_cols:
+        return "table"
+
     if "period" in cols:
         return "line"
     if n_rows == 1 and len(cols) <= 3:
         return "card"
-
-    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
-    dim_cols = [c for c in cols if c not in numeric_cols]
 
     # 2+ dimensions + 1 numeric → stacked bar (frontend will pivot)
     if len(dim_cols) >= 2 and len(numeric_cols) >= 1:

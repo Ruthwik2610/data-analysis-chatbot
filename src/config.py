@@ -16,7 +16,7 @@ def load_dotenv_if_present(path: str = ".env") -> None:
         key, value = line.split("=", 1)
         clean_key = key.strip()
         clean_value = value.strip().strip('"').strip("'")
-        if clean_key.startswith("GEMINI_") or clean_key.startswith("GROQ_") or clean_key.startswith("DEEPSEEK_") or clean_key in {"DATA_PATH", "CACHE_DIR", "PROMPT_CHAR_BUDGET"}:
+        if clean_key.startswith("OPENROUTER_") or clean_key in {"MODEL", "AGENT_MODEL", "DATA_PATH", "CACHE_DIR", "PROMPT_CHAR_BUDGET"}:
             os.environ[clean_key] = clean_value
         else:
             os.environ.setdefault(clean_key, clean_value)
@@ -26,12 +26,10 @@ def load_dotenv_if_present(path: str = ".env") -> None:
 class AppConfig:
     data_path: Path
     cache_dir: Path
-    gemini_api_key: str | None
-    groq_api_key: str | None
-    deepseek_api_key: str | None
-    default_model: str
-    escalation_model: str
-    fallback_model: str
+    openrouter_api_key: str | None
+    openrouter_provider_order: str
+    model: str
+    agent_model: str
     prompt_char_budget: int
     max_preview_rows: int = 100
 
@@ -41,11 +39,9 @@ class AppConfig:
         return cls(
             data_path=Path(os.getenv("DATA_PATH", "/Users/rajasekharbandreddy/Downloads/sourcedata.csv")),
             cache_dir=Path(os.getenv("CACHE_DIR", ".cache/chatbot")),
-            gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
-            groq_api_key=os.getenv("GROQ_API_KEY") or None,
-            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY") or None,
-            default_model=os.getenv("GEMINI_DEFAULT_MODEL", "gemini-3-flash-preview"),
-            escalation_model=os.getenv("GEMINI_ESCALATION_MODEL", "gemini-2.5-flash"),
-            fallback_model=os.getenv("GEMINI_FALLBACK_MODEL", "llama-3.3-70b-versatile"),
+            openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
+            openrouter_provider_order=os.getenv("OPENROUTER_PROVIDER_ORDER", "DeepSeek"),
+            model=os.getenv("MODEL", "openrouter/deepseek/deepseek-v4-pro"),
+            agent_model=os.getenv("AGENT_MODEL", "openrouter/deepseek/deepseek-v4-pro"),
             prompt_char_budget=int(os.getenv("PROMPT_CHAR_BUDGET", "24000")),
         )

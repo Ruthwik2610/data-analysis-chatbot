@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from .logging_config import log_event
 from .prompting import build_answer_prompt, build_intent_prompt, build_mcp_agent_system_prompt, estimate_tokens
@@ -16,35 +15,8 @@ class LLMUnavailable(RuntimeError):
     pass
 
 
-FallbackCallback = Callable[[str, str, str], None]
-
-
-def _is_rate_limit_error(exc: Exception) -> bool:
-    msg = str(exc).upper()
-    return (
-        "429" in msg
-        or "RESOURCE_EXHAUSTED" in msg
-        or "RATE LIMIT" in msg
-        or "QUOTA" in msg
-    )
-
-
-@dataclass
-class ModelChoice:
-    primary: str
-    escalation: str
-    fallback: str
-
-
-def provider_for_model(model: str) -> str:
-    """Pick a provider from a model name. Groq hosts llama/mixtral/qwen/gemma2;
-    DeepSeek hosts deepseek*; everything else falls through to Gemini."""
-    name = (model or "").lower()
-    if name.startswith(("llama", "mixtral", "qwen")) or "groq" in name or name.startswith("gemma2"):
-        return "groq"
-    if name.startswith("deepseek"):
-        return "deepseek"
-    return "gemini"
+def strip_openrouter_prefix(model: str) -> str:
+    return model[len("openrouter/"):] if model.lower().startswith("openrouter/") else model
 
 
 def extract_json(text: str) -> dict[str, Any]:
@@ -61,106 +33,49 @@ def extract_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-class GeminiRouter:
+class LLMRouter:
     def __init__(
         self,
-        api_key: str | None,
-        models: ModelChoice,
+        model: str,
         logger: Any,
         char_budget: int,
-        groq_api_key: str | None = None,
-        deepseek_api_key: str | None = None,
+        openrouter_api_key: str | None = None,
+        openrouter_provider_order: str = "DeepSeek",
+        agent_model: str | None = None,
     ) -> None:
-        self.api_key = api_key
-        self.groq_api_key = groq_api_key
-        self.deepseek_api_key = deepseek_api_key
-        self.models = models
+        self.openrouter_api_key = openrouter_api_key
+        self.openrouter_provider_order = openrouter_provider_order
+        self.model = model
+        self.agent_model = agent_model or model
         self.logger = logger
         self.char_budget = char_budget
-        self._client = None
-        self._groq_client = None
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key) or bool(self.groq_api_key) or bool(self.deepseek_api_key)
+        return bool(self.openrouter_api_key)
 
-    def _client_or_raise(self):
-        if not self.api_key:
-            raise LLMUnavailable("Gemini API key is not configured.")
-        if self._client is None:
-            try:
-                from google import genai
-            except Exception as exc:  # pragma: no cover - depends on optional package
-                raise LLMUnavailable("google-genai is not installed.") from exc
-            self._client = genai.Client(api_key=self.api_key)
-        return self._client
+    def _openrouter_provider_pref(self) -> dict[str, Any]:
+        order = [p.strip() for p in (self.openrouter_provider_order or "").split(",") if p.strip()]
+        if not order:
+            return {}
+        return {"provider": {"order": order, "allow_fallbacks": False}}
 
-    def _groq_client_or_raise(self):
-        if not self.groq_api_key:
-            raise LLMUnavailable("Groq API key is not configured.")
-        if self._groq_client is None:
-            try:
-                from groq import Groq
-            except Exception as exc:  # pragma: no cover - depends on optional package
-                raise LLMUnavailable("groq SDK is not installed.") from exc
-            self._groq_client = Groq(api_key=self.groq_api_key)
-        return self._groq_client
-
-    def _generate_json(self, model: str, prompt: str, request_id: str) -> dict[str, Any]:
-        provider = provider_for_model(model)
-        if provider == "groq":
-            return self._generate_json_groq(model, prompt, request_id)
-        if provider == "deepseek":
-            return self._generate_json_deepseek(model, prompt, request_id)
-        client = self._client_or_raise()
-        start = time.perf_counter()
-        log_event(self.logger, "llm_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config={"temperature": 0, "response_mime_type": "application/json"},
-        )
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        text = getattr(response, "text", "") or ""
-        parsed = extract_json(text)
-        log_event(self.logger, "llm_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
-        return parsed
-
-    def _generate_json_groq(self, model: str, prompt: str, request_id: str) -> dict[str, Any]:
-        client = self._groq_client_or_raise()
-        start = time.perf_counter()
-        log_event(self.logger, "llm_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        text = (response.choices[0].message.content or "") if response.choices else ""
-        parsed = extract_json(text)
-        log_event(self.logger, "llm_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
-        return parsed
-
-    def _generate_json_deepseek(self, model: str, prompt: str, request_id: str) -> dict[str, Any]:
-        if not self.deepseek_api_key:
-            raise LLMUnavailable("DeepSeek API key is not configured.")
+    def _generate_json(self, prompt: str, request_id: str) -> dict[str, Any]:
+        if not self.openrouter_api_key:
+            raise LLMUnavailable("OpenRouter API key is not configured.")
         import httpx
         start = time.perf_counter()
-        log_event(self.logger, "llm_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+        log_event(self.logger, "llm_request", request_id=request_id, model=self.model, prompt_tokens=estimate_tokens(prompt))
         body = {
-            "model": model,
+            "model": strip_openrouter_prefix(self.model),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        if "reasoner" in model or "pro" in model:
-            body["extra_body"] = {"thinking": {"type": "enabled"}}
-            body.pop("temperature", None)  # Thinking mode doesn't support temperature
-        
+        body.update(self._openrouter_provider_pref())
         response = httpx.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={"Authorization": f"Bearer {self.deepseek_api_key}"},
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {self.openrouter_api_key}"},
             json=body,
             timeout=120.0,
         )
@@ -168,85 +83,69 @@ class GeminiRouter:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         text = response.json()["choices"][0]["message"]["content"] or ""
         parsed = extract_json(text)
-        log_event(self.logger, "llm_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+        log_event(self.logger, "llm_response", request_id=request_id, model=self.model, elapsed_ms=elapsed_ms)
         return parsed
 
-    def _generate_text(self, model: str, prompt: str, request_id: str) -> str:
-        provider = provider_for_model(model)
-        if provider == "groq":
-            return self._generate_text_groq(model, prompt, request_id)
-        if provider == "deepseek":
-            return self._generate_text_deepseek(model, prompt, request_id)
-        client = self._client_or_raise()
-        start = time.perf_counter()
-        log_event(self.logger, "llm_summary_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config={"temperature": 0.1},
-        )
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        text = (getattr(response, "text", "") or "").strip()
-        log_event(self.logger, "llm_summary_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
-        return text
-
-    def _generate_text_groq(self, model: str, prompt: str, request_id: str) -> str:
-        client = self._groq_client_or_raise()
-        start = time.perf_counter()
-        log_event(self.logger, "llm_summary_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-        )
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        text = ((response.choices[0].message.content or "").strip()) if response.choices else ""
-        log_event(self.logger, "llm_summary_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
-        return text
-
-    def _generate_text_deepseek(self, model: str, prompt: str, request_id: str) -> str:
-        if not self.deepseek_api_key:
-            raise LLMUnavailable("DeepSeek API key is not configured.")
+    def _generate_text(self, prompt: str, request_id: str) -> str:
+        if not self.openrouter_api_key:
+            raise LLMUnavailable("OpenRouter API key is not configured.")
         import httpx
         start = time.perf_counter()
-        log_event(self.logger, "llm_summary_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+        log_event(self.logger, "llm_summary_request", request_id=request_id, model=self.model, prompt_tokens=estimate_tokens(prompt))
         body = {
-            "model": model,
+            "model": strip_openrouter_prefix(self.model),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
         }
-        if "reasoner" in model or "pro" in model:
-            body["extra_body"] = {"thinking": {"type": "enabled"}}
-            body.pop("temperature", None)
-
+        body.update(self._openrouter_provider_pref())
         response = httpx.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={"Authorization": f"Bearer {self.deepseek_api_key}"},
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {self.openrouter_api_key}"},
             json=body,
             timeout=120.0,
         )
         response.raise_for_status()
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         text = (response.json()["choices"][0]["message"]["content"] or "").strip()
-        log_event(self.logger, "llm_summary_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+        log_event(self.logger, "llm_summary_response", request_id=request_id, model=self.model, elapsed_ms=elapsed_ms)
         return text
 
-    def _generate_text_stream_groq(self, model: str, prompt: str, request_id: str):
-        client = self._groq_client_or_raise()
+    def _generate_text_stream(self, prompt: str, request_id: str):
+        if not self.openrouter_api_key:
+            raise LLMUnavailable("OpenRouter API key is not configured.")
+        import httpx
         start = time.perf_counter()
-        log_event(self.logger, "llm_stream_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
-        stream = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            stream=True,
-        )
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if delta:
-                yield delta
+        log_event(self.logger, "llm_stream_request", request_id=request_id, model=self.model, prompt_tokens=estimate_tokens(prompt))
+        body = {
+            "model": strip_openrouter_prefix(self.model),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "stream": True,
+        }
+        body.update(self._openrouter_provider_pref())
+        with httpx.stream(
+            "POST",
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {self.openrouter_api_key}"},
+            json=body,
+            timeout=120.0,
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[len("data: "):].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    delta = chunk["choices"][0]["delta"].get("content")
+                    if delta:
+                        yield delta
+                except Exception:
+                    continue
         elapsed_ms = int((time.perf_counter() - start) * 1000)
-        log_event(self.logger, "llm_stream_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+        log_event(self.logger, "llm_stream_response", request_id=request_id, model=self.model, elapsed_ms=elapsed_ms)
 
     def classify_intent(
         self,
@@ -255,7 +154,6 @@ class GeminiRouter:
         user_question: str,
         schema_context: dict[str, Any],
         conversation_summary: str,
-        on_fallback: FallbackCallback | None = None,
         mcp_summary: str = "",
         local_source_name: str = "the loaded dataset",
     ) -> tuple[dict[str, Any], str]:
@@ -267,25 +165,12 @@ class GeminiRouter:
             mcp_summary=mcp_summary,
             local_source_name=local_source_name,
         )
-        models_to_try = [self.models.primary, self.models.escalation, self.models.fallback]
-        canonical_primary = models_to_try[0]
-        fallback_reason: str | None = None
-        last_error: Exception | None = None
-        for model in dict.fromkeys(models_to_try):
-            try:
-                intent = self._generate_json(model, prompt, request_id)
-                if fallback_reason and on_fallback and model != canonical_primary:
-                    on_fallback(canonical_primary, model, fallback_reason)
-                if intent.get("needs_escalation") and model != self.models.escalation:
-                    intent = self._generate_json(self.models.escalation, prompt, request_id)
-                    return intent, self.models.escalation
-                return intent, model
-            except Exception as exc:  # pragma: no cover - network/API dependent
-                last_error = exc
-                if not fallback_reason and _is_rate_limit_error(exc):
-                    fallback_reason = "rate_limit"
-                log_event(self.logger, "llm_failure", request_id=request_id, model=model, error=str(exc))
-        raise LLMUnavailable(str(last_error) if last_error else "No model produced a response.")
+        try:
+            intent = self._generate_json(prompt, request_id)
+            return intent, self.model
+        except Exception as exc:  # pragma: no cover - network/API dependent
+            log_event(self.logger, "llm_failure", request_id=request_id, model=self.model, error=str(exc))
+            raise LLMUnavailable(str(exc)) from exc
 
     def summarize_answer(
         self,
@@ -305,14 +190,11 @@ class GeminiRouter:
             char_budget=self.char_budget,
             sql=sql,
         )
-        last_error: Exception | None = None
-        for model in dict.fromkeys([self.models.primary, self.models.escalation, self.models.fallback]):
-            try:
-                return self._generate_text(model, prompt, request_id)
-            except Exception as exc:  # pragma: no cover - network/API dependent
-                last_error = exc
-                log_event(self.logger, "llm_summary_failure", request_id=request_id, model=model, error=str(exc))
-        raise LLMUnavailable(str(last_error) if last_error else "No model produced a summary.")
+        try:
+            return self._generate_text(prompt, request_id)
+        except Exception as exc:  # pragma: no cover - network/API dependent
+            log_event(self.logger, "llm_summary_failure", request_id=request_id, model=self.model, error=str(exc))
+            raise LLMUnavailable(str(exc)) from exc
 
     def summarize_answer_stream(
         self,
@@ -324,8 +206,6 @@ class GeminiRouter:
         row_count: int,
         sql: str | None = None,
         total_row: dict[str, Any] | None = None,
-        on_fallback: FallbackCallback | None = None,
-        prefer_model: str | None = None,
     ):
         prompt = build_answer_prompt(
             user_question=user_question,
@@ -336,89 +216,11 @@ class GeminiRouter:
             sql=sql,
             total_row=total_row,
         )
-        cascade = [self.models.primary, self.models.escalation, self.models.fallback]
-        canonical_primary = cascade[0]
-        # When intent classification just had to fall back, the caller passes the
-        # winning model so we don't pay the same Gemini 503/429 round-trip again.
-        if prefer_model and prefer_model in cascade and prefer_model != cascade[0]:
-            cascade = [prefer_model] + [m for m in cascade if m != prefer_model]
-        models = list(dict.fromkeys(cascade))
-        fallback_reason: str | None = None
-        last_error: Exception | None = None
-        for model in models:
-            try:
-                provider = provider_for_model(model)
-                if provider == "groq":
-                    yield from self._generate_text_stream_groq(model, prompt, request_id)
-                elif provider == "deepseek":
-                    yield from self._generate_text_stream_deepseek(model, prompt, request_id)
-                else:
-                    client = self._client_or_raise()
-                    start = time.perf_counter()
-                    log_event(self.logger, "llm_stream_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
-                    stream = client.models.generate_content_stream(
-                        model=model,
-                        contents=prompt,
-                        config={"temperature": 0.1},
-                    )
-                    for chunk in stream:
-                        text = getattr(chunk, "text", None)
-                        if text:
-                            yield text
-                    elapsed_ms = int((time.perf_counter() - start) * 1000)
-                    log_event(self.logger, "llm_stream_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
-                if fallback_reason and on_fallback and model != canonical_primary:
-                    on_fallback(canonical_primary, model, fallback_reason)
-                return
-            except Exception as exc:  # pragma: no cover - network/API dependent
-                last_error = exc
-                if not fallback_reason and _is_rate_limit_error(exc):
-                    fallback_reason = "rate_limit"
-                log_event(self.logger, "llm_stream_failure", request_id=request_id, model=model, error=str(exc))
-        raise LLMUnavailable(str(last_error) if last_error else "No model produced a streamed summary.")
-
-    def _generate_text_stream_deepseek(self, model: str, prompt: str, request_id: str):
-        if not self.deepseek_api_key:
-            raise LLMUnavailable("DeepSeek API key is not configured.")
-        import httpx
-        start = time.perf_counter()
-        log_event(self.logger, "llm_stream_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
-        body = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "stream": True,
-        }
-        if "reasoner" in model or "pro" in model:
-            body["extra_body"] = {"thinking": {"type": "enabled"}}
-            body.pop("temperature", None)
-
-        with httpx.stream(
-            "POST",
-            "https://api.deepseek.com/chat/completions",
-            headers={"Authorization": f"Bearer {self.deepseek_api_key}"},
-            json=body,
-            timeout=120.0,
-        ) as response:
-            response.raise_for_status()
-            for line in response.iter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                data_str = line[len("data: "):].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                    choice = chunk["choices"][0]
-                    # Stream reasoning_content if present, but since it's mixed with content,
-                    # we just yield whatever text comes in.
-                    delta = choice["delta"].get("content") or choice["delta"].get("reasoning_content")
-                    if delta:
-                        yield delta
-                except Exception:
-                    continue
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        log_event(self.logger, "llm_stream_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+        try:
+            yield from self._generate_text_stream(prompt, request_id)
+        except Exception as exc:  # pragma: no cover - network/API dependent
+            log_event(self.logger, "llm_stream_failure", request_id=request_id, model=self.model, error=str(exc))
+            raise LLMUnavailable(str(exc)) from exc
 
     async def agent_loop_stream(
         self,
@@ -429,6 +231,7 @@ class GeminiRouter:
         tool_specs: list[dict[str, Any]],
         connector_summary: str,
         on_tool_call,
+        system_prompt: str | None = None,
     ):
         """Run a function-calling agent loop. Yields events:
             {"kind": "tool_call", "name", "args", "connector_id"}
@@ -436,91 +239,101 @@ class GeminiRouter:
             {"kind": "text", "delta"}
 
         `on_tool_call(tool_name, args) -> awaitable[(text_result, error_or_none, connector_id)]`.
+        Pass `system_prompt` to use a custom base prompt (e.g. local DuckDB agent).
         """
-        from google.genai import types as gtypes
+        if not self.openrouter_api_key:
+            raise LLMUnavailable("OpenRouter API key is not configured.")
+        import httpx
 
-        client = self._client_or_raise()
-        async_client = client.aio
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": spec["name"],
+                "description": spec.get("description") or "",
+                "parameters": spec.get("input_schema") or {"type": "object", "properties": {}},
+            },
+        } for spec in tool_specs] or None
 
-        function_decls = []
-        for spec in tool_specs:
-            schema = spec.get("input_schema") or {"type": "object", "properties": {}}
-            function_decls.append(gtypes.FunctionDeclaration(
-                name=spec["name"],
-                description=spec.get("description") or "",
-                parameters_json_schema=schema,
-            ))
-        tools_config = [gtypes.Tool(function_declarations=function_decls)] if function_decls else None
-
-        system_text = build_mcp_agent_system_prompt(connector_summary)
+        system_text = system_prompt if system_prompt is not None else build_mcp_agent_system_prompt(connector_summary)
         if conversation_summary:
             system_text += "\n\n## Recent conversation\n" + conversation_summary[-2000:]
 
-        contents: list[Any] = [gtypes.Content(role="user", parts=[gtypes.Part.from_text(text=user_question)])]
-        # MCP agent loop uses Gemini's function-calling schema; skip non-Gemini models.
-        models = [m for m in dict.fromkeys([self.models.primary, self.models.escalation, self.models.fallback])
-                  if provider_for_model(m) == "gemini"]
-        if not models:
-            raise LLMUnavailable("No Gemini model is configured for the MCP agent loop.")
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": user_question},
+        ]
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {self.openrouter_api_key}"}
+        base_body: dict[str, Any] = {
+            "model": strip_openrouter_prefix(self.agent_model),
+            "temperature": 0.1,
+        }
+        base_body.update(self._openrouter_provider_pref())
 
-        async def _generate_once(streaming: bool):
-            last_err: Exception | None = None
-            for model in models:
+        async def _stream_final(client: httpx.AsyncClient) -> Any:
+            stream_body = {**base_body, "messages": messages, "stream": True}
+            async with client.stream("POST", url, headers=headers, json=stream_body) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[len("data: "):].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        delta = json.loads(data_str)["choices"][0]["delta"].get("content")
+                    except Exception:
+                        continue
+                    if delta:
+                        yield delta
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            for round_idx in range(MAX_TOOL_ROUNDS):
+                body = {**base_body, "messages": messages}
+                if tools:
+                    body["tools"] = tools
                 try:
-                    config = gtypes.GenerateContentConfig(
-                        temperature=0.1,
-                        system_instruction=system_text,
-                        tools=tools_config,
-                        automatic_function_calling=gtypes.AutomaticFunctionCallingConfig(disable=True),
-                    )
-                    if streaming:
-                        return model, await async_client.models.generate_content_stream(
-                            model=model, contents=contents, config=config,
-                        )
-                    return model, await async_client.models.generate_content(
-                        model=model, contents=contents, config=config,
-                    )
+                    resp = await client.post(url, headers=headers, json=body)
+                    resp.raise_for_status()
                 except Exception as exc:
-                    last_err = exc
-                    log_event(self.logger, "agent_llm_failure", request_id=request_id, model=model, streaming=streaming, error=str(exc))
-            raise LLMUnavailable(str(last_err) if last_err else "No model responded to the agent step.")
+                    log_event(self.logger, "agent_llm_failure", request_id=request_id, model=self.agent_model, streaming=False, error=str(exc))
+                    raise LLMUnavailable(str(exc)) from exc
 
-        for round_idx in range(MAX_TOOL_ROUNDS):
-            model_used, response = await _generate_once(streaming=False)
-            function_calls = getattr(response, "function_calls", None) or []
-            log_event(self.logger, "agent_round", request_id=request_id, round=round_idx, model=model_used, tool_calls=len(function_calls))
+                msg = resp.json()["choices"][0]["message"]
+                tool_calls = msg.get("tool_calls") or []
+                log_event(self.logger, "agent_round", request_id=request_id, round=round_idx, model=self.agent_model, tool_calls=len(tool_calls))
 
-            if not function_calls:
-                # No more tool calls — re-issue the same prompt as a stream for the final text answer.
-                _, stream = await _generate_once(streaming=True)
-                async for chunk in stream:
-                    text = getattr(chunk, "text", None)
-                    if text:
-                        yield {"kind": "text", "delta": text}
-                return
+                if not tool_calls:
+                    # Final answer — re-issue as a stream so the user sees deltas.
+                    async for delta in _stream_final(client):
+                        yield {"kind": "text", "delta": delta}
+                    return
 
-            # Append the model's tool-call turn so subsequent calls have full history.
-            model_content = response.candidates[0].content if response.candidates else None
-            if model_content is not None:
-                contents.append(model_content)
+                # V4 Pro thinking mode requires the assistant message be passed back verbatim
+                # (including reasoning / reasoning_details), so append the message dict as-is.
+                messages.append(msg)
 
-            response_parts = []
-            for fc in function_calls:
-                tool_name = fc.name
-                args = dict(fc.args or {})
-                yield {"kind": "tool_call", "name": tool_name, "args": args}
-                try:
-                    result_text, error, connector_id = await on_tool_call(tool_name, args)
-                except Exception as exc:
-                    result_text, error, connector_id = "", str(exc), None
-                yield {"kind": "tool_result", "name": tool_name, "text": result_text, "error": error, "connector_id": connector_id}
-                payload = {"error": error} if error else {"result": result_text}
-                response_parts.append(gtypes.Part.from_function_response(name=tool_name, response=payload))
-            contents.append(gtypes.Content(role="tool", parts=response_parts))
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    tool_name = fn.get("name") or ""
+                    args_raw = fn.get("arguments") or "{}"
+                    try:
+                        args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+                    except Exception:
+                        args = {}
+                    yield {"kind": "tool_call", "name": tool_name, "args": args}
+                    try:
+                        result_text, error, connector_id = await on_tool_call(tool_name, args)
+                    except Exception as exc:
+                        result_text, error, connector_id = "", str(exc), None
+                    yield {"kind": "tool_result", "name": tool_name, "text": result_text, "error": error, "connector_id": connector_id}
+                    tool_content = json.dumps({"error": error}) if error else (result_text or "")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id"),
+                        "content": tool_content,
+                    })
 
-        # Hit the cap — ask once more for a final answer with no tools allowed.
-        _, stream = await _generate_once(streaming=True)
-        async for chunk in stream:
-            text = getattr(chunk, "text", None)
-            if text:
-                yield {"kind": "text", "delta": text}
+            # Hit the cap — final answer attempt with no tools.
+            async for delta in _stream_final(client):
+                yield {"kind": "text", "delta": delta}

@@ -96,6 +96,11 @@ def build_intent_prompt(
       - If the user phrases the question as a sort ("sort by payment method by highest revenue"), metric_column is the thing being sorted (e.g. revenue), the dimension is the grouping (e.g. payment_mode), sort is desc.
       - Filters must use real column names from the schema. Date filters use the date column from the schema (often named order_datetime/order_date/created_at/...) with ISO values like "2025-10-01". For "October 2025" → between "2025-10-01" and "2025-10-31"; for "in 2025" → between "2025-01-01" and "2025-12-31".
       - IDENTIFIER FILTERS: when the user writes an identifier value (email, "PREFIX-1234", long alphanumeric token, or "<column> <number>"), emit it as an equality filter on the schema column whose name + role matches the value's shape. Use the EXACT value the user typed; never reformat or invent IDs. If no schema column aligns, drop the filter rather than guessing. Bare numbers ("12345") need an explicit column word in the question ("customer 12345" → cust_key=12345); never filter on a lone number. Set intent_type="lookup" only when the question is essentially "show the record matching this identifier" with no aggregation; otherwise keep the aggregate intent and add the identifier to filters.
+      - MULTI-STEP: pick intent_type="multi_step" ONLY when the question chains two sequential questions where the second depends on the first's result. Examples:
+        - "which month had the highest sales AND in that month which product contributed most"
+        - "find the top customer, then show their order history"
+        - "for the peak day, what were the top 5 categories"
+        Single questions with one aggregation are NOT multi_step. Pure top-N is NOT multi_step. Pure trend is NOT multi_step. When unsure, prefer the more specific intent_type (aggregate/trend/lookup).
     </rule>
     <rule>Prefer the lightest representation. A top 3 answer should be a compact table/card unless the user explicitly asks for a chart.</rule>
     <rule>PII can be included only when the user explicitly asks for a row-level lookup or personal field.</rule>
@@ -105,7 +110,7 @@ def build_intent_prompt(
   <user_question>{question_xml}</user_question>
   <output_contract>
     {{
-      {route_field}"intent_type": "aggregate|lookup|trend|comparison|chart_request|clarification|unsupported",
+      {route_field}"intent_type": "aggregate|lookup|trend|comparison|chart_request|multi_step|clarification|unsupported",
       "metric_column": "<real_column_name_from_schema_or_null>",
       "aggregation": "sum|avg|count|min|max",
       "dimensions": ["column_name"],
@@ -163,8 +168,49 @@ def build_answer_prompt(
     return trim_to_budget(prompt, char_budget)
 
 
+def build_local_agent_system_prompt(source_name: str, schema: dict[str, Any]) -> str:
+    """System prompt for the local-DuckDB agent loop. Used for multi-step questions
+    where one query depends on another's result."""
+    cols = schema.get("columns") or []
+    lines: list[str] = []
+    for col in cols[:60]:
+        name = col.get("name") or col.get("column") or ""
+        ctype = col.get("type") or col.get("dtype") or "?"
+        if name:
+            lines.append(f"- {name}: {ctype}")
+    schema_text = "\n".join(lines) if lines else "(schema unavailable)"
+    return f"""You answer questions about a local dataset by writing DuckDB SQL and calling run_sql.
+
+## The dataset
+Source: {source_name}
+Table name: orders
+Columns:
+{schema_text}
+
+## How to use run_sql
+- DuckDB SQL. SELECT only — no INSERT/UPDATE/DELETE/DROP/ALTER.
+- Use ONLY the column names listed above. Never invent columns.
+- Quote names with double quotes when in doubt: "column name".
+- For numeric ops on text-typed columns: TRY_CAST("col" AS DOUBLE).
+- Monthly grouping: date_trunc('month', "date_col").
+- Always include a LIMIT (default 100).
+
+## Multi-step strategy
+For compound questions like "which month had the most X AND in that month which Y":
+1. First call run_sql to find the anchor (e.g. peak month).
+2. Read the result, then call run_sql again parameterized by that anchor (substitute the literal value into the WHERE clause).
+3. Stop after the data you need is fetched. Don't make redundant calls.
+
+## How to respond
+- BREVITY: one short sentence weaving BOTH findings together (e.g. "July 2015 led with $X — within that month, Pepperoni Pizza topped at $Y.").
+- The user already sees the final table beneath your reply — do NOT echo rows or write a markdown table.
+- Empty result → "No matching rows."
+- Never mention "tool", "SQL", "run_sql", "query", or other infrastructure names — speak naturally about the data.
+"""
+
+
 def build_mcp_agent_system_prompt(connector_summary: str) -> str:
-    """System prompt for the agent loop. Borrows DMV's anti-fabrication rules."""
+    """System prompt for the MCP function-calling agent loop."""
     return f"""You are a data assistant. You access data ONLY by calling the tools below.
 
 ## Connected sources
@@ -185,11 +231,11 @@ def build_mcp_agent_system_prompt(connector_summary: str) -> str:
 Chain as many tool calls as you need.
 
 ## How to respond
-- Multi-row data → markdown table.
-- Lists of items → bullet list.
-- Single value or yes/no → one short sentence.
-- Hide the SQL/JSON/tool internals unless the user explicitly asks for the query.
-- If a tool errors or returns nothing, say "I checked and couldn't find anything matching that."
-- Never mention "MCP", "tool", "function call", "BigQuery", or other infrastructure names — speak naturally about the data.
+- BREVITY: One short sentence with the headline (peak/total/notable item, or the direct answer). The user already sees the rows as a table beneath your reply — do NOT echo them as a markdown table or bullet list.
+- Single value or yes/no → one short sentence with the value. No preamble.
+- Empty result → "I checked and couldn't find anything matching that."
+- Listing more than 3 rows in your text is almost always wrong — the table below shows them all.
+- Hide SQL/JSON/tool internals unless the user explicitly asks for the query.
+- Never mention "MCP", "tool", "function call", "BigQuery", "Salesforce metadata", or other infrastructure names — speak naturally about the data.
 """
 
