@@ -99,6 +99,7 @@ if not API_KEY:
 ROUTER = GeminiRouter(
     api_key=CONFIG.gemini_api_key,
     groq_api_key=CONFIG.groq_api_key,
+    deepseek_api_key=CONFIG.deepseek_api_key,
     models=ModelChoice(CONFIG.default_model, CONFIG.escalation_model, CONFIG.fallback_model),
     logger=LOGGERS["llm"],
     char_budget=CONFIG.prompt_char_budget,

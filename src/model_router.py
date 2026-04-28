@@ -38,10 +38,12 @@ class ModelChoice:
 
 def provider_for_model(model: str) -> str:
     """Pick a provider from a model name. Groq hosts llama/mixtral/qwen/gemma2;
-    everything else falls through to the Gemini provider."""
+    DeepSeek hosts deepseek*; everything else falls through to Gemini."""
     name = (model or "").lower()
     if name.startswith(("llama", "mixtral", "qwen")) or "groq" in name or name.startswith("gemma2"):
         return "groq"
+    if name.startswith("deepseek"):
+        return "deepseek"
     return "gemini"
 
 
@@ -67,9 +69,11 @@ class GeminiRouter:
         logger: Any,
         char_budget: int,
         groq_api_key: str | None = None,
+        deepseek_api_key: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.groq_api_key = groq_api_key
+        self.deepseek_api_key = deepseek_api_key
         self.models = models
         self.logger = logger
         self.char_budget = char_budget
@@ -78,7 +82,7 @@ class GeminiRouter:
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key) or bool(self.groq_api_key)
+        return bool(self.api_key) or bool(self.groq_api_key) or bool(self.deepseek_api_key)
 
     def _client_or_raise(self):
         if not self.api_key:
@@ -103,8 +107,11 @@ class GeminiRouter:
         return self._groq_client
 
     def _generate_json(self, model: str, prompt: str, request_id: str) -> dict[str, Any]:
-        if provider_for_model(model) == "groq":
+        provider = provider_for_model(model)
+        if provider == "groq":
             return self._generate_json_groq(model, prompt, request_id)
+        if provider == "deepseek":
+            return self._generate_json_deepseek(model, prompt, request_id)
         client = self._client_or_raise()
         start = time.perf_counter()
         log_event(self.logger, "llm_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
@@ -135,9 +142,41 @@ class GeminiRouter:
         log_event(self.logger, "llm_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
         return parsed
 
+    def _generate_json_deepseek(self, model: str, prompt: str, request_id: str) -> dict[str, Any]:
+        if not self.deepseek_api_key:
+            raise LLMUnavailable("DeepSeek API key is not configured.")
+        import httpx
+        start = time.perf_counter()
+        log_event(self.logger, "llm_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        if "reasoner" in model or "pro" in model:
+            body["extra_body"] = {"thinking": {"type": "enabled"}}
+            body.pop("temperature", None)  # Thinking mode doesn't support temperature
+        
+        response = httpx.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={"Authorization": f"Bearer {self.deepseek_api_key}"},
+            json=body,
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        text = response.json()["choices"][0]["message"]["content"] or ""
+        parsed = extract_json(text)
+        log_event(self.logger, "llm_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+        return parsed
+
     def _generate_text(self, model: str, prompt: str, request_id: str) -> str:
-        if provider_for_model(model) == "groq":
+        provider = provider_for_model(model)
+        if provider == "groq":
             return self._generate_text_groq(model, prompt, request_id)
+        if provider == "deepseek":
+            return self._generate_text_deepseek(model, prompt, request_id)
         client = self._client_or_raise()
         start = time.perf_counter()
         log_event(self.logger, "llm_summary_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
@@ -162,6 +201,33 @@ class GeminiRouter:
         )
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         text = ((response.choices[0].message.content or "").strip()) if response.choices else ""
+        log_event(self.logger, "llm_summary_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
+        return text
+
+    def _generate_text_deepseek(self, model: str, prompt: str, request_id: str) -> str:
+        if not self.deepseek_api_key:
+            raise LLMUnavailable("DeepSeek API key is not configured.")
+        import httpx
+        start = time.perf_counter()
+        log_event(self.logger, "llm_summary_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+        }
+        if "reasoner" in model or "pro" in model:
+            body["extra_body"] = {"thinking": {"type": "enabled"}}
+            body.pop("temperature", None)
+
+        response = httpx.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={"Authorization": f"Bearer {self.deepseek_api_key}"},
+            json=body,
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        text = (response.json()["choices"][0]["message"]["content"] or "").strip()
         log_event(self.logger, "llm_summary_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
         return text
 
@@ -281,8 +347,11 @@ class GeminiRouter:
         last_error: Exception | None = None
         for model in models:
             try:
-                if provider_for_model(model) == "groq":
+                provider = provider_for_model(model)
+                if provider == "groq":
                     yield from self._generate_text_stream_groq(model, prompt, request_id)
+                elif provider == "deepseek":
+                    yield from self._generate_text_stream_deepseek(model, prompt, request_id)
                 else:
                     client = self._client_or_raise()
                     start = time.perf_counter()
@@ -307,6 +376,49 @@ class GeminiRouter:
                     fallback_reason = "rate_limit"
                 log_event(self.logger, "llm_stream_failure", request_id=request_id, model=model, error=str(exc))
         raise LLMUnavailable(str(last_error) if last_error else "No model produced a streamed summary.")
+
+    def _generate_text_stream_deepseek(self, model: str, prompt: str, request_id: str):
+        if not self.deepseek_api_key:
+            raise LLMUnavailable("DeepSeek API key is not configured.")
+        import httpx
+        start = time.perf_counter()
+        log_event(self.logger, "llm_stream_request", request_id=request_id, model=model, prompt_tokens=estimate_tokens(prompt))
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "stream": True,
+        }
+        if "reasoner" in model or "pro" in model:
+            body["extra_body"] = {"thinking": {"type": "enabled"}}
+            body.pop("temperature", None)
+
+        with httpx.stream(
+            "POST",
+            "https://api.deepseek.com/chat/completions",
+            headers={"Authorization": f"Bearer {self.deepseek_api_key}"},
+            json=body,
+            timeout=120.0,
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[len("data: "):].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    choice = chunk["choices"][0]
+                    # Stream reasoning_content if present, but since it's mixed with content,
+                    # we just yield whatever text comes in.
+                    delta = choice["delta"].get("content") or choice["delta"].get("reasoning_content")
+                    if delta:
+                        yield delta
+                except Exception:
+                    continue
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        log_event(self.logger, "llm_stream_response", request_id=request_id, model=model, elapsed_ms=elapsed_ms)
 
     async def agent_loop_stream(
         self,
