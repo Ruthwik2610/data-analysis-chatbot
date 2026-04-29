@@ -16,3 +16,10 @@ dist/
 build/
 .next/
 *.local
+.agent/
+scratch/
+.pytest_cache/
+docs/
+logs/
+.claude/
+cache/

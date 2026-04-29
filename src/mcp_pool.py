@@ -11,10 +11,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -39,7 +42,9 @@ class ConnectorState:
     tools: list[dict[str, Any]] = field(default_factory=list)
     _exit_stack: contextlib.AsyncExitStack | None = None
     _session: ClientSession | None = None
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # NOTE: No lock needed — all ops share a single asyncio event loop and
+    # coroutines only interleave at explicit `await` points, making internal
+    # mutations safe without a mutex.
 
 
 def _generate_id() -> str:
@@ -77,6 +82,7 @@ class MCPPool:
                 if transport == "stdio":
                     if not command:
                         raise ValueError("Command required for stdio transport")
+                    # env=None → child inherits the full parent environment (PATH, HOME, etc.) — intentional.
                     params = StdioServerParameters(command=command, args=args or [], env=None)
                     read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
                 elif transport == "sse":
@@ -207,6 +213,12 @@ class MCPPool:
                 continue
             for t in s.tools:
                 tname = t["name"]
+                if tname in routing:
+                    logger.warning(
+                        "MCP tool name collision: '%s' exists in connector '%s' and '%s'. "
+                        "Using '%s'. Rename one tool to avoid ambiguous routing.",
+                        tname, routing[tname], s.id, s.id,
+                    )
                 # Last-write wins on name collisions across connectors.
                 routing[tname] = s.id
                 specs.append({
@@ -235,11 +247,13 @@ class MCPPool:
             if isinstance(mcp_servers, dict):
                 for name, config in mcp_servers.items():
                     if isinstance(config, dict):
+                        raw_args = config.get("args") or []
+                        safe_args = list(raw_args) if isinstance(raw_args, list) else []
                         servers.append({
                             "id": name,
                             "name": name,
                             "command": config.get("command"),
-                            "args": config.get("args"),
+                            "args": safe_args,
                             "url": config.get("url"),
                         })
 
@@ -281,6 +295,22 @@ class MCPPool:
                         command=state.command,
                         args=state.args,
                     )
+                elif state.status == "connected" and state._session:
+                    # Liveness probe: verify the session (and any underlying subprocess)
+                    # is still alive. A silent subprocess exit leaves status='connected'
+                    # indefinitely, causing the next call_tool() to throw unexpectedly.
+                    try:
+                        await asyncio.wait_for(
+                            state._session.list_tools(),
+                            timeout=CONNECT_TIMEOUT_SECONDS,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "MCP connector '%s' (%s) failed liveness probe: %s — marking as error.",
+                            state.name, cid, exc,
+                        )
+                        state.status = "error"
+                        state.last_error = str(exc)
 
     def start_health_loop(self) -> None:
         if self._health_task is None or self._health_task.done():

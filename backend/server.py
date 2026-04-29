@@ -224,7 +224,7 @@ def _detect_join_candidates(source_summaries: list[dict[str, Any]]) -> list[dict
     return sorted(candidates, key=lambda c: c["confidence"], reverse=True)
 
 
-def _assert_public_url(url: str) -> None:
+async def _assert_public_url(url: str) -> None:
     """Block SSRF: reject URLs whose host resolves to a private/loopback/link-local
     address or the cloud metadata endpoint. Bypass with ALLOW_PRIVATE_API_URLS=1."""
     if ALLOW_PRIVATE_API_URLS:
@@ -235,8 +235,9 @@ def _assert_public_url(url: str) -> None:
     host = parsed.hostname
     if not host:
         raise HTTPException(status_code=400, detail="URL is missing a host")
+    loop = asyncio.get_running_loop()
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = await loop.getaddrinfo(host, None)
     except socket.gaierror:
         raise HTTPException(status_code=400, detail=f"Could not resolve host: {host}")
     for info in infos:
@@ -294,7 +295,7 @@ async def _rehydrate_source(row: dict[str, Any]) -> DataSource:
         if typ == "json":
             return await asyncio.to_thread(prepare_local_file_source, Path(origin["path"]), cache_dir, cache_logger, "orders", None, False, "direct")
         if typ == "api":
-            _assert_public_url(origin["url"])
+            await _assert_public_url(origin["url"])
             return await asyncio.to_thread(prepare_api_source, origin["url"], cache_logger, origin.get("auth"))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=410, detail=f"Source file no longer exists: {exc}")
@@ -448,12 +449,12 @@ def attach_duckdb(body: AttachDuckDB) -> dict[str, Any]:
 
 
 @app.post("/sources/api")
-def attach_api(body: AttachAPI) -> dict[str, Any]:
-    _assert_public_url(body.url)
+async def attach_api(body: AttachAPI) -> dict[str, Any]:
+    await _assert_public_url(body.url)
     try:
-        source = prepare_api_source(body.url, LOGGERS["cache"], auth_header=body.auth)
+        source = await asyncio.to_thread(prepare_api_source, body.url, LOGGERS["cache"], auth_header=body.auth)
         if body.ingest == "sql" and source.dataframe is not None:
-            source = dataframe_to_duckdb_source(source.dataframe, CONFIG.cache_dir, LOGGERS["cache"], body.url, "API SQL cache")
+            source = await asyncio.to_thread(dataframe_to_duckdb_source, source.dataframe, CONFIG.cache_dir, LOGGERS["cache"], body.url, "API SQL cache")
         origin = {"type": "api", "url": body.url, "auth": body.auth, "ingest": body.ingest}
         source_id = _make_id()
         result = _persist_source(source_id, source, "api", origin)
@@ -665,8 +666,8 @@ def list_mcp_connectors() -> list[dict[str, Any]]:
 async def add_mcp_connector(body: MCPConnect) -> dict[str, Any]:
     if not body.url.strip():
         raise HTTPException(status_code=400, detail="url is required")
-    _assert_public_url(body.url.strip())
-    cid = await get_pool().connect(body.url.strip(), body.name or body.url.strip())
+    await _assert_public_url(body.url.strip())
+    cid = await get_pool().connect(url=body.url.strip(), name=body.name or body.url.strip())
     state = get_pool().connectors.get(cid)
     if state and state.status == "error":
         raise HTTPException(status_code=400, detail=state.last_error or "Failed to connect to MCP bridge")
@@ -689,8 +690,8 @@ async def update_mcp_connector(connector_id: str, body: MCPUpdate) -> dict[str, 
     requested_url = body.url.strip() if body.url and body.url.strip() else state.url
     requested_name = body.name or state.name
     if body.url is not None:
-        _assert_public_url(requested_url)
-        await pool.connect(requested_url, requested_name, connector_id=connector_id)
+        await _assert_public_url(requested_url)
+        await pool.connect(url=requested_url, name=requested_name, connector_id=connector_id)
         state = pool.connectors[connector_id]
         if state.status == "error":
             raise HTTPException(status_code=400, detail=state.last_error or "Reconnect failed")
@@ -716,8 +717,8 @@ async def use_connector(connector_id: str) -> dict[str, Any]:
     cfg = record["config"]
     try:
         if record["kind"] == "api":
-            _assert_public_url(cfg["url"])
-            source = prepare_api_source(cfg["url"], LOGGERS["cache"], auth_header=cfg.get("auth"))
+            await _assert_public_url(cfg["url"])
+            source = await asyncio.to_thread(prepare_api_source, cfg["url"], LOGGERS["cache"], auth_header=cfg.get("auth"))
             origin = {"type": "api", "url": cfg["url"], "auth": cfg.get("auth"), "ingest": "direct"}
             source_id = _make_id()
             return _persist_source(source_id, source, "api", origin)
@@ -736,6 +737,8 @@ def _df_to_payload(df: pd.DataFrame, limit: int = 200) -> dict[str, Any]:
         cleaned: list[Any] = []
         for v in row.tolist():
             if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                cleaned.append(None)
+            elif pd.isna(v):
                 cleaned.append(None)
             elif hasattr(v, "isoformat"):
                 cleaned.append(v.isoformat())
@@ -852,6 +855,7 @@ def _prepare_workspace_sync(chat_id: str, selected: list[tuple[dict[str, Any], D
 def _run_workspace_sql_sync(chat_id: str, sql: str) -> tuple[pd.DataFrame, int]:
     import duckdb
 
+    chat_id = Path(chat_id).name
     work_path = CONFIG.cache_dir / "workspaces" / f"{chat_id}.duckdb"
     start = time.perf_counter()
     con = duckdb.connect(str(work_path), read_only=True)
@@ -865,6 +869,7 @@ def _run_workspace_sql_sync(chat_id: str, sql: str) -> tuple[pd.DataFrame, int]:
 def _materialize_workspace_df_sync(chat_id: str, table_name: str, df: pd.DataFrame) -> dict[str, Any]:
     import duckdb
 
+    chat_id = Path(chat_id).name
     work_path = CONFIG.cache_dir / "workspaces" / f"{chat_id}.duckdb"
     con = duckdb.connect(str(work_path))
     try:
@@ -963,7 +968,7 @@ async def _run_mcp_agent(
         try:
             result = await pool.call_tool(connector_id, tool_name, args)
             text = extract_text_content(result)
-            df = parse_tool_result_to_dataframe(text)
+            df = await asyncio.to_thread(parse_tool_result_to_dataframe, text)
             if df is not None:
                 collected_dfs.append((tool_name, df))
             # Truncate text fed back to LLM to keep context lean.
@@ -1233,7 +1238,7 @@ async def _run_multi_source_agent(
         try:
             result = await pool.call_tool(connector_id, tool_name, args)
             text = extract_text_content(result)
-            df = parse_tool_result_to_dataframe(text)
+            df = await asyncio.to_thread(parse_tool_result_to_dataframe, text)
             if df is not None:
                 materialized_count += 1
                 table = f"mcp_{re.sub(r'[^0-9a-zA-Z]+', '_', tool_name).strip('_').lower()[:28]}_{materialized_count}"
