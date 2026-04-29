@@ -12,7 +12,6 @@ import asyncio
 import contextlib
 import json
 import secrets
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,18 +19,21 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client, StdioServerParameters
 
 
 HEALTH_INTERVAL_SECONDS = 600  # 10 min
-CONNECT_TIMEOUT_SECONDS = 20
+CONNECT_TIMEOUT_SECONDS = 10
 TOOL_CALL_TIMEOUT_SECONDS = 60
 
 
 @dataclass
 class ConnectorState:
     id: str
-    url: str
     name: str
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = field(default_factory=list)
     status: str = "connecting"  # connecting | connected | error
     last_error: str | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -57,38 +59,57 @@ class MCPPool:
         self.connectors: dict[str, ConnectorState] = {}
         self._health_task: asyncio.Task[None] | None = None
 
-    async def _open_session(self, url: str) -> tuple[contextlib.AsyncExitStack, ClientSession, list[dict[str, Any]]]:
-        """Open an MCP session. Dispatches by URL: `/sse` → legacy SSE transport,
+    async def _open_session(
+        self,
+        url: str | None = None,
+        command: str | None = None,
+        args: list[str] | None = None,
+    ) -> tuple[contextlib.AsyncExitStack, ClientSession, list[dict[str, Any]]]:
+        """Open an MCP session.
+        If command is provided, uses stdio transport.
+        Otherwise, dispatches by URL: `/sse` → legacy SSE transport,
         anything else → Streamable HTTP with SSE as a fallback."""
-        is_sse_url = url.endswith("/sse") or "/sse/" in url
+        is_sse_url = url and (url.endswith("/sse") or "/sse/" in url)
 
         async def _try(transport: str) -> tuple[contextlib.AsyncExitStack, ClientSession, list[dict[str, Any]]]:
             stack = contextlib.AsyncExitStack()
             try:
-                if transport == "sse":
+                if transport == "stdio":
+                    if not command:
+                        raise ValueError("Command required for stdio transport")
+                    params = StdioServerParameters(command=command, args=args or [], env=None)
+                    read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
+                elif transport == "sse":
+                    if not url:
+                        raise ValueError("URL required for sse transport")
                     streams = await stack.enter_async_context(sse_client(url))
+                    read_stream, write_stream = streams[0], streams[1]
                 else:
+                    if not url:
+                        raise ValueError("URL required for streamable_http transport")
                     streams = await stack.enter_async_context(streamablehttp_client(url))
-                # streamablehttp_client returns 3-tuple (read, write, get_session_id);
-                # sse_client returns 2-tuple. Take the first two either way.
-                read_stream, write_stream = streams[0], streams[1]
+                    read_stream, write_stream = streams[0], streams[1]
+
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
                 await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT_SECONDS)
-                tools_resp = await session.list_tools()
+                tools_resp = await asyncio.wait_for(session.list_tools(), timeout=CONNECT_TIMEOUT_SECONDS)
                 tools = [_tool_to_dict(t) for t in (tools_resp.tools or [])]
                 return stack, session, tools
             except BaseException:
                 await stack.aclose()
                 raise
 
+        if command:
+            return await _try("stdio")
+
+        if not url:
+            raise ValueError("Either command or url must be provided")
+
         if is_sse_url:
             return await _try("sse")
         try:
             return await _try("streamable_http")
         except Exception as exc:
-            # Only fall back when the server appears to reject Streamable HTTP at the
-            # protocol level (405/406/"not supported"). Network errors, timeouts, and
-            # auth failures should propagate so the real cause isn't masked.
             msg = str(exc).lower()
             protocol_rejection = (
                 isinstance(exc, NotImplementedError)
@@ -101,18 +122,34 @@ class MCPPool:
                 raise
             return await _try("sse")
 
-    async def connect(self, url: str, name: str | None = None, *, connector_id: str | None = None) -> str:
+    async def connect(
+        self,
+        url: str | None = None,
+        name: str | None = None,
+        *,
+        connector_id: str | None = None,
+        command: str | None = None,
+        args: list[str] | None = None,
+    ) -> str:
         cid = connector_id or _generate_id()
-        display = name or url
+        display = name or url or command or "unnamed"
         # If reconnecting, close the existing session first.
         existing = self.connectors.get(cid)
         if existing and existing._exit_stack:
             with contextlib.suppress(Exception):
                 await existing._exit_stack.aclose()
-        state = ConnectorState(id=cid, url=url, name=display, status="connecting")
+
+        state = ConnectorState(
+            id=cid,
+            name=display,
+            url=url,
+            command=command,
+            args=args or [],
+            status="connecting",
+        )
         self.connectors[cid] = state
         try:
-            stack, session, tools = await self._open_session(url)
+            stack, session, tools = await self._open_session(url=url, command=command, args=args)
             state._exit_stack = stack
             state._session = session
             state.tools = tools
@@ -185,27 +222,65 @@ class MCPPool:
         if not registry_path.exists():
             return
         try:
-            entries = json.loads(registry_path.read_text(encoding="utf-8"))
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
         except Exception:
             return
-        if not isinstance(entries, list):
-            return
-        for entry in entries:
+
+        # Support both legacy [ {url, name}, ... ] and standard { mcpServers: { name: {command, args, url}, ... } }
+        servers = []
+        if isinstance(data, list):
+            servers = data
+        elif isinstance(data, dict):
+            mcp_servers = data.get("mcpServers")
+            if isinstance(mcp_servers, dict):
+                for name, config in mcp_servers.items():
+                    if isinstance(config, dict):
+                        servers.append({
+                            "id": name,
+                            "name": name,
+                            "command": config.get("command"),
+                            "args": config.get("args"),
+                            "url": config.get("url"),
+                        })
+
+        for entry in servers:
+            if not isinstance(entry, dict):
+                continue
+            cid = entry.get("id") or entry.get("name")
             url = entry.get("url")
-            name = entry.get("name") or entry.get("id") or url
-            if not url:
+            command = entry.get("command")
+            args = entry.get("args")
+            name = entry.get("name") or cid or url or command
+
+            if not url and not command:
                 continue
-            # Skip if a connector for this URL is already in the pool — name is a display label, URL is identity.
-            if any(c.url == url for c in self.connectors.values()):
+
+            # Skip if already in the pool
+            if cid and cid in self.connectors:
                 continue
-            await self.connect(url, name)
+            if url and any(c.url == url for c in self.connectors.values()):
+                continue
+
+            await self.connect(
+                url=url,
+                name=name,
+                connector_id=cid,
+                command=command,
+                args=args,
+            )
 
     async def _health_loop(self) -> None:
         while True:
             await asyncio.sleep(HEALTH_INTERVAL_SECONDS)
             for cid, state in list(self.connectors.items()):
                 if state.status == "error":
-                    await self.connect(state.url, state.name, connector_id=cid)
+                    await self.connect(
+                        url=state.url,
+                        name=state.name,
+                        connector_id=cid,
+                        command=state.command,
+                        args=state.args,
+                    )
 
     def start_health_loop(self) -> None:
         if self._health_task is None or self._health_task.done():
