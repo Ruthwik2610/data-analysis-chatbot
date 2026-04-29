@@ -182,10 +182,42 @@ class MCPPool:
         state.name = name
         return True
 
+    async def connect_excel(
+        self,
+        df: "pd.DataFrame",
+        display_name: str,
+        *,
+        connector_id: str | None = None,
+        dedup_key: str | None = None,
+    ) -> str:
+        from src.excel_mcp_context import ExcelMCPConnector, build_tool_name
+        if dedup_key:
+            for cid, s in self.connectors.items():
+                if getattr(s, "_dedup_key", None) == dedup_key:
+                    return cid
+        slug = build_tool_name(display_name)
+        exc = ExcelMCPConnector(slug=slug, df=df, display_name=display_name)
+        cid = connector_id or _generate_id()
+        state = ConnectorState(id=cid, name=display_name, url=None, command=None, status="connected")
+        state.tools = exc.list_tools()
+        state._excel_connector = exc           # type: ignore[attr-defined]
+        if dedup_key:
+            state._dedup_key = dedup_key       # type: ignore[attr-defined]
+        self.connectors[cid] = state
+        return cid
+
     async def call_tool(self, connector_id: str, tool_name: str, arguments: dict[str, Any]) -> Any:
         state = self.connectors.get(connector_id)
-        if not state or state.status != "connected" or not state._session:
-            raise RuntimeError(f"Connector {connector_id} is not connected (status={state.status if state else 'missing'})")
+        if not state or state.status != "connected":
+            raise RuntimeError(
+                f"Connector {connector_id} is not connected "
+                f"(status={state.status if state else 'missing'})"
+            )
+        exc = getattr(state, "_excel_connector", None)
+        if exc is not None:
+            return await exc.call_tool(tool_name, arguments)
+        if not state._session:
+            raise RuntimeError(f"Connector {connector_id} has no session")
         return await asyncio.wait_for(
             state._session.call_tool(tool_name, arguments=arguments),
             timeout=TOOL_CALL_TIMEOUT_SECONDS,
