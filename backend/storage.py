@@ -10,9 +10,28 @@ from typing import Any, Iterator
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_files (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  file_path TEXT,
+  source_id TEXT REFERENCES sources(id) ON DELETE SET NULL,
+  sheet_name TEXT,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_files_project ON project_files(project_id);
+
 CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
   title TEXT,
+  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
   created_at REAL,
   updated_at REAL
 );
@@ -54,6 +73,24 @@ class Storage:
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as con:
+            # Check if project_id column exists in chats (migration)
+            try:
+                con.execute("ALTER TABLE chats ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL")
+            except sqlite3.OperationalError:
+                pass # Column already exists or table doesn't exist yet
+
+            try:
+                con.execute("ALTER TABLE project_files ADD COLUMN source_id TEXT REFERENCES sources(id) ON DELETE SET NULL")
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                con.execute("ALTER TABLE project_files ALTER COLUMN file_path DROP NOT NULL") # SQLite doesn't support this
+            except sqlite3.OperationalError:
+                # In SQLite, we can't easily drop NOT NULL. 
+                # But since we'll always provide at least an empty string or the path, it's fine.
+                pass
+
             con.executescript(SCHEMA)
             con.execute("PRAGMA journal_mode=WAL")
 
@@ -224,3 +261,68 @@ class Storage:
         if not row:
             return None
         return {**dict(row), "config": json.loads(row["config"]) if row["config"] else {}}
+
+    # -- projects ------------------------------------------------------------
+    def create_project(self, title: str) -> dict[str, Any]:
+        project_id = f"proj_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                "INSERT INTO projects (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (project_id, title, now, now),
+            )
+        return {"id": project_id, "title": title, "created_at": now, "updated_at": now}
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def get_project(self, project_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if not row:
+                return None
+            
+            # Join with sources to get the source name if available
+            files = con.execute(
+                """
+                SELECT pf.*, s.name as source_name 
+                FROM project_files pf 
+                LEFT JOIN sources s ON pf.source_id = s.id 
+                WHERE pf.project_id = ? 
+                ORDER BY pf.created_at ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        
+        project = dict(row)
+        project["files"] = [dict(f) for f in files]
+        return project
+
+    def delete_project(self, project_id: str) -> None:
+        with self._conn() as con:
+            con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+    def add_file_to_project(self, project_id: str, file_path: str | None, source_id: str | None = None, sheet_name: str | None = None) -> dict[str, Any]:
+        file_id = f"pfile_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        # Handle SQLite NOT NULL constraint by defaulting to empty string
+        safe_file_path = file_path if file_path is not None else ""
+        with self._conn() as con:
+            con.execute(
+                "INSERT INTO project_files (id, project_id, file_path, source_id, sheet_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (file_id, project_id, safe_file_path, source_id, sheet_name, now),
+            )
+            con.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+        return {"id": file_id, "project_id": project_id, "file_path": safe_file_path, "source_id": source_id, "sheet_name": sheet_name, "created_at": now}
+
+    def remove_file_from_project(self, project_id: str, file_id: str) -> None:
+        now = time.time()
+        with self._conn() as con:
+            con.execute("DELETE FROM project_files WHERE id = ? AND project_id = ?", (file_id, project_id))
+            con.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+
+    def update_chat_project(self, chat_id: str, project_id: str | None) -> None:
+        with self._conn() as con:
+            con.execute("UPDATE chats SET project_id = ? WHERE id = ?", (project_id, chat_id))

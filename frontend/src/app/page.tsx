@@ -4,10 +4,11 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { flushSync } from "react-dom";
 import { Sidebar } from "@/components/Sidebar";
 import { Topbar } from "@/components/Topbar";
+import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
 import { InputBar } from "@/components/InputBar";
 import { api, streamQuery } from "@/lib/api";
-import type { ChatSummary, Source, Message, ResultPayload, Pending } from "@/lib/types";
+import type { ChatSummary, Source, Message, ResultPayload, Pending, Project } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
 
@@ -19,6 +20,9 @@ export default function Home() {
   const [chatTitle, setChatTitle] = useState("New chat");
   const [loading, setLoading] = useState(false);
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -29,8 +33,11 @@ export default function Home() {
   const refreshChats = useCallback(async () => {
     try { setChats(await api.listChats()); } catch {}
   }, []);
+  const refreshProjects = useCallback(async () => {
+    try { setProjects(await api.listProjects()); } catch {}
+  }, []);
 
-  useEffect(() => { refreshSources(); refreshChats(); }, [refreshSources, refreshChats]);
+  useEffect(() => { refreshSources(); refreshChats(); refreshProjects(); }, [refreshSources, refreshChats, refreshProjects]);
 
   // Auto-restore the most recent chat on first load so reload always shows your last result.
   const didAutoRestore = useRef(false);
@@ -256,13 +263,23 @@ export default function Home() {
 
       let fullText = "";
       try {
-        for await (const ev of streamQuery({ chat_id: currentChatId, question, source_ids: selectedSourceIds }, queryAbortRef.current.signal)) {
+        for await (const ev of streamQuery({ 
+          chat_id: currentChatId, 
+          question, 
+          source_ids: selectedSourceIds 
+        }, queryAbortRef.current.signal)) {
           // flushSync forces React to commit before the next await — without this,
           // updates inside async iteration get batched until the loop finishes,
           // and the user sees "Thinking…" until the entire stream completes.
           flushSync(() => {
             if (ev.event === "meta") {
-              setCurrentChatId(ev.data.chat_id);
+              if (ev.data.chat_id !== currentChatId) {
+                // If it's a new chat and we have a project selected, link it
+                if (!currentChatId && currentProjectId) {
+                   api.updateChatProject(ev.data.chat_id, currentProjectId).catch(() => {});
+                }
+                setCurrentChatId(ev.data.chat_id);
+              }
               updateMessage(assistantId, { source: ev.data.source });
             } else if (ev.event === "thinking") {
               updateMessage(assistantId, { thinking: ev.data.step });
@@ -322,7 +339,37 @@ export default function Home() {
     setMessages([]);
     setCurrentChatId(null);
     setChatTitle("New chat");
+    // If we have a current project, ensure the new chat could be linked to it
+    // but usually new chat starts fresh.
   }, [abortInFlight]);
+
+  const handleNewProject = useCallback(async () => {
+    const title = prompt("Project Title:");
+    if (!title) return;
+    try {
+      const p = await api.createProject(title);
+      refreshProjects();
+      setCurrentProjectId(p.id);
+      setProjectDialogOpen(true);
+    } catch {}
+  }, [refreshProjects]);
+
+  const handleSelectProject = useCallback((id: string) => {
+    if (currentProjectId === id) {
+      setProjectDialogOpen(true);
+    } else {
+      setCurrentProjectId(id);
+    }
+  }, [currentProjectId]);
+
+  const handleDeleteProject = useCallback(async (id: string) => {
+    if (!confirm("Delete this project? Chats will remain but context links will be removed.")) return;
+    try {
+      await api.deleteProject(id);
+      if (currentProjectId === id) setCurrentProjectId(null);
+      refreshProjects();
+    } catch {}
+  }, [currentProjectId, refreshProjects]);
 
   const handleSelectChat = useCallback(async (id: string) => {
     abortInFlight();
@@ -342,6 +389,7 @@ export default function Home() {
       setCurrentChatId(id);
       setMessages(restored);
       setChatTitle(chat.title || "Chat");
+      setCurrentProjectId(chat.project_id || null);
     } catch {}
   }, [abortInFlight]);
 
@@ -414,9 +462,18 @@ export default function Home() {
         onDeleteChat={handleDeleteChat}
         onToggleSource={handleToggleSource}
         onDeleteSource={handleDeleteSource}
+        projects={projects}
+        currentProjectId={currentProjectId}
+        onSelectProject={handleSelectProject}
+        onNewProject={handleNewProject}
+        onDeleteProject={handleDeleteProject}
       />
       <main className="flex flex-col flex-1 min-w-0" style={{ background: "var(--color-background-primary)" }}>
-        <Topbar title={chatTitle} activeSource={activeSource} />
+        <Topbar 
+          title={chatTitle} 
+          activeSource={activeSource} 
+          projectName={projects.find(p => p.id === currentProjectId)?.title}
+        />
         <MessageList
           messages={messages}
           loading={loading}
@@ -434,6 +491,13 @@ export default function Home() {
           placeholder={selectedSources.length ? "Ask across the selected sources, or paste a URL…" : "Drop a file, paste a URL, or connect an MCP bridge…"}
         />
       </main>
+      {projectDialogOpen && currentProjectId && (
+        <ProjectDialog
+          projectId={currentProjectId}
+          onClose={() => setProjectDialogOpen(false)}
+          onUpdate={() => { refreshProjects(); refreshSources(); }}
+        />
+      )}
     </div>
   );
 }

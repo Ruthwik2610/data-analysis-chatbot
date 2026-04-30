@@ -22,6 +22,25 @@ export interface ChatSummary {
   created_at: number;
   updated_at: number;
   message_count: number;
+  project_id?: string | null;
+}
+
+export interface ProjectFile {
+  id: string;
+  project_id: string;
+  file_path: string | null;
+  source_id: string | null;
+  source_name?: string | null;
+  sheet_name: string | null;
+  created_at: number;
+}
+
+export interface Project {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  files: ProjectFile[];
 }
 
 export interface ResultPayload {
@@ -89,10 +108,11 @@ export type MCPStatus = "connecting" | "connected" | "error";
 export interface MCPConnector {
   id: string;
   name: string;
-  url: string;
+  url: string | null;
   status: MCPStatus;
   tools: { name: string; description?: string; input_schema?: any }[];
   last_error?: string | null;
+  is_excel?: boolean;
 }
 
 export interface UploadResponse {

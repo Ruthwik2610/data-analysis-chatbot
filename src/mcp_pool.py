@@ -233,6 +233,7 @@ class MCPPool:
                 "status": s.status,
                 "tools": s.tools if s.status == "connected" else [],
                 "last_error": s.last_error,
+                "is_excel": hasattr(s, "_excel_connector"),
             })
         return out
 

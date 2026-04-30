@@ -374,6 +374,25 @@ class MCPUpdate(BaseModel):
     url: str | None = None
 
 
+class AttachExcelMCP(BaseModel):
+    path: str
+    sheet: str | None = None
+
+
+class ProjectCreate(BaseModel):
+    title: str
+
+
+class ProjectAddFile(BaseModel):
+    file_path: str | None = None
+    source_id: str | None = None
+    sheet: str | None = None
+
+
+class ChatUpdateProject(BaseModel):
+    project_id: str | None
+
+
 class QueryRequest(BaseModel):
     chat_id: str | None = None
     question: str
@@ -625,11 +644,51 @@ def list_chats() -> list[dict[str, Any]]:
     return DB.list_chats()
 
 
+async def ensure_project_context(project_id: str):
+    project = DB.get_project(project_id)
+    if not project:
+        return
+    
+    pool = get_pool()
+    for file_rec in project["files"]:
+        path = None
+        if file_rec.get("source_id"):
+            path = UPLOAD_DIR / file_rec["source_id"]
+        elif file_rec.get("file_path"):
+            path = Path(file_rec["file_path"]).expanduser()
+        
+        if not path or not path.exists():
+            logging.warning(f"Project file not found: {path}")
+            continue
+        
+        # dedup_key matches the logic in attach_excel_mcp
+        dedup_key = f"excel-mcp::{path.resolve()}::{path.stat().st_mtime_ns}::{file_rec['sheet_name'] or 0}"
+        
+        # Check if already in pool
+        exists = False
+        for cid, s in pool.connectors.items():
+            if getattr(s, "_dedup_key", None) == dedup_key:
+                exists = True
+                break
+        
+        if not exists:
+            try:
+                source = await asyncio.to_thread(prepare_excel_source, path, file_rec['sheet_name'], LOGGERS["cache"])
+                if source.dataframe is not None and not source.dataframe.empty:
+                    await pool.connect_excel(df=source.dataframe, display_name=path.name, dedup_key=dedup_key)
+            except Exception as exc:
+                logging.error(f"Failed to auto-load project file {path}: {exc}")
+
+
 @app.get("/chats/{chat_id}")
-def get_chat(chat_id: str) -> dict[str, Any]:
+async def get_chat(chat_id: str) -> dict[str, Any]:
     chat = DB.get_chat(chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
+    
+    if chat.get("project_id"):
+        await ensure_project_context(chat["project_id"])
+        
     return chat
 
 
@@ -641,6 +700,61 @@ def create_chat() -> dict[str, Any]:
 @app.delete("/chats/{chat_id}")
 def delete_chat(chat_id: str) -> dict[str, Any]:
     DB.delete_chat(chat_id)
+    return {"ok": True}
+
+
+@app.patch("/chats/{chat_id}/project")
+def update_chat_project(chat_id: str, body: ChatUpdateProject) -> dict[str, Any]:
+    DB.update_chat_project(chat_id, body.project_id)
+    return {"ok": True}
+
+
+# -- projects --------------------------------------------------------------
+@app.get("/projects")
+def list_projects() -> list[dict[str, Any]]:
+    return DB.list_projects()
+
+
+@app.post("/projects")
+def create_project(body: ProjectCreate) -> dict[str, Any]:
+    return DB.create_project(body.title)
+
+
+@app.get("/projects/{project_id}")
+def get_project(project_id: str) -> dict[str, Any]:
+    p = DB.get_project(project_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return p
+
+
+@app.delete("/projects/{project_id}")
+def delete_project(project_id: str) -> dict[str, Any]:
+    DB.delete_project(project_id)
+    return {"ok": True}
+
+
+@app.post("/projects/{project_id}/files")
+def add_project_file(project_id: str, body: ProjectAddFile) -> dict[str, Any]:
+    if body.source_id:
+        # Check if source exists
+        s = DB.get_source(body.source_id)
+        if not s:
+            raise HTTPException(status_code=404, detail="Source not found")
+        return DB.add_file_to_project(project_id, None, source_id=body.source_id, sheet_name=body.sheet)
+    
+    if not body.file_path:
+        raise HTTPException(status_code=400, detail="file_path or source_id required")
+        
+    path = Path(body.file_path).expanduser()
+    if not path.exists():
+        raise HTTPException(status_code=400, detail="File not found")
+    return DB.add_file_to_project(project_id, str(path), sheet_name=body.sheet)
+
+
+@app.delete("/projects/{project_id}/files/{file_id}")
+def delete_project_file(project_id: str, file_id: str) -> dict[str, Any]:
+    DB.remove_file_from_project(project_id, file_id)
     return {"ok": True}
 
 
@@ -707,6 +821,44 @@ async def remove_mcp_connector(connector_id: str) -> dict[str, Any]:
     if not ok:
         raise HTTPException(status_code=404, detail="Connector not found")
     return {"ok": True}
+
+
+EXCEL_MCP_MAX_BYTES = 50 * 1024 * 1024  # 50MB
+
+
+@app.post("/mcp/excel")
+async def attach_excel_mcp(body: AttachExcelMCP) -> dict[str, Any]:
+    path = Path(body.path).expanduser()
+    if not path.exists():
+        raise HTTPException(status_code=400, detail=f"File not found: {body.path}")
+    if path.suffix.lower() not in {".xlsx", ".xls"}:
+        raise HTTPException(status_code=400, detail="Only .xlsx and .xls files are supported for Excel MCP")
+    if path.stat().st_size > EXCEL_MCP_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="File too large for in-process MCP (max 50MB)")
+
+    # dedup_key includes path, mtime, and sheet
+    dedup_key = f"excel-mcp::{path.resolve()}::{path.stat().st_mtime_ns}::{body.sheet or 0}"
+    pool = get_pool()
+    for cid, s in pool.connectors.items():
+        if getattr(s, "_dedup_key", None) == dedup_key:
+            return {"id": cid, "name": s.name, "status": s.status, "tools": s.tools}
+
+    try:
+        source = await asyncio.to_thread(prepare_excel_source, path, body.sheet, LOGGERS["cache"])
+        df = source.dataframe
+        if df is None or df.empty:
+            raise ValueError("Sheet has no data")
+        
+        cid = await pool.connect_excel(df=df, display_name=path.name, dedup_key=dedup_key)
+        state = pool.connectors[cid]
+        return {
+            "id": cid,
+            "name": state.name,
+            "status": state.status,
+            "tools": state.tools,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to load Excel: {exc}")
 
 
 @app.post("/connectors/{connector_id}/use")
@@ -1358,6 +1510,10 @@ async def _load_query_sources(
 @app.post("/query")
 async def query(body: QueryRequest):
     chat_id = body.chat_id or DB.create_chat()["id"]
+    chat = DB.get_chat(chat_id)
+    if chat and chat.get("project_id"):
+        await ensure_project_context(chat["project_id"])
+
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")

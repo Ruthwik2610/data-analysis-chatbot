@@ -5,9 +5,10 @@ import type { Source } from "@/lib/types";
 interface TopbarProps {
   title: string;
   activeSource: Source | undefined;
+  projectName?: string | null;
 }
 
-export function Topbar({ title, activeSource }: TopbarProps) {
+export function Topbar({ title, activeSource, projectName }: TopbarProps) {
   return (
     <div
       className="flex items-center justify-between px-5 py-3"
@@ -17,6 +18,11 @@ export function Topbar({ title, activeSource }: TopbarProps) {
         <span className="text-[13px] font-medium truncate" style={{ color: "var(--color-text-primary)" }}>
           {title}
         </span>
+        {projectName && (
+           <span className="text-[11px] px-1.5 py-0.5 bg-gray-100 rounded text-gray-500 font-medium">
+             Project: {projectName}
+           </span>
+        )}
         {activeSource && (
           <span
             className="inline-flex items-center gap-1.5 text-[11px] px-2 py-[3px] rounded-full"

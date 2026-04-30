@@ -37,9 +37,12 @@ interface ConnectorPopoverProps {
 }
 
 export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: ConnectorPopoverProps) {
-  const [tab, setTab] = useState<"api" | "mcp">("api");
+  const [tab, setTab] = useState<"api" | "mcp" | "excel">("api");
   const [url, setUrl] = useState("");
   const [auth, setAuth] = useState("");
+
+  const [excelPath, setExcelPath] = useState("");
+  const [excelSheet, setExcelSheet] = useState("");
 
   // MCP agent-loop state (replaces the legacy tool_args UI)
   const [bridgeUrl, setBridgeUrl] = useState("");
@@ -131,7 +134,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         onAttached(src);
         setSave(false);
         onClose();
-      } else {
+      } else if (tab === "mcp") {
         const bridge = bridgeUrl.trim();
         if (!bridge) throw new Error("Paste a bridge URL.");
         const name = bridgeName.trim() || bridge;
@@ -149,6 +152,19 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         // Don't close — let the user see the green dot appear in the saved list.
         if (conn.status !== "connected") {
           setError(conn.last_error || "Connector reported a non-connected status");
+        }
+      } else if (tab === "excel") {
+        const path = excelPath.trim();
+        if (!path) throw new Error("Enter a file path.");
+        const sheet = excelSheet.trim() || undefined;
+        const conn = await api.attachExcelMCP(path, sheet);
+        setExcelPath("");
+        setExcelSheet("");
+        setSave(false);
+        await refreshMCP();
+        notifySourcesChanged();
+        if (conn.status !== "connected") {
+          setError(conn.last_error || "Excel load failed");
         }
       }
     } catch (e: any) {
@@ -191,7 +207,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
   const reconnectMCP = async (c: MCPConnector) => {
     setBusy(true);
     try {
-      await api.updateMCPConnector(c.id, { url: c.url, name: c.name });
+      await api.updateMCPConnector(c.id, { url: c.url ?? undefined, name: c.name ?? undefined });
       await refreshMCP();
       notifySourcesChanged();
     } catch (e: any) {
@@ -201,7 +217,11 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
     }
   };
 
-  const submitDisabled = busy || (tab === "api" ? !url.trim() : !bridgeUrl.trim());
+  const submitDisabled = busy || (
+    tab === "api" ? !url.trim() : 
+    tab === "mcp" ? !bridgeUrl.trim() :
+    !excelPath.trim()
+  );
 
   return (
     <div
@@ -240,6 +260,12 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         >
           MCP Bridge
         </button>
+        <button
+          onClick={() => setTab("excel")}
+          style={{ color: tab === "excel" ? "var(--color-text-primary)" : "var(--color-text-tertiary)" }}
+        >
+          Excel
+        </button>
       </div>
 
       <div className="p-3 space-y-2">
@@ -271,7 +297,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
               }}
             />
           </>
-        ) : (
+        ) : tab === "mcp" ? (
           <>
             <input
               autoFocus
@@ -302,7 +328,46 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
             </div>
 
             <MCPList
-              connectors={mcpConnectors}
+              connectors={mcpConnectors.filter(c => !c.is_excel)}
+              busy={busy}
+              onReconnect={reconnectMCP}
+              onRemove={removeMCP}
+            />
+          </>
+        ) : (
+          <>
+            <input
+              id="excel-mcp-path"
+              autoFocus
+              value={excelPath}
+              onChange={(e) => setExcelPath(e.target.value)}
+              placeholder="Local path to .xlsx file"
+              className="w-full px-2.5 py-1.5 text-[12.5px] rounded-md outline-none"
+              style={{
+                background: "var(--color-background-primary)",
+                border: "0.5px solid var(--color-border-secondary)",
+                color: "var(--color-text-primary)",
+              }}
+            />
+            <input
+              id="excel-mcp-sheet"
+              value={excelSheet}
+              onChange={(e) => setExcelSheet(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submit()}
+              placeholder="Sheet name (optional)"
+              className="w-full px-2.5 py-1.5 text-[12.5px] rounded-md outline-none"
+              style={{
+                background: "var(--color-background-primary)",
+                border: "0.5px solid var(--color-border-secondary)",
+                color: "var(--color-text-primary)",
+              }}
+            />
+            <div className="text-[11px]" style={{ color: "var(--color-text-tertiary)" }}>
+              The Excel sheet will be loaded as an in-process MCP tool for natural language querying.
+            </div>
+
+            <MCPList
+              connectors={mcpConnectors.filter(c => !!c.is_excel)}
               busy={busy}
               onReconnect={reconnectMCP}
               onRemove={removeMCP}
@@ -435,7 +500,7 @@ function MCPList({
               }}
             />
             <div className="flex-1 min-w-0">
-              <div className="text-[12px] truncate" style={{ color: "var(--color-text-primary)" }} title={c.url}>
+              <div className="text-[12px] truncate" style={{ color: "var(--color-text-primary)" }} title={c.url ?? undefined}>
                 {c.name}
               </div>
               <div className="text-[10.5px]" style={{ color }}>
@@ -444,7 +509,7 @@ function MCPList({
               {c.status === "error" && c.last_error && (
                 <div className="text-[10.5px] mt-0.5 flex items-start gap-1" style={{ color: "var(--color-text-tertiary)" }}>
                   <AlertCircle size={10} style={{ marginTop: 1, flexShrink: 0 }} />
-                  <span className="truncate" title={c.last_error}>{c.last_error}</span>
+                  <span className="truncate" title={c.last_error ?? undefined}>{c.last_error}</span>
                 </div>
               )}
             </div>

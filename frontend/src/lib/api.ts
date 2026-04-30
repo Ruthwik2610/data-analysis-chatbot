@@ -1,4 +1,4 @@
-import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector } from "./types";
+import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY || "";
@@ -75,7 +75,7 @@ export const api = {
   activateSource: (id: string) => jpost(`/sources/${id}/activate`, {}),
 
   listChats: () => jget<ChatSummary[]>("/chats"),
-  getChat: (id: string) => jget<{ id: string; title: string; messages: any[] }>(`/chats/${id}`),
+  getChat: (id: string) => jget<{ id: string; title: string; messages: any[]; project_id: string | null }>(`/chats/${id}`),
   deleteChat: (id: string) => jdelete(`/chats/${id}`),
 
   listConnectors: () => jget<Connector[]>("/connectors"),
@@ -95,6 +95,26 @@ export const api = {
       return r.json() as Promise<MCPConnector>;
     }),
   removeMCPConnector: (id: string) => jdelete(`/mcp/connectors/${id}`),
+  attachExcelMCP: (path: string, sheet?: string) =>
+    jpost<MCPConnector>("/mcp/excel", { path, sheet: sheet || null }),
+
+  listProjects: () => jget<Project[]>("/projects"),
+  createProject: (title: string) => jpost<Project>("/projects", { title }),
+  getProject: (id: string) => jget<Project>(`/projects/${id}`),
+  deleteProject: (id: string) => jdelete(`/projects/${id}`),
+  addProjectFile: (projectId: string, filePath?: string, sheet?: string, sourceId?: string) =>
+    jpost<ProjectFile>(`/projects/${projectId}/files`, { file_path: filePath, sheet, source_id: sourceId }),
+  removeProjectFile: (projectId: string, fileId: string) =>
+    jdelete(`/projects/${projectId}/files/${fileId}`),
+  updateChatProject: (chatId: string, projectId: string | null) =>
+    fetch(`${BASE}/chats/${chatId}/project`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ project_id: projectId }),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`${r.status}`);
+      return r.json();
+    }),
 };
 
 export async function* streamQuery(
