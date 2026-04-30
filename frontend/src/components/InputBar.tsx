@@ -1,6 +1,6 @@
 "use client";
 
-import { Plug, ArrowUp, Square } from "lucide-react";
+import { ArrowUp, Paperclip, Plug, Square } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { FilePickButton } from "./FilePickButton";
 import { ConnectorPopover } from "./ConnectorPopover";
@@ -14,9 +14,10 @@ interface InputBarProps {
   loading?: boolean;
   disabled: boolean;
   placeholder?: string;
+  currentProjectId?: string | null;
 }
 
-export function InputBar({ onSend, onStop, onPickFile, onAttached, loading, disabled, placeholder }: InputBarProps) {
+export function InputBar({ onSend, onStop, onPickFile, onAttached, loading, disabled, placeholder, currentProjectId }: InputBarProps) {
   const [value, setValue] = useState("");
   const [popOpen, setPopOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -45,80 +46,94 @@ export function InputBar({ onSend, onStop, onPickFile, onAttached, loading, disa
   return (
     <div className="px-4 py-3 relative" style={{ borderTop: "0.5px solid var(--color-border-tertiary)" }}>
       <div
-        className="flex items-end gap-2 px-3 py-2 relative"
+        className="flex flex-col gap-2 px-3 py-2 relative"
         style={{
           background: "var(--color-background-secondary)",
           border: "0.5px solid var(--color-border-secondary)",
           borderRadius: 14,
         }}
       >
-        <div className="flex gap-1 mb-[3px]">
-          <FilePickButton onPick={onPickFile} disabled={disabled} title="Attach a file (CSV, Excel, database, JSON)" />
+        <div role="toolbar" aria-label="Composer actions" className="flex items-center gap-1">
+          <FilePickButton
+            onPick={onPickFile}
+            disabled={disabled}
+            title="Attach a file (CSV, Excel, database, JSON)"
+            variant="card"
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[8px] text-[11.5px] transition-colors"
+          >
+            <Paperclip size={13} strokeWidth={1.5} />
+            <span className="hidden sm:inline">Attach</span>
+          </FilePickButton>
           <button
             ref={plugRef}
             type="button"
-            title="Connect an API"
+            title="Connect a source"
+            aria-label="Connect"
             onClick={() => setPopOpen((s) => !s)}
-            className="w-[26px] h-[26px] rounded-[8px] flex items-center justify-center transition-colors flex-shrink-0"
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[8px] text-[11.5px] transition-colors flex-shrink-0"
             style={{
               color: popOpen ? "var(--color-text-primary)" : "var(--color-text-secondary)",
               background: popOpen ? "var(--color-background-primary)" : "transparent",
             }}
           >
-            <Plug size={15} strokeWidth={1.4} />
+            <Plug size={13} strokeWidth={1.5} />
+            <span className="hidden sm:inline">Connect</span>
           </button>
           <ConnectorPopover
             open={popOpen}
             onClose={() => setPopOpen(false)}
             onAttached={onAttached}
             anchorRef={plugRef}
+            currentProjectId={currentProjectId}
           />
         </div>
-        <textarea
-          ref={ref}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-          rows={1}
-          placeholder={placeholder || "Ask about your data, drop a file, or paste a URL…"}
-          disabled={disabled}
-          className="flex-1 resize-none bg-transparent outline-none text-[13px] leading-[1.5] py-1"
-          style={{ color: "var(--color-text-primary)" }}
-        />
-        {loading && onStop ? (
-          <button
-            onClick={onStop}
-            className="w-7 h-7 rounded-[8px] flex items-center justify-center flex-shrink-0 transition-colors"
-            style={{
-              background: "var(--color-text-primary)",
-              color: "var(--color-background-primary)",
-              cursor: "pointer",
+        <div className="flex items-end gap-2">
+          <textarea
+            ref={ref}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
             }}
-            title="Stop"
-          >
-            <Square size={11} strokeWidth={0} fill="currentColor" />
-          </button>
-        ) : (
-          <button
-            onClick={submit}
-            disabled={disabled || !value.trim()}
-            className="w-7 h-7 rounded-[8px] flex items-center justify-center flex-shrink-0 transition-opacity"
-            style={{
-              background: "var(--color-text-primary)",
-              color: "var(--color-background-primary)",
-              opacity: !value.trim() || disabled ? 0.3 : 1,
-              cursor: !value.trim() || disabled ? "default" : "pointer",
-            }}
-            title="Send"
-          >
-            <ArrowUp size={14} strokeWidth={2} />
-          </button>
-        )}
+            rows={1}
+            placeholder={placeholder || "Ask about your data, drop a file, or paste a URL…"}
+            disabled={disabled}
+            className="flex-1 resize-none bg-transparent outline-none text-[13px] leading-[1.5] py-1"
+            style={{ color: "var(--color-text-primary)" }}
+          />
+          {loading && onStop ? (
+            <button
+              onClick={onStop}
+              className="w-7 h-7 rounded-[8px] flex items-center justify-center flex-shrink-0 transition-colors"
+              style={{
+                background: "var(--color-text-primary)",
+                color: "var(--color-background-primary)",
+                cursor: "pointer",
+              }}
+              title="Stop"
+            >
+              <Square size={11} strokeWidth={0} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              onClick={submit}
+              disabled={disabled || !value.trim()}
+              className="w-7 h-7 rounded-[8px] flex items-center justify-center flex-shrink-0 transition-opacity"
+              style={{
+                background: "var(--color-text-primary)",
+                color: "var(--color-background-primary)",
+                opacity: !value.trim() || disabled ? 0.3 : 1,
+                cursor: !value.trim() || disabled ? "default" : "pointer",
+              }}
+              title="Send"
+            >
+              <ArrowUp size={14} strokeWidth={2} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -34,9 +34,10 @@ interface ConnectorPopoverProps {
   onClose: () => void;
   onAttached: (source: Source) => void;
   anchorRef: React.RefObject<HTMLElement | null>;
+  currentProjectId?: string | null;
 }
 
-export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: ConnectorPopoverProps) {
+export function ConnectorPopover({ open, onClose, onAttached, anchorRef, currentProjectId }: ConnectorPopoverProps) {
   const [tab, setTab] = useState<"api" | "mcp" | "excel">("api");
   const [url, setUrl] = useState("");
   const [auth, setAuth] = useState("");
@@ -47,6 +48,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
   // MCP agent-loop state (replaces the legacy tool_args UI)
   const [bridgeUrl, setBridgeUrl] = useState("");
   const [bridgeName, setBridgeName] = useState("");
+  const [mcpScope, setMcpScope] = useState<"project" | "global">(currentProjectId ? "project" : "global");
   const [mcpConnectors, setMcpConnectors] = useState<MCPConnector[]>([]);
 
   const [save, setSave] = useState(false);
@@ -64,6 +66,10 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
     }
   }, []);
 
+  useEffect(() => {
+    setMcpScope(currentProjectId ? "project" : "global");
+  }, [currentProjectId]);
+
   // Auto-reconnect saved MCPs that the server doesn't already know about.
   useEffect(() => {
     if (!open) return;
@@ -77,7 +83,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         if (cancelled) return;
         if (liveUrls.has(s.url)) continue;
         try {
-          await api.addMCPConnector(s.url, s.name);
+          await api.addMCPConnector(s.url, s.name, { scope: "global" });
         } catch {
           // ignore — health loop will retry
         }
@@ -138,7 +144,11 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         const bridge = bridgeUrl.trim();
         if (!bridge) throw new Error("Paste a bridge URL.");
         const name = bridgeName.trim() || bridge;
-        const conn = await api.addMCPConnector(bridge, name);
+        const scopeOptions = {
+          scope: currentProjectId && mcpScope === "project" ? "project" as const : "global" as const,
+          project_id: currentProjectId && mcpScope === "project" ? currentProjectId : null,
+        };
+        const conn = await api.addMCPConnector(bridge, name, scopeOptions);
         if (save) {
           const list = readSavedMCPs().filter((s) => s.url !== bridge);
           list.push({ name, url: bridge });
@@ -247,25 +257,10 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         </button>
       </div>
 
-      <div className="px-3 pt-3 flex gap-4 text-[11px] font-medium uppercase tracking-wider">
-        <button
-          onClick={() => setTab("api")}
-          style={{ color: tab === "api" ? "var(--color-text-primary)" : "var(--color-text-tertiary)" }}
-        >
-          JSON API
-        </button>
-        <button
-          onClick={() => setTab("mcp")}
-          style={{ color: tab === "mcp" ? "var(--color-text-primary)" : "var(--color-text-tertiary)" }}
-        >
-          MCP Bridge
-        </button>
-        <button
-          onClick={() => setTab("excel")}
-          style={{ color: tab === "excel" ? "var(--color-text-primary)" : "var(--color-text-tertiary)" }}
-        >
-          Excel
-        </button>
+      <div role="tablist" aria-label="Source type" className="px-3 pt-3 grid grid-cols-3 gap-1">
+        <TabButton label="API" selected={tab === "api"} onClick={() => setTab("api")} />
+        <TabButton label="MCP" selected={tab === "mcp"} onClick={() => setTab("mcp")} />
+        <TabButton label="Excel" selected={tab === "excel"} onClick={() => setTab("excel")} />
       </div>
 
       <div className="p-3 space-y-2">
@@ -326,6 +321,38 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
             <div className="text-[11px]" style={{ color: "var(--color-text-tertiary)" }}>
               The model will discover and call the bridge&apos;s tools per question — no per-arg form.
             </div>
+            {currentProjectId && (
+              <div className="grid grid-cols-2 gap-1" role="radiogroup" aria-label="MCP scope">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={mcpScope === "project"}
+                  onClick={() => setMcpScope("project")}
+                  className="px-2 py-1 rounded-[8px] text-[11.5px]"
+                  style={{
+                    background: mcpScope === "project" ? "var(--color-background-secondary)" : "transparent",
+                    border: "0.5px solid var(--color-border-tertiary)",
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  Add to this project
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={mcpScope === "global"}
+                  onClick={() => setMcpScope("global")}
+                  className="px-2 py-1 rounded-[8px] text-[11.5px]"
+                  style={{
+                    background: mcpScope === "global" ? "var(--color-background-secondary)" : "transparent",
+                    border: "0.5px solid var(--color-border-tertiary)",
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  Enable globally
+                </button>
+              </div>
+            )}
 
             <MCPList
               connectors={mcpConnectors.filter(c => !c.is_excel)}
@@ -447,6 +474,24 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef }: Conne
         </div>
       )}
     </div>
+  );
+}
+
+function TabButton({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
+  return (
+    <button
+      role="tab"
+      aria-selected={selected}
+      onClick={onClick}
+      className="px-2 py-1.5 rounded-[8px] text-[12px] font-medium transition-colors"
+      style={{
+        background: selected ? "var(--color-background-secondary)" : "transparent",
+        color: selected ? "var(--color-text-primary)" : "var(--color-text-tertiary)",
+        border: selected ? "0.5px solid var(--color-border-tertiary)" : "0.5px solid transparent",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

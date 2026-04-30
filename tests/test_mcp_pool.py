@@ -221,3 +221,47 @@ def test_aggregate_tools_warns_on_name_collision(monkeypatch):
     assert any("query" in w or "collision" in w.lower() for w in warnings), (
         "aggregate_tools() must emit a warning when tool name 'query' collides across connectors"
     )
+
+
+def test_aggregate_tools_filters_to_allowed_connectors():
+    pool = MCPPool()
+    project_state = ConnectorState(id="project-db", name="Project DB", status="connected")
+    project_state.tools = [{"name": "project_query", "description": "Query project data", "input_schema": {}}]
+    global_state = ConnectorState(id="global-db", name="Global DB", status="connected")
+    global_state.tools = [{"name": "global_query", "description": "Query global data", "input_schema": {}}]
+    pool.connectors["project-db"] = project_state
+    pool.connectors["global-db"] = global_state
+
+    specs, routing = pool.aggregate_tools(allowed_connector_ids={"project-db"})
+
+    assert [s["name"] for s in specs] == ["project_query"]
+    assert routing == {"project_query": "project-db"}
+
+
+def test_aggregate_tools_collision_warning_only_for_visible_connectors():
+    import logging
+
+    pool = MCPPool()
+    for cid in ["hidden", "visible"]:
+        state = ConnectorState(id=cid, name=cid, status="connected")
+        state.tools = [{"name": "query", "description": "Run SQL", "input_schema": {}}]
+        pool.connectors[cid] = state
+
+    warnings: list[str] = []
+
+    class CapturingHandler(logging.Handler):
+        def emit(self, record):
+            if record.levelno == logging.WARNING:
+                warnings.append(record.getMessage())
+
+    logger = logging.getLogger("src.mcp_pool")
+    handler = CapturingHandler()
+    logger.addHandler(handler)
+    try:
+        specs, routing = pool.aggregate_tools(allowed_connector_ids={"visible"})
+    finally:
+        logger.removeHandler(handler)
+
+    assert [s["connector_id"] for s in specs] == ["visible"]
+    assert routing == {"query": "visible"}
+    assert warnings == []

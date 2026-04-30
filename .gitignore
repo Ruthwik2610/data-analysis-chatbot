@@ -11,6 +11,7 @@ claude.md
 WALKTHROUGH.md
 AGENTS.md
 mcp.json
+mcp_connectors.json
 mcp/
 node_modules/
 dist/

@@ -65,6 +65,33 @@ CREATE TABLE IF NOT EXISTS connectors (
   config TEXT,
   created_at REAL
 );
+
+CREATE TABLE IF NOT EXISTS mcp_connectors (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  generated_description TEXT,
+  description_status TEXT NOT NULL DEFAULT 'metadata',
+  scope TEXT NOT NULL DEFAULT 'global',
+  transport TEXT NOT NULL DEFAULT 'http',
+  url TEXT,
+  command TEXT,
+  args_json TEXT,
+  tools_json TEXT,
+  status TEXT NOT NULL DEFAULT 'connecting',
+  last_error TEXT,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_mcp_connectors (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  connector_id TEXT NOT NULL REFERENCES mcp_connectors(id) ON DELETE CASCADE,
+  created_at REAL NOT NULL,
+  PRIMARY KEY (project_id, connector_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_mcp_project ON project_mcp_connectors(project_id);
 """
 
 
@@ -261,6 +288,170 @@ class Storage:
         if not row:
             return None
         return {**dict(row), "config": json.loads(row["config"]) if row["config"] else {}}
+
+    # -- MCP connector metadata ---------------------------------------------
+    @staticmethod
+    def _redact_args(args: list[str] | None) -> list[str]:
+        if not args:
+            return []
+        redacted: list[str] = []
+        for arg in args:
+            text = str(arg)
+            if "://" in text and ("@" in text or ":" in text.split("://", 1)[-1]):
+                redacted.append("[redacted]")
+            else:
+                redacted.append(text)
+        return redacted
+
+    @staticmethod
+    def _mcp_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        raw_args = json.loads(data["args_json"]) if data.get("args_json") else []
+        data["args"] = Storage._redact_args(raw_args)
+        data["tools"] = json.loads(data["tools_json"]) if data.get("tools_json") else []
+        data.pop("args_json", None)
+        data.pop("tools_json", None)
+        return data
+
+    def upsert_mcp_connector(
+        self,
+        *,
+        connector_id: str,
+        name: str,
+        scope: str,
+        transport: str,
+        url: str | None,
+        command: str | None,
+        args: list[str] | None,
+        tools: list[dict[str, Any]] | None,
+        status: str,
+        last_error: str | None,
+        description: str | None,
+        generated_description: str | None,
+        description_status: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO mcp_connectors (
+                  id, name, description, generated_description, description_status,
+                  scope, transport, url, command, args_json, tools_json, status,
+                  last_error, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  name=excluded.name,
+                  description=excluded.description,
+                  generated_description=excluded.generated_description,
+                  description_status=excluded.description_status,
+                  scope=excluded.scope,
+                  transport=excluded.transport,
+                  url=excluded.url,
+                  command=excluded.command,
+                  args_json=excluded.args_json,
+                  tools_json=excluded.tools_json,
+                  status=excluded.status,
+                  last_error=excluded.last_error,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    connector_id,
+                    name,
+                    description,
+                    generated_description,
+                    description_status,
+                    scope,
+                    transport,
+                    url,
+                    command,
+                    json.dumps(args or []),
+                    json.dumps(tools or []),
+                    status,
+                    last_error,
+                    now,
+                    now,
+                ),
+            )
+            row = con.execute("SELECT * FROM mcp_connectors WHERE id = ?", (connector_id,)).fetchone()
+        return self._mcp_row_to_dict(row)
+
+    def get_mcp_connector(self, connector_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute("SELECT * FROM mcp_connectors WHERE id = ?", (connector_id,)).fetchone()
+        return self._mcp_row_to_dict(row) if row else None
+
+    def list_mcp_connectors(self) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute("SELECT * FROM mcp_connectors ORDER BY updated_at DESC").fetchall()
+        return [self._mcp_row_to_dict(r) for r in rows]
+
+    def update_mcp_generated_description(
+        self,
+        connector_id: str,
+        generated_description: str | None,
+        description_status: str,
+    ) -> None:
+        with self._conn() as con:
+            con.execute(
+                """
+                UPDATE mcp_connectors
+                SET generated_description = ?, description_status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (generated_description, description_status, time.time(), connector_id),
+            )
+
+    def bind_mcp_to_project(self, project_id: str, connector_id: str) -> None:
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT OR IGNORE INTO project_mcp_connectors (project_id, connector_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (project_id, connector_id, time.time()),
+            )
+
+    def unbind_mcp_from_project(self, project_id: str, connector_id: str) -> None:
+        with self._conn() as con:
+            con.execute(
+                "DELETE FROM project_mcp_connectors WHERE project_id = ? AND connector_id = ?",
+                (project_id, connector_id),
+            )
+
+    def list_project_mcp_connectors(self, project_id: str) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT mc.*
+                FROM mcp_connectors mc
+                JOIN project_mcp_connectors pmc ON pmc.connector_id = mc.id
+                WHERE pmc.project_id = ?
+                ORDER BY pmc.created_at ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [self._mcp_row_to_dict(r) for r in rows]
+
+    def connector_project_ids(self, connector_id: str) -> list[str]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT project_id FROM project_mcp_connectors WHERE connector_id = ? ORDER BY created_at ASC",
+                (connector_id,),
+            ).fetchall()
+        return [r["project_id"] for r in rows]
+
+    def allowed_mcp_connector_ids(self, project_id: str | None) -> set[str]:
+        with self._conn() as con:
+            rows = con.execute("SELECT id FROM mcp_connectors WHERE scope = 'global'").fetchall()
+            allowed = {r["id"] for r in rows}
+            if project_id:
+                project_rows = con.execute(
+                    "SELECT connector_id FROM project_mcp_connectors WHERE project_id = ?",
+                    (project_id,),
+                ).fetchall()
+                allowed.update(r["connector_id"] for r in project_rows)
+        return allowed
 
     # -- projects ------------------------------------------------------------
     def create_project(self, title: str) -> dict[str, Any]:

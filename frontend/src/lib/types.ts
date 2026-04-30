@@ -113,6 +113,11 @@ export interface MCPConnector {
   tools: { name: string; description?: string; input_schema?: any }[];
   last_error?: string | null;
   is_excel?: boolean;
+  description?: string | null;
+  generated_description?: string | null;
+  description_status?: "metadata" | "generated" | string;
+  scope?: "global" | "project" | string;
+  project_ids?: string[];
 }
 
 export interface UploadResponse {

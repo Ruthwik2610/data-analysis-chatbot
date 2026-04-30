@@ -237,11 +237,16 @@ class MCPPool:
             })
         return out
 
-    def aggregate_tools(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    def aggregate_tools(
+        self,
+        allowed_connector_ids: set[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         """Returns (all_tool_specs, tool_name_to_connector_id) across all connected MCPs."""
         specs: list[dict[str, Any]] = []
         routing: dict[str, str] = {}
         for s in self.connectors.values():
+            if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
+                continue
             if s.status != "connected":
                 continue
             for t in s.tools:

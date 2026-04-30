@@ -1,0 +1,53 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { Sidebar } from "../Sidebar";
+import type { ChatSummary, Project, Source } from "@/lib/types";
+
+const chats: ChatSummary[] = [
+  { id: "c1", title: "Pizza margin review", created_at: 1, updated_at: 2, message_count: 4 },
+];
+
+const projects: Project[] = [
+  { id: "p1", title: "Restaurant ops", created_at: 1, updated_at: 2, files: [] },
+];
+
+const sources: Source[] = [
+  { id: "s1", name: "pizza_sales.csv", kind: "csv", rows: 48620, active: true },
+];
+
+function renderSidebar() {
+  render(
+    <Sidebar
+      chats={chats}
+      currentChatId="c1"
+      sources={sources}
+      selectedSourceIds={["s1"]}
+      onNewChat={vi.fn()}
+      onSelectChat={vi.fn()}
+      onDeleteChat={vi.fn()}
+      onToggleSource={vi.fn()}
+      onDeleteSource={vi.fn()}
+      projects={projects}
+      currentProjectId={null}
+      onSelectProject={vi.fn()}
+      onNewProject={vi.fn()}
+      onDeleteProject={vi.fn()}
+    />,
+  );
+}
+
+describe("Sidebar", () => {
+  it("uses tabs to switch between chats, projects, and sources", () => {
+    renderSidebar();
+
+    expect(screen.getByRole("tab", { name: "Chats" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Pizza margin review")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Projects" }));
+    expect(screen.getByRole("tab", { name: "Projects" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Restaurant ops")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Sources" }));
+    expect(screen.getByRole("tab", { name: "Sources" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("pizza_sales.csv")).toBeInTheDocument();
+  });
+});

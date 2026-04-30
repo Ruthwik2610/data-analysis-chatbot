@@ -118,7 +118,9 @@ async def lifespan(app: FastAPI):
     # background health-check loop. Both happen on the FastAPI event loop.
     pool = get_pool()
     try:
-        await pool.auto_load(REPO_ROOT / "mcp.json")
+        await pool.auto_load(REPO_ROOT / "mcp_connectors.json")
+        for state in pool.connectors.values():
+            _persist_mcp_state(state, scope="global")
     except Exception as exc:
         logging.warning("MCP auto-load failed: %s", exc)
     pool.start_health_loop()
@@ -318,8 +320,109 @@ def _serialize_source(source_id: str, source: DataSource, kind: str, active: boo
     }
 
 
-def _serialize_mcp_source() -> dict[str, Any] | None:
-    connected = [s for s in get_pool().connectors.values() if s.status == "connected"]
+def _metadata_description(name: str, tools: list[dict[str, Any]]) -> str:
+    visible_tools = [t for t in tools if t.get("name")]
+    if not visible_tools:
+        return f"{name} is connected but has not exposed tools yet."
+    names = ", ".join(str(t["name"]) for t in visible_tools[:8])
+    if len(visible_tools) > 8:
+        names += f", and {len(visible_tools) - 8} more"
+    description_bits: list[str] = []
+    for tool in visible_tools[:3]:
+        desc = (tool.get("description") or "").strip().splitlines()[0]
+        if desc:
+            description_bits.append(f"{tool['name']}: {desc[:140]}")
+    suffix = " " + " ".join(description_bits) if description_bits else ""
+    return f"{name} exposes {len(visible_tools)} tool{'s' if len(visible_tools) != 1 else ''}: {names}.{suffix}"
+
+
+def _state_transport(state: Any) -> str:
+    return "stdio" if state.command else "http"
+
+
+def _persist_mcp_state(state: Any, *, scope: str = "global", project_id: str | None = None) -> dict[str, Any]:
+    normalized_scope = scope if scope in {"global", "project"} else "global"
+    record = DB.upsert_mcp_connector(
+        connector_id=state.id,
+        name=state.name,
+        scope=normalized_scope,
+        transport=_state_transport(state),
+        url=state.url,
+        command=state.command,
+        args=state.args,
+        tools=state.tools if state.status == "connected" else [],
+        status=state.status,
+        last_error=state.last_error,
+        description=_metadata_description(state.name, state.tools if state.status == "connected" else []),
+        generated_description=None,
+        description_status="metadata",
+    )
+    if project_id and normalized_scope == "project":
+        DB.bind_mcp_to_project(project_id, state.id)
+    return record
+
+
+async def _refine_mcp_description_later(connector_id: str) -> None:
+    if not ROUTER.available:
+        return
+    record = DB.get_mcp_connector(connector_id)
+    if not record:
+        return
+    tool_lines = []
+    for tool in record.get("tools", [])[:12]:
+        desc = (tool.get("description") or "").strip().splitlines()[0]
+        tool_lines.append(f"- {tool.get('name')}: {desc}" if desc else f"- {tool.get('name')}")
+    prompt = (
+        "Write one concise, factual sentence describing this data connector for a data-chat app. "
+        "Do not mention MCP, tools, or implementation details.\n\n"
+        f"Connector name: {record['name']}\n"
+        f"Available operations:\n{chr(10).join(tool_lines)}"
+    )
+    try:
+        text = await asyncio.to_thread(ROUTER._generate_text, prompt, uuid.uuid4().hex[:12])
+        if text:
+            DB.update_mcp_generated_description(connector_id, text[:600], "generated")
+    except Exception:
+        DB.update_mcp_generated_description(connector_id, None, "metadata")
+
+
+def _serialize_mcp_connector(state: Any) -> dict[str, Any]:
+    record = DB.get_mcp_connector(state.id)
+    if record is None:
+        record = _persist_mcp_state(state)
+    tools = state.tools if state.status == "connected" else record.get("tools", [])
+    return {
+        "id": state.id,
+        "name": state.name,
+        "url": state.url,
+        "status": state.status,
+        "tools": tools,
+        "last_error": state.last_error,
+        "is_excel": hasattr(state, "_excel_connector"),
+        "description": record.get("description"),
+        "generated_description": record.get("generated_description"),
+        "description_status": record.get("description_status", "metadata"),
+        "scope": record.get("scope", "global"),
+        "project_ids": DB.connector_project_ids(state.id),
+    }
+
+
+def _allowed_mcp_connector_ids_for_project(project_id: str | None) -> set[str]:
+    return DB.allowed_mcp_connector_ids(project_id)
+
+
+def _allowed_mcp_connector_ids_for_chat(chat_id: str | None) -> set[str]:
+    if not chat_id:
+        return _allowed_mcp_connector_ids_for_project(None)
+    chat = DB.get_chat(chat_id)
+    return _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
+
+
+def _serialize_mcp_source(allowed_connector_ids: set[str] | None = None) -> dict[str, Any] | None:
+    connected = [
+        s for s in get_pool().connectors.values()
+        if s.status == "connected" and (allowed_connector_ids is None or s.id in allowed_connector_ids)
+    ]
     if not connected:
         return None
     tool_count = sum(len(s.tools) for s in connected)
@@ -367,6 +470,8 @@ class CreateConnector(BaseModel):
 class MCPConnect(BaseModel):
     name: str | None = None
     url: str
+    scope: str = "global"
+    project_id: str | None = None
 
 
 class MCPUpdate(BaseModel):
@@ -397,6 +502,7 @@ class QueryRequest(BaseModel):
     chat_id: str | None = None
     question: str
     source_ids: list[str] | None = None
+    project_id: str | None = None
 
 
 # -- health ----------------------------------------------------------------
@@ -407,7 +513,7 @@ def health() -> dict[str, str]:
 
 # -- sources ---------------------------------------------------------------
 @app.get("/sources")
-def list_sources() -> list[dict[str, Any]]:
+def list_sources(project_id: str | None = None) -> list[dict[str, Any]]:
     rows = DB.list_sources()
     out = []
     for row in rows:
@@ -419,7 +525,7 @@ def list_sources() -> list[dict[str, Any]]:
             "active": bool(row["active"]),
             "loaded": row["id"] in SOURCES,
         })
-    mcp_source = _serialize_mcp_source()
+    mcp_source = _serialize_mcp_source(_allowed_mcp_connector_ids_for_project(project_id))
     if mcp_source:
         out.insert(0, mcp_source)
     return out
@@ -758,6 +864,31 @@ def delete_project_file(project_id: str, file_id: str) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.get("/projects/{project_id}/mcp")
+def list_project_mcp(project_id: str) -> list[dict[str, Any]]:
+    if not DB.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return DB.list_project_mcp_connectors(project_id)
+
+
+@app.post("/projects/{project_id}/mcp/{connector_id}")
+def bind_project_mcp(project_id: str, connector_id: str) -> dict[str, Any]:
+    if not DB.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not DB.get_mcp_connector(connector_id):
+        raise HTTPException(status_code=404, detail="MCP connector not found")
+    DB.bind_mcp_to_project(project_id, connector_id)
+    return {"ok": True}
+
+
+@app.delete("/projects/{project_id}/mcp/{connector_id}")
+def unbind_project_mcp(project_id: str, connector_id: str) -> dict[str, Any]:
+    if not DB.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    DB.unbind_mcp_from_project(project_id, connector_id)
+    return {"ok": True}
+
+
 # -- connectors ------------------------------------------------------------
 @app.get("/connectors")
 def list_connectors() -> list[dict[str, Any]]:
@@ -773,7 +904,7 @@ def delete_connector(connector_id: str) -> dict[str, Any]:
 # ---- MCP pool (persistent bridge connections, agent-loop chat) ----------
 @app.get("/mcp/connectors")
 def list_mcp_connectors() -> list[dict[str, Any]]:
-    return get_pool().list_status()
+    return [_serialize_mcp_connector(s) for s in get_pool().connectors.values()]
 
 
 @app.post("/mcp/connectors")
@@ -784,15 +915,13 @@ async def add_mcp_connector(body: MCPConnect) -> dict[str, Any]:
     cid = await get_pool().connect(url=body.url.strip(), name=body.name or body.url.strip())
     state = get_pool().connectors.get(cid)
     if state and state.status == "error":
+        _persist_mcp_state(state, scope=body.scope, project_id=body.project_id)
         raise HTTPException(status_code=400, detail=state.last_error or "Failed to connect to MCP bridge")
-    return {
-        "id": cid,
-        "name": state.name if state else body.name,
-        "url": body.url,
-        "status": state.status if state else "error",
-        "tools": state.tools if state and state.status == "connected" else [],
-        "last_error": state.last_error if state else "Connector state was not created",
-    }
+    if not state:
+        raise HTTPException(status_code=400, detail="Connector state was not created")
+    _persist_mcp_state(state, scope=body.scope, project_id=body.project_id)
+    asyncio.create_task(_refine_mcp_description_later(cid))
+    return _serialize_mcp_connector(state)
 
 
 @app.put("/mcp/connectors/{connector_id}")
@@ -812,7 +941,9 @@ async def update_mcp_connector(connector_id: str, body: MCPUpdate) -> dict[str, 
     elif body.name:
         await pool.rename(connector_id, body.name)
     state = pool.connectors[connector_id]
-    return {"id": state.id, "name": state.name, "url": state.url, "status": state.status, "tools": state.tools, "last_error": state.last_error}
+    record = DB.get_mcp_connector(connector_id)
+    _persist_mcp_state(state, scope=record.get("scope", "global") if record else "global")
+    return _serialize_mcp_connector(state)
 
 
 @app.delete("/mcp/connectors/{connector_id}")
@@ -841,7 +972,7 @@ async def attach_excel_mcp(body: AttachExcelMCP) -> dict[str, Any]:
     pool = get_pool()
     for cid, s in pool.connectors.items():
         if getattr(s, "_dedup_key", None) == dedup_key:
-            return {"id": cid, "name": s.name, "status": s.status, "tools": s.tools}
+            return _serialize_mcp_connector(s)
 
     try:
         source = await asyncio.to_thread(prepare_excel_source, path, body.sheet, LOGGERS["cache"])
@@ -851,12 +982,9 @@ async def attach_excel_mcp(body: AttachExcelMCP) -> dict[str, Any]:
         
         cid = await pool.connect_excel(df=df, display_name=path.name, dedup_key=dedup_key)
         state = pool.connectors[cid]
-        return {
-            "id": cid,
-            "name": state.name,
-            "status": state.status,
-            "tools": state.tools,
-        }
+        _persist_mcp_state(state, scope="global")
+        asyncio.create_task(_refine_mcp_description_later(cid))
+        return _serialize_mcp_connector(state)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to load Excel: {exc}")
 
@@ -1063,11 +1191,13 @@ def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary:
 """
 
 
-def _build_mcp_summary(pool) -> str:
+def _build_mcp_summary(pool, allowed_connector_ids: set[str] | None = None) -> str:
     """Compact text describing connected MCP bridges and their tools, for the
     intent classifier to decide whether to route a question to MCP."""
     lines: list[str] = []
     for s in pool.connectors.values():
+        if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
+            continue
         if s.status != "connected" or not s.tools:
             continue
         lines.append(f"### {s.name}")
@@ -1084,6 +1214,7 @@ async def _run_mcp_agent(
     question: str,
     history: list[dict[str, Any]],
     request_id: str,
+    allowed_connector_ids: set[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Drive the function-calling agent loop, stream SSE events, and persist the
     final assistant message. Picks the LAST tabular tool result (>=2 rows,
@@ -1091,7 +1222,7 @@ async def _run_mcp_agent(
     The agent's natural sequence is explore (describe/list) → fetch (query/get) →
     answer; the data the user actually asked for is always the last fetch."""
     pool = get_pool()
-    specs, routing = pool.aggregate_tools()
+    specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
     if not specs:
         msg_text = "I don't have any tools available right now — connect an MCP bridge and try again."
         msg = DB.add_message(chat_id, "assistant", msg_text, payload={"kind": "error"})
@@ -1103,6 +1234,8 @@ async def _run_mcp_agent(
     by_connector: dict[str, list[str]] = {}
     name_lookup: dict[str, str] = {}
     for s in pool.connectors.values():
+        if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
+            continue
         if s.status == "connected":
             name_lookup[s.id] = s.name
             by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
@@ -1327,9 +1460,10 @@ async def _run_multi_source_agent(
     selected: list[tuple[dict[str, Any], DataSource]],
     history: list[dict[str, Any]],
     request_id: str,
+    allowed_connector_ids: set[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     pool = get_pool()
-    specs, routing = pool.aggregate_tools()
+    specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
     loop = asyncio.get_running_loop()
     source_summaries = await loop.run_in_executor(None, lambda: _prepare_workspace_sync(chat_id, selected))
     join_candidates = _detect_join_candidates(source_summaries)
@@ -1338,6 +1472,8 @@ async def _run_multi_source_agent(
     name_lookup: dict[str, str] = {}
     by_connector: dict[str, list[str]] = {}
     for s in pool.connectors.values():
+        if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
+            continue
         if s.status == "connected":
             name_lookup[s.id] = s.name
             by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
@@ -1510,6 +1646,8 @@ async def _load_query_sources(
 @app.post("/query")
 async def query(body: QueryRequest):
     chat_id = body.chat_id or DB.create_chat()["id"]
+    if body.project_id:
+        DB.update_chat_project(chat_id, body.project_id)
     chat = DB.get_chat(chat_id)
     if chat and chat.get("project_id"):
         await ensure_project_context(chat["project_id"])
@@ -1520,7 +1658,8 @@ async def query(body: QueryRequest):
 
     active_row = DB.get_active_source()
     pool = get_pool()
-    has_mcp = any(s.status == "connected" for s in pool.connectors.values())
+    allowed_mcp_ids = _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
+    has_mcp = any(s.status == "connected" and s.id in allowed_mcp_ids for s in pool.connectors.values())
     requested_source_ids = body.source_ids or []
     selected_mcp = "mcp" in requested_source_ids
     selected_sources = await _load_query_sources(
@@ -1565,9 +1704,10 @@ async def query(body: QueryRequest):
                     "rows": total_rows,
                 }
         elif has_mcp:
+            visible_mcp = [s for s in pool.connectors.values() if s.status == "connected" and s.id in allowed_mcp_ids]
             meta_source = {
                 "id": None,
-                "name": ", ".join(s.name for s in pool.connectors.values() if s.status == "connected") or "MCP",
+                "name": ", ".join(s.name for s in visible_mcp) or "MCP",
                 "kind": "mcp",
                 "rows": 0,
             }
@@ -1581,7 +1721,7 @@ async def query(body: QueryRequest):
 
         if len(selected_sources) > 1 or selected_mcp or (source is None and has_mcp):
             try:
-                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id):
+                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids):
                     yield ev
             except Exception as exc:
                 log_event(LOGGERS["errors"], "multi_source_agent_error", request_id=request_id, error=str(exc))
@@ -1592,7 +1732,7 @@ async def query(body: QueryRequest):
             return
 
         try:
-            mcp_summary_text = _build_mcp_summary(pool) if has_mcp else ""
+            mcp_summary_text = _build_mcp_summary(pool, allowed_mcp_ids) if has_mcp else ""
             if ROUTER.available:
                 intent, model_used = await loop.run_in_executor(
                     None,
@@ -1612,7 +1752,7 @@ async def query(body: QueryRequest):
 
             # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
             if route == "mcp" and has_mcp:
-                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id):
+                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids):
                     yield ev
                 return
 
@@ -1640,7 +1780,7 @@ async def query(body: QueryRequest):
                 # Safety net: if the classifier missed the route field but MCP is connected,
                 # let the agent try (e.g. user asked about BigQuery while a CSV is active).
                 if has_mcp:
-                    async for ev in _run_mcp_agent(chat_id, question, history, request_id):
+                    async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids):
                         yield ev
                     return
                 content = (

@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, Plus, Trash2, FileText, Database } from "lucide-react";
+import { X, Plus, Trash2, FileText, Database, Server } from "lucide-react";
 import { api } from "@/lib/api";
-import type { Project, ProjectFile, Source } from "@/lib/types";
+import type { MCPConnector, Project, Source } from "@/lib/types";
 
 interface ProjectDialogProps {
   projectId: string;
@@ -14,18 +14,22 @@ interface ProjectDialogProps {
 export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogProps) {
   const [project, setProject] = useState<Project | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
+  const [mcpConnectors, setMcpConnectors] = useState<MCPConnector[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState("");
+  const [selectedMcpId, setSelectedMcpId] = useState("");
   const [loading, setLoading] = useState(true);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const [projData, sourcesData] = await Promise.all([
+      const [projData, sourcesData, mcpData] = await Promise.all([
         api.getProject(projectId),
-        api.listSources()
+        api.listSources(projectId),
+        api.listMCPConnectors(),
       ]);
       setProject(projData);
       setSources(sourcesData);
+      setMcpConnectors(mcpData);
     } catch (err) {
       console.error("Failed to load project data", err);
     } finally {
@@ -61,6 +65,31 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
     }
   };
 
+  const handleBindMCP = async () => {
+    if (!selectedMcpId) return;
+    try {
+      await api.bindProjectMCP(projectId, selectedMcpId);
+      setSelectedMcpId("");
+      await loadData();
+      onUpdate();
+    } catch (err: any) {
+      alert(err.message || "Failed to add database context");
+    }
+  };
+
+  const handleUnbindMCP = async (connectorId: string) => {
+    try {
+      await api.unbindProjectMCP(projectId, connectorId);
+      await loadData();
+      onUpdate();
+    } catch (err: any) {
+      alert(err.message || "Failed to remove database context");
+    }
+  };
+
+  const linkedMCPs = mcpConnectors.filter((c) => c.project_ids?.includes(projectId));
+  const availableMCPs = mcpConnectors.filter((c) => !c.project_ids?.includes(projectId));
+
   if (!project && loading) return null;
 
   return (
@@ -81,7 +110,9 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
               Linked Context
             </h3>
             {project?.files.length === 0 ? (
-              <p className="text-sm text-gray-500 italic">No files linked to this project yet.</p>
+              linkedMCPs.length === 0 ? (
+                <p className="text-sm text-gray-500 italic">No context linked to this project yet.</p>
+              ) : null
             ) : (
               <div className="space-y-2">
                 {project?.files.map((file) => (
@@ -108,6 +139,33 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                     </div>
                     <button
                       onClick={() => handleRemoveFile(file.id)}
+                      className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {linkedMCPs.length > 0 && (
+              <div className="space-y-2 mt-2">
+                {linkedMCPs.map((connector) => (
+                  <div key={connector.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 group">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="p-2 bg-emerald-50 rounded-lg">
+                        <Server size={16} className="text-emerald-600" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-700 truncate" title={connector.name}>
+                          {connector.name}
+                        </p>
+                        <p className="text-[10px] text-gray-400 truncate" title={connector.generated_description || connector.description || ""}>
+                          {connector.generated_description || connector.description || `${connector.tools.length} tools`}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleUnbindMCP(connector.id)}
                       className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
                     >
                       <Trash2 size={14} />
@@ -145,6 +203,35 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
               >
                 <Plus size={16} />
                 Add
+              </button>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-gray-100">
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">
+              Add Database Context
+            </h3>
+            <div className="flex gap-2">
+              <select
+                aria-label="Add database context"
+                value={selectedMcpId}
+                onChange={(e) => setSelectedMcpId(e.target.value)}
+                className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all bg-white"
+              >
+                <option value="">Select a database...</option>
+                {availableMCPs.map((connector) => (
+                  <option key={connector.id} value={connector.id}>
+                    {connector.name} ({connector.tools.length} tools)
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={handleBindMCP}
+                disabled={!selectedMcpId}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-all flex items-center gap-2"
+              >
+                <Plus size={16} />
+                Add database
               </button>
             </div>
           </div>

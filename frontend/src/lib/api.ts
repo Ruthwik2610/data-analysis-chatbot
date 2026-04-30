@@ -33,7 +33,8 @@ async function jdelete(path: string): Promise<void> {
 export const api = {
   health: () => jget<{ status: string }>("/health"),
 
-  listSources: () => jget<Source[]>("/sources"),
+  listSources: (projectId?: string | null) =>
+    jget<Source[]>(projectId ? `/sources?project_id=${encodeURIComponent(projectId)}` : "/sources"),
   uploadFile: (
     file: File,
     onProgress?: (pct: number) => void,
@@ -83,8 +84,8 @@ export const api = {
   useConnector: (id: string) => jpost<Source>(`/connectors/${id}/use`, {}),
 
   listMCPConnectors: () => jget<MCPConnector[]>("/mcp/connectors"),
-  addMCPConnector: (url: string, name?: string) =>
-    jpost<MCPConnector>("/mcp/connectors", { url, name }),
+  addMCPConnector: (url: string, name?: string, options?: { scope?: "global" | "project"; project_id?: string | null }) =>
+    jpost<MCPConnector>("/mcp/connectors", { url, name, ...(options || {}) }),
   updateMCPConnector: (id: string, body: { url?: string; name?: string }) =>
     fetch(`${BASE}/mcp/connectors/${id}`, {
       method: "PUT",
@@ -106,6 +107,11 @@ export const api = {
     jpost<ProjectFile>(`/projects/${projectId}/files`, { file_path: filePath, sheet, source_id: sourceId }),
   removeProjectFile: (projectId: string, fileId: string) =>
     jdelete(`/projects/${projectId}/files/${fileId}`),
+  listProjectMCP: (projectId: string) => jget<MCPConnector[]>(`/projects/${projectId}/mcp`),
+  bindProjectMCP: (projectId: string, connectorId: string) =>
+    jpost<{ ok: boolean }>(`/projects/${projectId}/mcp/${connectorId}`, {}),
+  unbindProjectMCP: (projectId: string, connectorId: string) =>
+    jdelete(`/projects/${projectId}/mcp/${connectorId}`),
   updateChatProject: (chatId: string, projectId: string | null) =>
     fetch(`${BASE}/chats/${chatId}/project`, {
       method: "PATCH",
@@ -118,7 +124,7 @@ export const api = {
 };
 
 export async function* streamQuery(
-  body: { chat_id: string | null; question: string; source_ids?: string[] },
+  body: { chat_id: string | null; question: string; source_ids?: string[]; project_id?: string | null },
   signal?: AbortSignal,
 ): AsyncGenerator<SSEEvent> {
   const res = await fetch(`${BASE}/query`, {

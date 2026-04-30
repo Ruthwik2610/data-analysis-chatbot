@@ -1,6 +1,7 @@
 "use client";
 
-import { Plus, X, Circle, Folder } from "lucide-react";
+import { useState } from "react";
+import { Circle, Database, Folder, MessageSquare, Plus, X } from "lucide-react";
 import type { ChatSummary, Source, Project } from "@/lib/types";
 import clsx from "clsx";
 
@@ -32,6 +33,8 @@ const KIND_COLOR: Record<string, string> = {
 };
 
 export function Sidebar(p: SidebarProps) {
+  const [tab, setTab] = useState<"chats" | "projects" | "sources">("chats");
+
   return (
     <aside
       className="flex flex-col flex-shrink-0"
@@ -71,84 +74,102 @@ export function Sidebar(p: SidebarProps) {
         </button>
       </div>
 
-      <SectionLabel>Recents</SectionLabel>
-
-      <div className="flex flex-col flex-1 overflow-y-auto scrollbar-thin">
-        {p.chats.length === 0 && (
-          <div className="px-4 py-2 text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
-            No chats yet
-          </div>
-        )}
-        {p.chats.map((chat) => (
-          <ChatRow
-            key={chat.id}
-            chat={chat}
-            isActive={chat.id === p.currentChatId}
-            onSelect={() => p.onSelectChat(chat.id)}
-            onDelete={() => p.onDeleteChat(chat.id)}
-          />
-        ))}
+      <div role="tablist" aria-label="Sidebar sections" className="grid grid-cols-3 gap-1 px-3 py-2">
+        <SidebarTab label="Chats" icon={<MessageSquare size={12} />} selected={tab === "chats"} onClick={() => setTab("chats")} />
+        <SidebarTab label="Projects" icon={<Folder size={12} />} selected={tab === "projects"} onClick={() => setTab("projects")} />
+        <SidebarTab label="Sources" icon={<Database size={12} />} selected={tab === "sources"} onClick={() => setTab("sources")} />
       </div>
 
-      <div className="flex items-center justify-between px-4 pt-3 pb-1">
-        <div
-          className="text-[11px] font-medium uppercase tracking-wider"
-          style={{ color: "var(--color-text-tertiary)", letterSpacing: "0.06em" }}
-        >
-          Projects
-        </div>
-        <button
-          onClick={p.onNewProject}
-          className="p-0.5 rounded hover:bg-black/5"
-          title="New Project"
-        >
-          <Plus size={12} stroke="var(--color-text-tertiary)" />
-        </button>
-      </div>
-
-      <div className="flex flex-col max-h-[30%] overflow-y-auto scrollbar-thin">
-        {p.projects.length === 0 && (
-          <div className="px-4 py-2 text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
-            No projects
-          </div>
+      <div className="flex flex-col flex-1 overflow-y-auto scrollbar-thin pb-3">
+        {tab === "chats" && (
+          <>
+            <SectionLabel>Recents</SectionLabel>
+            {p.chats.length === 0 && (
+              <EmptyState>No chats yet</EmptyState>
+            )}
+            {p.chats.map((chat) => (
+              <ChatRow
+                key={chat.id}
+                chat={chat}
+                isActive={chat.id === p.currentChatId}
+                onSelect={() => p.onSelectChat(chat.id)}
+                onDelete={() => p.onDeleteChat(chat.id)}
+              />
+            ))}
+          </>
         )}
-        {p.projects.map((project) => (
-          <ProjectRow
-            key={project.id}
-            project={project}
-            isActive={project.id === p.currentProjectId}
-            onSelect={() => p.onSelectProject(project.id)}
-            onDelete={() => p.onDeleteProject(project.id)}
-          />
-        ))}
-      </div>
 
-      <div
-        className="px-4 py-3"
-        style={{ borderTop: "0.5px solid var(--color-border-tertiary)" }}
-      >
-        <div
-          className="text-[11px] font-medium uppercase mb-2 tracking-wider"
-          style={{ color: "var(--color-text-tertiary)", letterSpacing: "0.06em" }}
-        >
-          Knowledge base
-        </div>
-        {p.sources.length === 0 && (
-          <div className="text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
-            No sources attached
-          </div>
+        {tab === "projects" && (
+          <>
+            <div className="flex items-center justify-between pr-3">
+              <SectionLabel>Projects</SectionLabel>
+              <button onClick={p.onNewProject} className="p-1 rounded hover:bg-black/5" title="New Project">
+                <Plus size={12} stroke="var(--color-text-tertiary)" />
+              </button>
+            </div>
+            {p.projects.length === 0 && (
+              <EmptyState>No projects</EmptyState>
+            )}
+            {p.projects.map((project) => (
+              <ProjectRow
+                key={project.id}
+                project={project}
+                isActive={project.id === p.currentProjectId}
+                onSelect={() => p.onSelectProject(project.id)}
+                onDelete={() => p.onDeleteProject(project.id)}
+              />
+            ))}
+          </>
         )}
-        {p.sources.map((src) => (
-          <KbRow
-            key={src.id}
-            source={src}
-            selected={p.selectedSourceIds.includes(src.id)}
-            onToggle={() => p.onToggleSource(src.id)}
-            onDelete={() => p.onDeleteSource(src.id)}
-          />
-        ))}
+
+        {tab === "sources" && (
+          <>
+            <SectionLabel>Sources</SectionLabel>
+            {p.sources.length === 0 && (
+              <EmptyState>No sources attached</EmptyState>
+            )}
+            <div className="px-3">
+              {p.sources.map((src) => (
+                <KbRow
+                  key={src.id}
+                  source={src}
+                  selected={p.selectedSourceIds.includes(src.id)}
+                  onToggle={() => p.onToggleSource(src.id)}
+                  onDelete={() => p.onDeleteSource(src.id)}
+                />
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </aside>
+  );
+}
+
+function SidebarTab({ label, icon, selected, onClick }: { label: string; icon: React.ReactNode; selected: boolean; onClick: () => void }) {
+  return (
+    <button
+      role="tab"
+      aria-selected={selected}
+      onClick={onClick}
+      className="flex items-center justify-center gap-1 rounded-[8px] px-1.5 py-1.5 text-[11.5px] transition-colors"
+      style={{
+        background: selected ? "var(--color-background-primary)" : "transparent",
+        border: selected ? "0.5px solid var(--color-border-tertiary)" : "0.5px solid transparent",
+        color: selected ? "var(--color-text-primary)" : "var(--color-text-tertiary)",
+      }}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function EmptyState({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="px-4 py-2 text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
+      {children}
+    </div>
   );
 }
 

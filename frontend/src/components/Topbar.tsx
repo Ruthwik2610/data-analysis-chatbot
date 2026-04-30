@@ -5,28 +5,41 @@ import type { Source } from "@/lib/types";
 interface TopbarProps {
   title: string;
   activeSource: Source | undefined;
+  selectedSources?: Source[];
   projectName?: string | null;
 }
 
-export function Topbar({ title, activeSource, projectName }: TopbarProps) {
+export function Topbar({ title, activeSource, selectedSources, projectName }: TopbarProps) {
+  const sources = selectedSources?.length ? selectedSources : activeSource ? [activeSource] : [];
+  const firstSource = sources[0];
+  const overflow = Math.max(0, sources.length - 1);
+
   return (
     <div
-      className="flex items-center justify-between px-5 py-3"
+      className="flex items-center justify-between px-5 py-2.5"
       style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}
     >
-      <div className="flex items-center gap-3 min-w-0">
+      <div className="flex items-center gap-2 min-w-0">
         <span className="text-[13px] font-medium truncate" style={{ color: "var(--color-text-primary)" }}>
           {title}
         </span>
         {projectName && (
-           <span className="text-[11px] px-1.5 py-0.5 bg-gray-100 rounded text-gray-500 font-medium">
-             Project: {projectName}
+           <span
+             className="text-[11px] px-2 py-[3px] rounded-full truncate max-w-[180px]"
+             style={{
+               background: "var(--color-background-secondary)",
+               border: "0.5px solid var(--color-border-tertiary)",
+               color: "var(--color-text-secondary)",
+             }}
+             title={projectName}
+           >
+             {projectName}
            </span>
         )}
-        {activeSource && (
+        {firstSource && (
           <span
             className="inline-flex items-center gap-1.5 text-[11px] px-2 py-[3px] rounded-full"
-            title={`${activeSource.kind.toUpperCase()} · ${activeSource.rows.toLocaleString()} rows`}
+            title={`${firstSource.kind.toUpperCase()} · ${firstSource.rows.toLocaleString()} rows`}
             style={{
               background: "var(--color-background-info)",
               border: "0.5px solid var(--color-border-info)",
@@ -34,7 +47,20 @@ export function Topbar({ title, activeSource, projectName }: TopbarProps) {
             }}
           >
             <span className="w-[5px] h-[5px] rounded-full" style={{ background: "var(--color-text-info)" }} />
-            {stripExt(activeSource.name)}
+            {stripExt(firstSource.name)}
+          </span>
+        )}
+        {overflow > 0 && (
+          <span
+            className="text-[11px] px-2 py-[3px] rounded-full"
+            title={sources.slice(1).map((s) => s.name).join(", ")}
+            style={{
+              background: "var(--color-background-secondary)",
+              border: "0.5px solid var(--color-border-tertiary)",
+              color: "var(--color-text-tertiary)",
+            }}
+          >
+            +{overflow}
           </span>
         )}
       </div>

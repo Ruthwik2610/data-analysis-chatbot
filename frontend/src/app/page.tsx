@@ -28,8 +28,8 @@ export default function Home() {
   const uploadAbortRef = useRef<AbortController | null>(null);
 
   const refreshSources = useCallback(async () => {
-    try { setSources(await api.listSources()); } catch {}
-  }, []);
+    try { setSources(await api.listSources(currentProjectId)); } catch {}
+  }, [currentProjectId]);
   const refreshChats = useCallback(async () => {
     try { setChats(await api.listChats()); } catch {}
   }, []);
@@ -266,7 +266,8 @@ export default function Home() {
         for await (const ev of streamQuery({ 
           chat_id: currentChatId, 
           question, 
-          source_ids: selectedSourceIds 
+          source_ids: selectedSourceIds,
+          project_id: currentProjectId,
         }, queryAbortRef.current.signal)) {
           // flushSync forces React to commit before the next await — without this,
           // updates inside async iteration get batched until the loop finishes,
@@ -320,7 +321,7 @@ export default function Home() {
         queryAbortRef.current = null;
       }
     },
-    [selectedSourceIds, currentChatId, addMessage, updateMessage, refreshChats],
+    [selectedSourceIds, currentChatId, currentProjectId, addMessage, updateMessage, refreshChats],
   );
 
   const handleStop = useCallback(() => {
@@ -472,6 +473,7 @@ export default function Home() {
         <Topbar 
           title={chatTitle} 
           activeSource={activeSource} 
+          selectedSources={selectedSources}
           projectName={projects.find(p => p.id === currentProjectId)?.title}
         />
         <MessageList
@@ -489,6 +491,7 @@ export default function Home() {
           loading={loading}
           disabled={false}
           placeholder={selectedSources.length ? "Ask across the selected sources, or paste a URL…" : "Drop a file, paste a URL, or connect an MCP bridge…"}
+          currentProjectId={currentProjectId}
         />
       </main>
       {projectDialogOpen && currentProjectId && (

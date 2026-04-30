@@ -7,6 +7,7 @@ import { ResultBlock } from "./ResultBlock";
 import { InlineQuestion } from "./InlineQuestion";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { FilePickButton } from "./FilePickButton";
+import { AssistantMarkdown } from "./AssistantMarkdown";
 
 interface MessageListProps {
   messages: Message[];
@@ -66,8 +67,8 @@ function Bubble({ message, onChoose }: { message: Message; onChoose: (value: str
       <div className="text-[13px] leading-[1.65]" style={{ color: "var(--color-text-primary)" }}>
         {showThinking && <ThinkingIndicator step={message.thinking} progress={message.progress} />}
         {message.content && !message.error && (
-          <div className="md-content whitespace-pre-wrap">
-            {renderMarkdown(message.content)}
+          <div className="whitespace-pre-wrap">
+            <AssistantMarkdown content={message.content} streaming={!!message.streaming} />
             {message.streaming && (
               <span
                 className="inline-block w-[6px] h-[12px] ml-[1px] align-middle"
@@ -204,82 +205,4 @@ function CardInner({ icon, label, sub }: { icon: React.ReactNode; label: string;
       </div>
     </div>
   );
-}
-
-function renderMarkdown(text: string): React.ReactNode {
-  if (!text) return null;
-  const lines = text.split("\n");
-  const out: React.ReactNode[] = [];
-  let listBuf: string[] = [];
-
-  const flushList = () => {
-    if (listBuf.length) {
-      out.push(
-        <ol key={`l-${out.length}`} className="list-decimal pl-5 my-1">
-          {listBuf.map((item, i) => (
-            <li key={i}>{renderInline(item)}</li>
-          ))}
-        </ol>,
-      );
-      listBuf = [];
-    }
-  };
-
-  for (const line of lines) {
-    const m = line.match(/^\s*\d+\.\s+(.*)$/);
-    if (m) {
-      listBuf.push(m[1]);
-      continue;
-    }
-    flushList();
-    if (line.trim() === "") {
-      out.push(<div key={`b-${out.length}`} className="h-2" />);
-      continue;
-    }
-    out.push(<div key={`p-${out.length}`}>{renderInline(line)}</div>);
-  }
-  flushList();
-  return out;
-}
-
-function renderInline(text: string): React.ReactNode {
-  const parts: React.ReactNode[] = [];
-  let i = 0;
-  let key = 0;
-  while (i < text.length) {
-    const boldStart = text.indexOf("**", i);
-    const codeStart = text.indexOf("`", i);
-    let next = -1;
-    let kind: "bold" | "code" | null = null;
-    if (boldStart >= 0 && (codeStart < 0 || boldStart < codeStart)) {
-      next = boldStart;
-      kind = "bold";
-    } else if (codeStart >= 0) {
-      next = codeStart;
-      kind = "code";
-    }
-    if (next < 0 || kind === null) {
-      parts.push(text.slice(i));
-      break;
-    }
-    if (next > i) parts.push(text.slice(i, next));
-    if (kind === "bold") {
-      const close = text.indexOf("**", next + 2);
-      if (close < 0) {
-        parts.push(text.slice(next));
-        break;
-      }
-      parts.push(<strong key={key++}>{text.slice(next + 2, close)}</strong>);
-      i = close + 2;
-    } else {
-      const close = text.indexOf("`", next + 1);
-      if (close < 0) {
-        parts.push(text.slice(next));
-        break;
-      }
-      parts.push(<code key={key++}>{text.slice(next + 1, close)}</code>);
-      i = close + 1;
-    }
-  }
-  return parts;
 }
