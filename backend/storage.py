@@ -304,9 +304,22 @@ class Storage:
         with self._conn() as con:
             con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
-    def add_file_to_project(self, project_id: str, file_path: str | None, source_id: str | None = None, sheet_name: str | None = None) -> dict[str, Any]:
+    def add_file_to_project(
+        self,
+        project_id: str,
+        file_path: str | None,
+        source_id: str | None = None,
+        sheet_name: str | None = None,
+    ) -> dict[str, Any]:
         file_id = f"pfile_{uuid.uuid4().hex[:10]}"
         now = time.time()
+        # Backward compatibility:
+        # historical call shape was (project_id, file_path, sheet_name). Since source
+        # IDs are generated with a src_ prefix, treat a non-src_ third positional value
+        # as a legacy sheet name when sheet_name is omitted.
+        if source_id and sheet_name is None and not source_id.startswith("src_"):
+            sheet_name = source_id
+            source_id = None
         # Handle SQLite NOT NULL constraint by defaulting to empty string
         safe_file_path = file_path if file_path is not None else ""
         with self._conn() as con:
