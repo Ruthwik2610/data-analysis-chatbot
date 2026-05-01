@@ -534,6 +534,12 @@ class ProjectAddFile(BaseModel):
     sheet: str | None = None
 
 
+class ProjectNoteCreate(BaseModel):
+    title: str | None = None
+    content: str
+    source_message_id: str | None = None
+
+
 class ChatUpdateProject(BaseModel):
     project_id: str | None
 
@@ -1044,6 +1050,36 @@ def add_project_file(project_id: str, body: ProjectAddFile) -> dict[str, Any]:
 @app.delete("/projects/{project_id}/files/{file_id}")
 def delete_project_file(project_id: str, file_id: str) -> dict[str, Any]:
     DB.remove_file_from_project(project_id, file_id)
+    return {"ok": True}
+
+
+@app.get("/projects/{project_id}/notes")
+def list_project_notes(project_id: str) -> list[dict[str, Any]]:
+    if not DB.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return DB.list_project_notes(project_id)
+
+
+@app.post("/projects/{project_id}/notes")
+def create_project_note(project_id: str, body: ProjectNoteCreate) -> dict[str, Any]:
+    if not DB.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Note content is required")
+    return DB.add_project_note(
+        project_id,
+        body.title or "Saved analysis",
+        content,
+        source_message_id=body.source_message_id,
+    )
+
+
+@app.delete("/projects/{project_id}/notes/{note_id}")
+def delete_project_note(project_id: str, note_id: str) -> dict[str, Any]:
+    if not DB.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    DB.delete_project_note(project_id, note_id)
     return {"ok": True}
 
 
@@ -1872,6 +1908,11 @@ async def query(body: QueryRequest):
         DB.update_chat_title(chat_id, question[:60])
 
     history = _load_history(chat_id)
+    if chat and chat.get("project_id"):
+        notes = DB.list_project_notes(chat["project_id"])[:6]
+        if notes:
+            note_lines = "\n".join(f"- {n['title']}: {n['content'][:300]}" for n in notes)
+            history.append({"role": "project_notes", "content": f"Saved project notes:\n{note_lines}"})
     request_id = uuid.uuid4().hex[:12]
 
     async def event_stream() -> AsyncIterator[dict[str, Any]]:

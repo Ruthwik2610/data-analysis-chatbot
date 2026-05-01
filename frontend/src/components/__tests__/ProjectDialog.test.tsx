@@ -34,6 +34,17 @@ vi.mock("@/lib/api", () => ({
         description: "BigQuery exposes 1 tool: list_tables.",
       },
     ]),
+    listProjectNotes: vi.fn().mockResolvedValue([
+      {
+        id: "note_1",
+        project_id: "proj_1",
+        title: "Revenue finding",
+        content: "Revenue increased by 12%.",
+        source_message_id: "msg_1",
+        created_at: 1,
+      },
+    ]),
+    deleteProjectNote: vi.fn().mockResolvedValue(undefined),
     bindProjectMCP: vi.fn().mockResolvedValue({ ok: true }),
     unbindProjectMCP: vi.fn().mockResolvedValue(undefined),
     updateProject: vi.fn().mockResolvedValue({
@@ -75,5 +86,12 @@ describe("ProjectDialog", () => {
       expect(api.updateProject).toHaveBeenCalledWith("proj_1", { title: "Restaurant sandbox" });
       expect(onUpdate).toHaveBeenCalled();
     });
+  });
+
+  it("renders saved project notes", async () => {
+    render(<ProjectDialog projectId="proj_1" onClose={vi.fn()} onUpdate={vi.fn()} />);
+
+    expect(await screen.findByText("Revenue finding")).toBeInTheDocument();
+    expect(screen.getByText("Revenue increased by 12%.")).toBeInTheDocument();
   });
 });

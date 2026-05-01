@@ -4,6 +4,7 @@ import { ArrowUp, Paperclip, Plug, Square } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { FilePickButton } from "./FilePickButton";
 import { ConnectorPopover } from "./ConnectorPopover";
+import { SourceContextDrawer } from "./SourceContextDrawer";
 import type { ModelMode, Source } from "@/lib/types";
 
 interface InputBarProps {
@@ -35,6 +36,7 @@ export function InputBar({
 }: InputBarProps) {
   const [value, setValue] = useState("");
   const [popOpen, setPopOpen] = useState(false);
+  const [sourceDrawerOpen, setSourceDrawerOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const plugRef = useRef<HTMLButtonElement>(null);
   const firstSource = selectedSources[0];
@@ -125,7 +127,10 @@ export function InputBar({
             </select>
           </label>
           {firstSource && (
-            <div
+            <button
+              type="button"
+              aria-label="Show selected sources"
+              onClick={() => setSourceDrawerOpen((open) => !open)}
               className="flex min-w-0 max-w-full items-center gap-1.5 text-[11.5px] sm:max-w-[42%]"
               title={selectedSources.map((s) => s.name).join(", ")}
             >
@@ -152,9 +157,14 @@ export function InputBar({
                   +{sourceOverflow}
                 </span>
               )}
-            </div>
+            </button>
           )}
         </div>
+        <SourceContextDrawer
+          open={sourceDrawerOpen}
+          sources={selectedSources}
+          onClose={() => setSourceDrawerOpen(false)}
+        />
         <div className="flex items-end gap-2">
           <textarea
             ref={ref}

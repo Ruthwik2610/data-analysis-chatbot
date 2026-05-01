@@ -1,4 +1,4 @@
-import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ModelMode } from "./types";
+import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ProjectNote, ModelMode } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY || "";
@@ -116,6 +116,11 @@ export const api = {
     jpost<ProjectFile>(`/projects/${projectId}/files`, { file_path: filePath, sheet, source_id: sourceId }),
   removeProjectFile: (projectId: string, fileId: string) =>
     jdelete(`/projects/${projectId}/files/${fileId}`),
+  listProjectNotes: (projectId: string) => jget<ProjectNote[]>(`/projects/${projectId}/notes`),
+  createProjectNote: (projectId: string, body: { title?: string; content: string; source_message_id?: string | null }) =>
+    jpost<ProjectNote>(`/projects/${projectId}/notes`, body),
+  deleteProjectNote: (projectId: string, noteId: string) =>
+    jdelete(`/projects/${projectId}/notes/${noteId}`),
   listProjectMCP: (projectId: string) => jget<MCPConnector[]>(`/projects/${projectId}/mcp`),
   bindProjectMCP: (projectId: string, connectorId: string) =>
     jpost<{ ok: boolean }>(`/projects/${projectId}/mcp/${connectorId}`, {}),

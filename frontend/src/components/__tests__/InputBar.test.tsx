@@ -97,6 +97,23 @@ describe("InputBar", () => {
     expect(screen.getByText("+1")).toBeInTheDocument();
   });
 
+  it("opens source context details from the selected source chip", () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onPickFile={vi.fn()}
+        onAttached={vi.fn()}
+        disabled={false}
+        selectedSources={selectedSources}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show selected sources" }));
+
+    expect(screen.getByRole("dialog", { name: "Selected sources" })).toBeInTheDocument();
+    expect(screen.getByText("48,620 rows")).toBeInTheDocument();
+  });
+
   it("does not submit on Shift+Enter", () => {
     const onSend = vi.fn();
     render(

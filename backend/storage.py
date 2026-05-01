@@ -28,6 +28,17 @@ CREATE TABLE IF NOT EXISTS project_files (
 
 CREATE INDEX IF NOT EXISTS idx_project_files_project ON project_files(project_id);
 
+CREATE TABLE IF NOT EXISTS project_notes (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source_message_id TEXT,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_notes_project ON project_notes(project_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
   title TEXT,
@@ -536,6 +547,48 @@ class Storage:
         now = time.time()
         with self._conn() as con:
             con.execute("DELETE FROM project_files WHERE id = ? AND project_id = ?", (file_id, project_id))
+            con.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+
+    def add_project_note(
+        self,
+        project_id: str,
+        title: str,
+        content: str,
+        source_message_id: str | None = None,
+    ) -> dict[str, Any]:
+        note_id = f"note_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        clean_title = title.strip() or "Saved analysis"
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO project_notes (id, project_id, title, content, source_message_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (note_id, project_id, clean_title, content, source_message_id, now),
+            )
+            con.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+        return {
+            "id": note_id,
+            "project_id": project_id,
+            "title": clean_title,
+            "content": content,
+            "source_message_id": source_message_id,
+            "created_at": now,
+        }
+
+    def list_project_notes(self, project_id: str) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at DESC",
+                (project_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_project_note(self, project_id: str, note_id: str) -> None:
+        now = time.time()
+        with self._conn() as con:
+            con.execute("DELETE FROM project_notes WHERE id = ? AND project_id = ?", (note_id, project_id))
             con.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
 
     def update_chat_project(self, chat_id: str, project_id: str | None) -> None:
