@@ -45,6 +45,59 @@ class _PdfDoc:
         return None
 
 
+class _MuPdfTable:
+    def __init__(self, rows: list[list[str]]) -> None:
+        self._rows = rows
+
+    def extract(self) -> list[list[str]]:
+        return self._rows
+
+
+class _MuPdfTables:
+    def __init__(self, tables: list[_MuPdfTable]) -> None:
+        self.tables = tables
+
+    def __len__(self) -> int:
+        return len(self.tables)
+
+
+class _MuPdfPage:
+    def __init__(self, tables: list[list[list[str]]]) -> None:
+        self._tables = [_MuPdfTable(table) for table in tables]
+
+    def find_tables(self, **kwargs: object) -> _MuPdfTables:
+        return _MuPdfTables(self._tables)
+
+    def get_text(self, kind: str) -> object:
+        return "" if kind == "text" else []
+
+
+class _MuPdfDoc:
+    def __init__(self, pages: list[_MuPdfPage]) -> None:
+        self._pages = pages
+        self.page_count = len(pages)
+
+    def __getitem__(self, index: int) -> _MuPdfPage:
+        return self._pages[index]
+
+    def close(self) -> None:
+        return None
+
+
+class _TextBlockPage:
+    def __init__(self, text: str, blocks: list[str]) -> None:
+        self._text = text
+        self._blocks = blocks
+
+    def get_text(self, kind: str) -> object:
+        if kind == "text":
+            return self._text
+        return [(0, 0, 1, 1, block) for block in self._blocks]
+
+    def find_tables(self, **kwargs: object) -> _MuPdfTables:
+        return _MuPdfTables([])
+
+
 class PromptTests(unittest.TestCase):
     def test_xml_escape_dynamic_content(self) -> None:
         self.assertEqual(xml_escape('<hello attr="x">&'), "&lt;hello attr=&quot;x&quot;&gt;&amp;")
@@ -91,6 +144,197 @@ class QueryPlanTests(unittest.TestCase):
 
 
 class PdfSourceTests(unittest.TestCase):
+    def test_prepare_pdf_source_uses_pymupdf_primary_extractor(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sales-book.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(
+                open=lambda _: _MuPdfDoc([
+                    _MuPdfPage([
+                        [
+                            ["Region", "Revenue"],
+                            ["North", "1200"],
+                            ["South", "900"],
+                        ],
+                    ]),
+                ]),
+            )
+            with patch.dict("sys.modules", {"pymupdf": module, "fitz": module, "pdfplumber": None}):
+                source = prepare_pdf_source(pdf_path, logger=None)
+
+        self.assertEqual(source.row_count, 2)
+        self.assertEqual(source.dataframe.columns.tolist(), ["region", "revenue"])
+        self.assertEqual(source.dataframe["revenue"].tolist(), [1200, 900])
+
+    def test_prepare_pdf_source_uses_fast_sales_order_text_blocks(self) -> None:
+        blocks = [
+            "\n".join([
+                f"{i} 01/07/2025",
+                "1.00",
+                f"SO-{2100 + i}",
+                "Tirupathi Enterprises",
+                "Supreme - Agri PN-06 50mm Pipe",
+                "15.00",
+                "35.70",
+            ])
+            for i in range(1, 12)
+        ]
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sales-orders.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(
+                open=lambda _: _MuPdfDoc([
+                    _TextBlockPage("Sales Orders Book Report", blocks),
+                ]),
+            )
+            with patch.dict("sys.modules", {"pymupdf": module, "fitz": module, "pdfplumber": None}):
+                source = prepare_pdf_source(pdf_path, logger=None)
+
+        self.assertEqual(source.row_count, 11)
+        self.assertEqual(source.dataframe.columns.tolist(), ["s_no", "date", "exchange_rate", "vno", "account", "product", "quantity", "rate"])
+        self.assertEqual(source.dataframe["date"].tolist()[0], pd.Timestamp("2025-07-01"))
+        self.assertEqual(source.dataframe["quantity"].tolist()[0], 15.0)
+
+    def test_prepare_pdf_source_uses_fast_sales_book_text_blocks(self) -> None:
+        blocks = [
+            "\n".join([
+                f"{i} 01/01/2026",
+                f"SIR-{700 + i}",
+                "Sriramulu-Warasiguda",
+                "36ABCDE1234F1Z5",
+                "MP1A6TEE050L",
+                "Supreme - Agri PN-06 50mm Hw Tee",
+                "2.00",
+                "42.10",
+                "50.67 39174000",
+                "84.20",
+                "41.26",
+                "9.00",
+                "3.86",
+                "9.00",
+                "3.86",
+                "January2026",
+            ])
+            for i in range(1, 12)
+        ]
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sales-book.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(
+                open=lambda _: _MuPdfDoc([
+                    _TextBlockPage("Sales Book Report", blocks),
+                ]),
+            )
+            with patch.dict("sys.modules", {"pymupdf": module, "fitz": module, "pdfplumber": None}):
+                source = prepare_pdf_source(pdf_path, logger=None)
+
+        self.assertEqual(source.row_count, 11)
+        self.assertEqual(source.dataframe.columns.tolist(), [
+            "s_no", "date", "vno", "account", "gstin", "supplier_part_code", "product", "quantity", "rate",
+            "net", "hsn_code", "gross", "discount", "cgst_rate", "cgst", "sgst_rate", "sgst", "igst_rate", "igst", "month_name",
+        ])
+        self.assertEqual(source.dataframe["date"].tolist()[0], pd.Timestamp("2026-01-01"))
+        self.assertEqual(source.dataframe["hsn_code"].tolist()[0], 39174000)
+
+    def test_prepare_pdf_source_handles_split_hsn_in_sales_book_blocks(self) -> None:
+        blocks = [
+            "\n".join([
+                f"{i} 01/01/2026",
+                f"SIR-{700 + i}",
+                "Sriramulu-Warasiguda",
+                "36ABCDE1234F1Z5",
+                "MP1A6TEE050L",
+                "Supreme - Agri PN-06 50mm Hw Tee",
+                "2.00",
+                "42.10",
+                "50.67",
+                "39174000",
+                "84.20",
+                "41.26",
+                "9.00",
+                "3.86",
+                "9.00",
+                "3.86",
+                "January2026",
+            ])
+            for i in range(1, 12)
+        ]
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sales-book-split-hsn.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(open=lambda _: _MuPdfDoc([_TextBlockPage("Sales Book Report", blocks)]))
+            with patch.dict("sys.modules", {"pymupdf": module, "fitz": module, "pdfplumber": None}):
+                source = prepare_pdf_source(pdf_path, logger=None)
+
+        self.assertEqual(source.row_count, 11)
+        self.assertEqual(source.dataframe["product"].tolist()[0], "Supreme - Agri PN-06 50mm Hw Tee")
+        self.assertEqual(source.dataframe["hsn_code"].tolist()[0], 39174000)
+        self.assertEqual(source.dataframe["gross"].tolist()[0], 84.2)
+
+    def test_prepare_pdf_source_handles_missing_gstin_in_sales_book_blocks(self) -> None:
+        blocks = [
+            "\n".join([
+                f"{i} 01/01/2026",
+                f"SIR-{700 + i}",
+                "Sriramulu-Warasiguda",
+                "MP1A6TEE050L",
+                "Supreme - Agri PN-06 50mm Hw Tee",
+                "2.00",
+                "42.10",
+                "50.67 39174000",
+                "84.20",
+                "41.26",
+                "9.00",
+                "3.86",
+                "9.00",
+                "3.86",
+                "January2026",
+            ])
+            for i in range(1, 12)
+        ]
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sales-book-missing-gstin.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(open=lambda _: _MuPdfDoc([_TextBlockPage("Sales Book Report", blocks)]))
+            with patch.dict("sys.modules", {"pymupdf": module, "fitz": module, "pdfplumber": None}):
+                source = prepare_pdf_source(pdf_path, logger=None)
+
+        self.assertEqual(source.row_count, 11)
+        self.assertEqual(source.dataframe["gstin"].tolist()[0], "")
+        self.assertEqual(source.dataframe["supplier_part_code"].tolist()[0], "MP1A6TEE050L")
+        self.assertEqual(source.dataframe["product"].tolist()[0], "Supreme - Agri PN-06 50mm Hw Tee")
+
+    def test_prepare_pdf_source_handles_igst_sales_book_blocks(self) -> None:
+        blocks = [
+            "\n".join([
+                f"{i} 02/01/2026",
+                f"SIT-{10880 + i}",
+                "Cre8ive Aqua Designers",
+                "37DFLPP7078J2ZJ",
+                "MP1ASTEE063D",
+                "Supreme - Agri PN-16 63mm Tee",
+                "5.00",
+                "101.60",
+                "293.73 39174000",
+                "508.00",
+                "259.08",
+                "18.00 44.81 January2026",
+            ])
+            for i in range(1, 12)
+        ]
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sales-book-igst.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(open=lambda _: _MuPdfDoc([_TextBlockPage("Sales Book Report", blocks)]))
+            with patch.dict("sys.modules", {"pymupdf": module, "fitz": module, "pdfplumber": None}):
+                source = prepare_pdf_source(pdf_path, logger=None)
+
+        self.assertEqual(source.row_count, 11)
+        self.assertEqual(source.dataframe["date"].tolist()[0], pd.Timestamp("2026-01-02"))
+        self.assertEqual(source.dataframe["igst_rate"].tolist()[0], 18.0)
+        self.assertEqual(source.dataframe["igst"].tolist()[0], 44.81)
+        self.assertEqual(source.dataframe["cgst"].tolist()[0], "")
+
     def test_prepare_pdf_source_extracts_tabular_data(self) -> None:
         with TemporaryDirectory() as tmp:
             pdf_path = Path(tmp) / "printed-sheet.pdf"
@@ -125,6 +369,26 @@ class PdfSourceTests(unittest.TestCase):
             with patch.dict("sys.modules", {"pdfplumber": module}):
                 with self.assertRaisesRegex(ValueError, "No tables found"):
                     prepare_pdf_source(pdf_path, logger=None)
+
+    def test_prepare_pdf_source_deduplicates_repeated_headers(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "duplicate-headers.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(
+                open=lambda _: _PdfDoc([
+                    _PdfPage([
+                        [
+                            ["Region", "Amount", "Amount"],
+                            ["North", "1200", "12"],
+                            ["South", "900", "9"],
+                        ],
+                    ]),
+                ]),
+            )
+            with patch.dict("sys.modules", {"pdfplumber": module}):
+                source = prepare_pdf_source(pdf_path, logger=None)
+
+        self.assertEqual(source.dataframe.columns.tolist(), ["region", "amount", "amount_2"])
 
 
 if __name__ == "__main__":

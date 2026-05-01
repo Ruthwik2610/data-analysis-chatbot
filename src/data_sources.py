@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,16 +32,18 @@ class DataSource:
 
 
 def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    renamed = {}
     seen: dict[str, int] = {}
+    columns: list[str] = []
     for index, column in enumerate(df.columns):
         name = normalize_identifier(str(column), index)
         count = seen.get(name, 0)
         seen[name] = count + 1
         if count:
             name = f"{name}_{count + 1}"
-        renamed[column] = name
-    return df.rename(columns=renamed)
+        columns.append(name)
+    normalized = df.copy()
+    normalized.columns = columns
+    return normalized
 
 
 _DATE_NAME_HINTS = ("date", "datetime", "_at", "delivery", "timestamp", "_time")
@@ -106,7 +109,257 @@ def _table_to_dataframe(table: list[list[Any]]) -> pd.DataFrame | None:
     return df.replace("", pd.NA).dropna(axis=1, how="all")
 
 
-def read_pdf_tables(pdf_path: Path) -> pd.DataFrame:
+_REPORT_ROW_RE = re.compile(r"^\s*(\d+)\s+(\d{2}/\d{2}/\d{4})\s*$")
+_GSTIN_RE = re.compile(r"^\d{2}[A-Z0-9]{10}[A-Z0-9]Z[A-Z0-9]$", re.IGNORECASE)
+_HSN_RE = re.compile(r"^\d{6,8}$")
+_NUMBER_RE = re.compile(r"^-?\d[\d,]*(?:\.\d*)?$")
+_MONTH_RE = re.compile(r"^[A-Za-z]+20\d{2}$")
+
+
+def _split_serial_date(value: str) -> tuple[str, str] | None:
+    match = _REPORT_ROW_RE.match(value)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _parse_report_date(value: str) -> pd.Timestamp:
+    return pd.to_datetime(value, format="%d/%m/%Y", errors="coerce")
+
+
+def _is_report_number(value: str) -> bool:
+    return bool(_NUMBER_RE.match(value.strip()))
+
+
+def _split_report_tokens(value: str) -> list[str]:
+    text = value.strip()
+    if not text:
+        return []
+    parts = text.split()
+    if len(parts) > 1 and all(_is_report_number(part) or _HSN_RE.match(part) or _MONTH_RE.match(part) for part in parts):
+        return parts
+    return [text]
+
+
+def _extract_gstin(value: str) -> tuple[str, str, str]:
+    match = _GSTIN_RE.search(value)
+    if not match:
+        return value.strip(), "", ""
+    return value[:match.start()].strip(), match.group(0), value[match.end():].strip()
+
+
+def _looks_supplier_part_code(value: str) -> bool:
+    text = value.strip()
+    return bool(text) and " " not in text and any(ch.isdigit() for ch in text) and len(text) >= 4
+
+
+def _normalize_sales_book_middle(account: str, middle: list[str]) -> tuple[str, str, str, str]:
+    account_prefix, account_gstin, account_suffix = _extract_gstin(account)
+    normalized_account = account_prefix or account
+    parts = ([account_gstin] if account_gstin else []) + ([account_suffix] if account_suffix else []) + middle
+
+    gstin = ""
+    content: list[str] = []
+    for part in parts:
+        before, found_gstin, after = _extract_gstin(part)
+        if before:
+            content.append(before)
+        if found_gstin and not gstin:
+            gstin = found_gstin
+        if after:
+            content.append(after)
+
+    supplier_part_code = ""
+    product_parts: list[str] = []
+    for index, part in enumerate(content):
+        if not supplier_part_code:
+            first, _, rest = part.partition(" ")
+            if _looks_supplier_part_code(first):
+                supplier_part_code = first
+                if rest.strip():
+                    product_parts.append(rest.strip())
+                continue
+            if index == 0 and _looks_supplier_part_code(part):
+                supplier_part_code = part
+                continue
+        product_parts.append(part)
+    return normalized_account, gstin, supplier_part_code, " ".join(product_parts)
+
+
+def _read_sales_order_blocks(doc: Any) -> pd.DataFrame | None:
+    rows: list[dict[str, Any]] = []
+    page_count = getattr(doc, "page_count", None)
+    if page_count is None:
+        page_count = len(doc)
+    for page_index in range(int(page_count)):
+        for block in doc[page_index].get_text("blocks"):
+            text = str(block[4] if len(block) > 4 else "").strip()
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if len(lines) < 6:
+                continue
+            serial_date = _split_serial_date(lines[0])
+            if not serial_date:
+                continue
+            serial_no, date = serial_date
+            tail = lines[1:]
+            if len(tail) < 5:
+                continue
+            rows.append({
+                "s_no": serial_no,
+                "date": _parse_report_date(date),
+                "exchange_rate": tail[0],
+                "vno": tail[1],
+                "account": tail[2],
+                "product": " ".join(tail[3:-2]),
+                "quantity": tail[-2],
+                "rate": tail[-1],
+            })
+    if len(rows) < 10:
+        return None
+    return pd.DataFrame(rows)
+
+
+def _parse_sales_book_values(values: list[str]) -> tuple[list[str], dict[str, str]] | None:
+    expanded: list[str] = []
+    for value in values:
+        expanded.extend(_split_report_tokens(value))
+    if len(expanded) < 11:
+        return None
+
+    month_name = expanded[-1]
+    cursor = len(expanded) - 2
+    numeric_tail_reversed: list[str] = []
+    while cursor >= 0:
+        token = expanded[cursor]
+        if not _is_report_number(token):
+            break
+        numeric_tail_reversed.append(token)
+        cursor -= 1
+    if len(numeric_tail_reversed) not in {8, 10}:
+        return None
+    numeric_tail = list(reversed(numeric_tail_reversed))
+    if len(numeric_tail) == 10:
+        fields = {
+            "quantity": numeric_tail[0],
+            "rate": numeric_tail[1],
+            "net": numeric_tail[2],
+            "hsn_code": numeric_tail[3],
+            "gross": numeric_tail[4],
+            "discount": numeric_tail[5],
+            "cgst_rate": numeric_tail[6],
+            "cgst": numeric_tail[7],
+            "sgst_rate": numeric_tail[8],
+            "sgst": numeric_tail[9],
+            "igst_rate": "",
+            "igst": "",
+            "month_name": month_name,
+        }
+    else:
+        fields = {
+            "quantity": numeric_tail[0],
+            "rate": numeric_tail[1],
+            "net": numeric_tail[2],
+            "hsn_code": numeric_tail[3],
+            "gross": numeric_tail[4],
+            "discount": numeric_tail[5],
+            "cgst_rate": "",
+            "cgst": "",
+            "sgst_rate": "",
+            "sgst": "",
+            "igst_rate": numeric_tail[6],
+            "igst": numeric_tail[7],
+            "month_name": month_name,
+        }
+    return expanded[: cursor + 1], fields
+
+
+def _read_sales_book_blocks(doc: Any) -> pd.DataFrame | None:
+    rows: list[dict[str, Any]] = []
+    page_count = getattr(doc, "page_count", None)
+    if page_count is None:
+        page_count = len(doc)
+    for page_index in range(int(page_count)):
+        for block in doc[page_index].get_text("blocks"):
+            text = str(block[4] if len(block) > 4 else "").strip()
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if len(lines) < 10:
+                continue
+            serial_date = _split_serial_date(lines[0])
+            if not serial_date:
+                continue
+            serial_no, date = serial_date
+            tail = lines[1:]
+            month_name = tail[-1]
+            values = tail[:-1]
+            if len(values) < 9:
+                continue
+            vno, account = values[0], values[1]
+            parsed_values = _parse_sales_book_values(values[2:] + [month_name])
+            if not parsed_values:
+                continue
+            middle, tax_fields = parsed_values
+            account, gstin, supplier_part_code, product = _normalize_sales_book_middle(account, middle)
+            if not product or _is_report_number(product):
+                continue
+            rows.append({
+                "s_no": serial_no,
+                "date": _parse_report_date(date),
+                "vno": vno,
+                "account": account,
+                "gstin": gstin,
+                "supplier_part_code": supplier_part_code,
+                "product": product,
+                **tax_fields,
+            })
+    if len(rows) < 10:
+        return None
+    return pd.DataFrame(rows)
+
+
+def _read_known_report_blocks(doc: Any) -> pd.DataFrame | None:
+    if int(getattr(doc, "page_count", len(doc) if hasattr(doc, "__len__") else 0)) <= 0:
+        return None
+    first_text = doc[0].get_text("text")
+    if "Sales Orders Book Report" in first_text:
+        return _read_sales_order_blocks(doc)
+    if "Sales Book Report" in first_text:
+        return _read_sales_book_blocks(doc)
+    return None
+
+
+def _read_pdf_tables_with_pymupdf(pdf_path: Path) -> pd.DataFrame:
+    try:
+        import pymupdf
+    except Exception:
+        import fitz as pymupdf
+
+    frames: list[pd.DataFrame] = []
+    doc = pymupdf.open(str(pdf_path))
+    try:
+        report_df = _read_known_report_blocks(doc)
+        if report_df is not None and not report_df.empty:
+            return report_df
+        page_count = getattr(doc, "page_count", None)
+        if page_count is None:
+            page_count = len(doc)
+        page_count = int(page_count)
+        for page_index in range(page_count):
+            page = doc[page_index]
+            tables = page.find_tables(strategy="lines")
+            for table in getattr(tables, "tables", []):
+                df = _table_to_dataframe(table.extract())
+                if df is not None and not df.empty:
+                    frames.append(df)
+    finally:
+        close = getattr(doc, "close", None)
+        if close:
+            close()
+    if not frames:
+        raise ValueError("No tables found with PyMuPDF.")
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def _read_pdf_tables_with_pdfplumber(pdf_path: Path) -> pd.DataFrame:
     try:
         import pdfplumber
     except Exception as exc:  # pragma: no cover - dependency availability
@@ -124,6 +377,13 @@ def read_pdf_tables(pdf_path: Path) -> pd.DataFrame:
             "No tables found in this PDF. If it is a scanned/image PDF, run OCR or export the sheet as CSV/XLSX first.",
         )
     return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def read_pdf_tables(pdf_path: Path) -> pd.DataFrame:
+    try:
+        return _read_pdf_tables_with_pymupdf(pdf_path)
+    except Exception:
+        return _read_pdf_tables_with_pdfplumber(pdf_path)
 
 
 def prepare_csv_source(data_path: Path, cache_dir: Path, logger: Any, force: bool) -> DataSource:

@@ -278,6 +278,94 @@ def test_upload_7z_auto_adds_pdf_sources(isolated_server, monkeypatch, tmp_path)
     assert body["sources"][0]["name"] == "april.pdf"
 
 
+def test_archive_upload_skips_oversized_pdf_members(isolated_server, monkeypatch):
+    server, _storage, _pool = isolated_server
+    from src.data_sources import DataSource
+
+    monkeypatch.setattr(server, "ARCHIVE_PDF_MAX_BYTES", 10)
+
+    small_pdf = server.UPLOAD_DIR / "small.pdf"
+    large_pdf = server.UPLOAD_DIR / "large.pdf"
+    small_pdf.write_bytes(b"%PDF-1.4")
+    large_pdf.write_bytes(b"%PDF-1.4 oversized")
+
+    prepared = []
+
+    def fake_extract_archive(path, destination_dir):
+        return [small_pdf, large_pdf]
+
+    def fake_prepare_pdf_source(path, logger):
+        prepared.append(path.name)
+        return DataSource(
+            source_kind="PDF table",
+            schema={"row_count": 1, "columns": [{"name": "region", "type": "object"}]},
+            display_name=path.name,
+            dataframe=pd.DataFrame({"region": ["North"]}),
+        )
+
+    monkeypatch.setattr(server, "_extract_pdf_members_from_archive", fake_extract_archive)
+    monkeypatch.setattr(server, "prepare_pdf_source", fake_prepare_pdf_source)
+
+    sources, skipped = server._prepare_archive_pdf_sources(server.UPLOAD_DIR / "reports.7z", server.UPLOAD_DIR / "unpacked")
+
+    assert [source["name"] for source in sources] == ["small.pdf"]
+    assert prepared == ["small.pdf"]
+    assert skipped == [{"file_name": "large.pdf", "error": "PDF is too large to auto-read from an archive (max 0.0 MB). Upload this PDF directly or export it to CSV/XLSX."}]
+
+
+def test_archive_upload_does_not_reject_large_pdf_members_when_size_cap_disabled(isolated_server, monkeypatch):
+    server, _storage, _pool = isolated_server
+    from src.data_sources import DataSource
+
+    monkeypatch.setattr(server, "ARCHIVE_PDF_MAX_BYTES", 0)
+
+    large_pdf = server.UPLOAD_DIR / "large.pdf"
+    large_pdf.write_bytes(b"%PDF-1.4 oversized")
+    prepared = []
+
+    def fake_extract_archive(path, destination_dir):
+        return [large_pdf]
+
+    def fake_prepare_pdf_source(path, logger):
+        prepared.append(path.name)
+        return DataSource(
+            source_kind="PDF table",
+            schema={"row_count": 1, "columns": [{"name": "region", "type": "object"}]},
+            display_name=path.name,
+            dataframe=pd.DataFrame({"region": ["North"]}),
+        )
+
+    monkeypatch.setattr(server, "_extract_pdf_members_from_archive", fake_extract_archive)
+    monkeypatch.setattr(server, "prepare_pdf_source", fake_prepare_pdf_source)
+
+    sources, skipped = server._prepare_archive_pdf_sources(server.UPLOAD_DIR / "reports.7z", server.UPLOAD_DIR / "unpacked")
+
+    assert [source["name"] for source in sources] == ["large.pdf"]
+    assert prepared == ["large.pdf"]
+    assert skipped == []
+
+
+def test_archive_upload_skips_pdf_members_that_fail_to_parse(isolated_server, monkeypatch):
+    server, _storage, _pool = isolated_server
+
+    monkeypatch.setattr(server, "ARCHIVE_PDF_MAX_BYTES", 100)
+
+    unreadable_pdf = server.UPLOAD_DIR / "unreadable.pdf"
+    unreadable_pdf.write_bytes(b"%PDF-1.4 unreadable")
+
+    def fake_extract_archive(path, destination_dir):
+        return [unreadable_pdf]
+
+    def fake_prepare_pdf_source(path, logger):
+        raise ValueError("No tables found")
+
+    monkeypatch.setattr(server, "_extract_pdf_members_from_archive", fake_extract_archive)
+    monkeypatch.setattr(server, "prepare_pdf_source", fake_prepare_pdf_source)
+
+    with pytest.raises(ValueError, match="No readable PDF tables found"):
+        server._prepare_archive_pdf_sources(server.UPLOAD_DIR / "reports.7z", server.UPLOAD_DIR / "unpacked")
+
+
 def test_upload_zip_rejects_archives_without_pdfs(isolated_server):
     server, _storage, _pool = isolated_server
     from fastapi.testclient import TestClient
@@ -294,6 +382,25 @@ def test_upload_zip_rejects_archives_without_pdfs(isolated_server):
 
     assert response.status_code == 400
     assert "No PDF files found" in response.json()["detail"]
+
+
+def test_zip_extraction_skips_oversized_members_before_writing(isolated_server, monkeypatch):
+    server, _storage, _pool = isolated_server
+
+    monkeypatch.setattr(server, "ARCHIVE_PDF_MAX_BYTES", 10)
+    archive = BytesIO()
+    with ZipFile(archive, "w") as zf:
+        zf.writestr("large.pdf", b"x" * 20)
+        zf.writestr("small.pdf", b"x" * 5)
+    archive.seek(0)
+    archive_path = server.UPLOAD_DIR / "reports.zip"
+    archive_path.write_bytes(archive.getvalue())
+    destination = server.UPLOAD_DIR / "zip-size-check"
+
+    paths = server._extract_pdf_members_from_zip(archive_path, destination)
+
+    assert [path.name for path in paths] == ["small.pdf"]
+    assert not (destination / "large.pdf").exists()
 
 
 def test_allowed_mcp_ids_for_project_chat_include_global_and_project(isolated_server):

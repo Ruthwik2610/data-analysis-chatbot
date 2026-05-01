@@ -8,6 +8,7 @@ import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
 import { InputBar } from "@/components/InputBar";
 import { api, streamQuery } from "@/lib/api";
+import { formatArchiveSkippedNote } from "@/lib/uploadMessages";
 import type { ChatSummary, Source, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
@@ -147,8 +148,7 @@ export default function Home() {
           const ids = res.sources.map((source) => source.id);
           setSelectedSourceIds((currentIds) => Array.from(new Set([...currentIds, ...ids])));
           const totalRows = res.sources.reduce((sum, source) => sum + (source.rows || 0), 0);
-          const skippedCount = res.skipped?.length || 0;
-          const skippedNote = skippedCount ? ` ${skippedCount} PDF${skippedCount === 1 ? " was" : "s were"} skipped because no readable tables were found.` : "";
+          const skippedNote = formatArchiveSkippedNote(res.skipped);
           updateMessage(placeholderId, {
             thinking: null,
             progress: null,

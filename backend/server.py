@@ -69,6 +69,7 @@ UPLOAD_DIR = CONFIG.cache_dir / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 PENDING: dict[str, dict[str, Any]] = {}  # upload_id -> { path, kind, file_name, created_at, ... }
 PENDING_TTL_SECONDS = 1800
+ARCHIVE_PDF_MAX_BYTES = int(float(os.getenv("ARCHIVE_PDF_MAX_MB", "0")) * 1024 * 1024)
 
 
 def _cleanup_pending(max_age_seconds: int = PENDING_TTL_SECONDS) -> None:
@@ -673,6 +674,8 @@ def _extract_pdf_members_from_zip(zip_path: Path, destination_dir: Path) -> list
                     continue
                 if Path(member_name).suffix.lower() != ".pdf":
                     continue
+                if ARCHIVE_PDF_MAX_BYTES > 0 and member.file_size > ARCHIVE_PDF_MAX_BYTES:
+                    continue
                 safe_name = _safe_upload_filename(member_name)
                 stem = Path(safe_name).stem
                 suffix = Path(safe_name).suffix
@@ -766,6 +769,12 @@ def _prepare_archive_pdf_sources(archive_path: Path, extraction_dir: Path) -> tu
     skipped: list[dict[str, str]] = []
     for pdf_path in pdf_paths:
         try:
+            if ARCHIVE_PDF_MAX_BYTES > 0 and pdf_path.stat().st_size > ARCHIVE_PDF_MAX_BYTES:
+                max_mb = ARCHIVE_PDF_MAX_BYTES / (1024 * 1024)
+                raise ValueError(
+                    f"PDF is too large to auto-read from an archive (max {max_mb:.1f} MB). "
+                    "Upload this PDF directly or export it to CSV/XLSX.",
+                )
             source = prepare_pdf_source(pdf_path, LOGGERS["cache"])
             origin = {"type": "pdf", "path": str(pdf_path), "archive": str(archive_path)}
             attached.append(_persist_source(_make_id(), source, "pdf", origin))
