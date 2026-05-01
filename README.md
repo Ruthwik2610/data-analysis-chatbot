@@ -22,6 +22,13 @@ AGENT_MODEL=openrouter/deepseek/deepseek-v4-pro
 
 `API_KEY` is optional for local-only use. If you set it, set the same value in the frontend as `NEXT_PUBLIC_API_KEY`.
 
+## Production Readiness
+
+- Run `cd frontend && npm test`, `cd frontend && npm run build`, and `.venv/bin/python -m pytest -q` before deploying.
+- Keep `.env*` files and connector secrets untracked; only expose browser-safe values with `NEXT_PUBLIC_`.
+- The VPS deploy path rebuilds `/opt/datachat/frontend` after rsync because `.next` is excluded from sync.
+- Treat failed systemd status checks, frontend HTTP smoke failures, and Web Vitals regressions as release blockers.
+
 ## Run Locally
 
 Backend:

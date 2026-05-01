@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, Plus, Trash2, FileText, Database, Server, Save } from "lucide-react";
+import { X, Plus, Trash2, FileText, Database, Server, Save, StickyNote } from "lucide-react";
 import { api } from "@/lib/api";
-import type { MCPConnector, Project, Source } from "@/lib/types";
+import type { MCPConnector, Project, ProjectNote, Source } from "@/lib/types";
 
 interface ProjectDialogProps {
   projectId: string;
@@ -15,6 +15,7 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   const [project, setProject] = useState<Project | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
   const [mcpConnectors, setMcpConnectors] = useState<MCPConnector[]>([]);
+  const [notes, setNotes] = useState<ProjectNote[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [selectedMcpId, setSelectedMcpId] = useState("");
   const [loading, setLoading] = useState(true);
@@ -24,15 +25,17 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   const loadData = async () => {
     setLoading(true);
     try {
-      const [projData, sourcesData, mcpData] = await Promise.all([
+      const [projData, sourcesData, mcpData, noteData] = await Promise.all([
         api.getProject(projectId),
         api.listSources(projectId),
         api.listMCPConnectors(),
+        api.listProjectNotes(projectId),
       ]);
       setProject(projData);
       setTitleDraft(projData.title);
       setSources(sourcesData);
       setMcpConnectors(mcpData);
+      setNotes(noteData);
     } catch (err) {
       console.error("Failed to load project data", err);
     } finally {
@@ -102,6 +105,16 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
       onUpdate();
     } catch (err: any) {
       alert(err.message || "Failed to remove database context");
+    }
+  };
+
+  const handleDeleteNote = async (noteId: string) => {
+    try {
+      await api.deleteProjectNote(projectId, noteId);
+      await loadData();
+      onUpdate();
+    } catch (err: any) {
+      alert(err.message || "Failed to delete note");
     }
   };
 
@@ -221,6 +234,38 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                     <button
                       onClick={() => handleUnbindMCP(connector.id)}
                       className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="pt-4 border-t border-gray-100">
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">
+              Saved Notes
+            </h3>
+            {notes.length === 0 ? (
+              <p className="text-sm text-gray-500 italic">No saved analysis notes yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {notes.map((note) => (
+                  <div key={note.id} className="flex items-start justify-between gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100 group">
+                    <div className="flex min-w-0 gap-3">
+                      <div className="p-2 bg-amber-50 rounded-lg">
+                        <StickyNote size={16} className="text-amber-600" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-700 truncate">{note.title}</p>
+                        <p className="text-[11px] text-gray-500 line-clamp-3 whitespace-pre-wrap">{note.content}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteNote(note.id)}
+                      className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                      aria-label={`Delete note ${note.title}`}
                     >
                       <Trash2 size={14} />
                     </button>

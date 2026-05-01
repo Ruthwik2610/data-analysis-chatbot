@@ -97,4 +97,22 @@ describe("MessageList markdown rendering", () => {
 
     expect(screen.getByTestId("empty-action-grid")).toHaveClass("flex-col", "sm:flex-row");
   });
+
+  it("shows answer actions for assistant text and project saves", () => {
+    render(
+      <MessageList
+        messages={[{ id: "a1", role: "assistant", content: "Revenue increased by 12%." }]}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+        currentProjectId="proj_1"
+        onSaveProjectNote={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Copy answer" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save to project notes" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ask follow-up" })).toBeInTheDocument();
+  });
 });

@@ -8,6 +8,7 @@ import { InlineQuestion } from "./InlineQuestion";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { FilePickButton } from "./FilePickButton";
 import { AssistantMarkdown } from "./AssistantMarkdown";
+import { AnswerActions } from "./AnswerActions";
 
 interface MessageListProps {
   messages: Message[];
@@ -15,9 +16,12 @@ interface MessageListProps {
   onPendingChoice: (messageId: string, value: string) => void;
   onPickFile: (file: File) => void;
   onConnectClick: () => void;
+  currentProjectId?: string | null;
+  onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
+  onAskFollowUp?: (content: string) => void;
 }
 
-export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick }: MessageListProps) {
+export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentProjectId, onSaveProjectNote, onAskFollowUp }: MessageListProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isStreaming = messages.some((m) => m.role === "assistant" && m.streaming);
 
@@ -35,13 +39,32 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
   return (
     <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-5 flex flex-col gap-4">
       {messages.map((msg) => (
-        <Bubble key={msg.id} message={msg} onChoose={(v) => onPendingChoice(msg.id, v)} />
+        <Bubble
+          key={msg.id}
+          message={msg}
+          onChoose={(v) => onPendingChoice(msg.id, v)}
+          currentProjectId={currentProjectId}
+          onSaveProjectNote={onSaveProjectNote}
+          onAskFollowUp={onAskFollowUp}
+        />
       ))}
     </div>
   );
 }
 
-function Bubble({ message, onChoose }: { message: Message; onChoose: (value: string) => void }) {
+function Bubble({
+  message,
+  onChoose,
+  currentProjectId,
+  onSaveProjectNote,
+  onAskFollowUp,
+}: {
+  message: Message;
+  onChoose: (value: string) => void;
+  currentProjectId?: string | null;
+  onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
+  onAskFollowUp?: (content: string) => void;
+}) {
   if (message.role === "user") {
     return (
       <div className="self-end max-w-[640px] fade-in">
@@ -77,12 +100,21 @@ function Bubble({ message, onChoose }: { message: Message; onChoose: (value: str
             )}
           </div>
         )}
+        {message.content && !message.error && !message.streaming && (
+          <AnswerActions
+            content={message.content}
+            canSave={!!currentProjectId}
+            onSave={() => onSaveProjectNote?.(message)}
+            onFollowUp={() => onAskFollowUp?.(`Follow up on this: ${message.content.slice(0, 240)}`)}
+          />
+        )}
         {message.result && <ResultBlock result={message.result} />}
         {message.pending && !message.resolved && (
           <InlineQuestion
             label={message.pending.hint || "Pick one:"}
             options={message.pending.options}
             onChoose={onChoose}
+            allowCustom={message.pending.resolver === "clarify_text"}
           />
         )}
         {message.error && (

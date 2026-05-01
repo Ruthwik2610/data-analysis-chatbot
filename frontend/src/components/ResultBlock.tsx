@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, Table as TableIcon, BarChart3 } from "lucide-react";
+import { Copy, Download, Table as TableIcon, BarChart3 } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
   Bar,
@@ -32,11 +32,14 @@ const AXIS_COLOR = "var(--color-text-tertiary)";
 const GRID_COLOR = "var(--color-border-tertiary)";
 
 export function ResultBlock({ result }: ResultBlockProps) {
-  const shape = useMemo(() => analyze(result), [result]);
+  const [chartType, setChartType] = useState<ResultPayload["viz"]>(result.viz);
+  const refinedResult = useMemo(() => ({ ...result, viz: chartType }), [result, chartType]);
+  const shape = useMemo(() => analyze(refinedResult), [refinedResult]);
   // BI default: a time × category breakdown is most readable as a crosstab — long-format tables of 50+ rows are unreadable.
   const defaultToTable = shape.kind === "bar" && !!shape.crosstab && shape.crosstab.colsArePeriod;
   const [showTable, setShowTable] = useState(defaultToTable);
   const hasChart = shape.kind !== "table" && shape.kind !== "card";
+  const hasChartControls = result.viz !== "card" && result.rows.length > 0;
 
   return (
     <div
@@ -54,8 +57,35 @@ export function ResultBlock({ result }: ResultBlockProps) {
           {result.title} · {result.row_count.toLocaleString()} rows · queried in {result.elapsed_ms} ms
         </div>
         <div className="flex items-center gap-1.5">
+          {hasChartControls && (
+            <label className="flex items-center gap-1 text-[11px]" style={{ color: "var(--color-text-secondary)" }}>
+              <span className="hidden sm:inline">Chart</span>
+              <select
+                aria-label="Chart type"
+                value={chartType}
+                onChange={(e) => {
+                  setShowTable(false);
+                  setChartType(e.target.value as ResultPayload["viz"]);
+                }}
+                className="rounded-md px-1.5 py-[3px] text-[11px] outline-none"
+                style={{
+                  background: "var(--color-background-primary)",
+                  border: "0.5px solid var(--color-border-tertiary)",
+                  color: "var(--color-text-secondary)",
+                }}
+              >
+                <option value="bar">Bar</option>
+                <option value="line">Line</option>
+                <option value="pie">Pie</option>
+                <option value="table">Table</option>
+              </select>
+            </label>
+          )}
           <IconBtn onClick={() => downloadCsv(result)} title="Download CSV" icon={<Download size={11} strokeWidth={1.4} />} label="CSV" />
-          {hasChart && (
+          {result.sql && (
+            <IconBtn onClick={() => navigator.clipboard?.writeText(result.sql)} title="Copy SQL" icon={<Copy size={11} strokeWidth={1.4} />} label="SQL" />
+          )}
+          {hasChartControls && (
             <IconBtn
               onClick={() => setShowTable((s) => !s)}
               title={showTable ? "Show chart" : "Show table"}
@@ -66,11 +96,11 @@ export function ResultBlock({ result }: ResultBlockProps) {
         </div>
       </div>
 
-      {!showTable && shape.kind === "card" && <CardViz shape={shape} />}
-      {!showTable && shape.kind === "bar" && <BarViz shape={shape} />}
-      {!showTable && shape.kind === "pie" && <PieViz shape={shape} />}
-      {!showTable && shape.kind === "line" && <LineViz shape={shape} />}
-      {(showTable || shape.kind === "table") && (
+      {!showTable && chartType !== "table" && shape.kind === "card" && <CardViz shape={shape} />}
+      {!showTable && chartType !== "table" && shape.kind === "bar" && <BarViz shape={shape} />}
+      {!showTable && chartType !== "table" && shape.kind === "pie" && <PieViz shape={shape} />}
+      {!showTable && chartType !== "table" && shape.kind === "line" && <LineViz shape={shape} />}
+      {(showTable || chartType === "table" || shape.kind === "table") && (
         shape.kind === "bar" && shape.crosstab
           ? <CrosstabTable data={shape.crosstab} />
           : <DataTable result={result} />

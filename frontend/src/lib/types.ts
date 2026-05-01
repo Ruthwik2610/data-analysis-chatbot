@@ -44,6 +44,15 @@ export interface Project {
   files: ProjectFile[];
 }
 
+export interface ProjectNote {
+  id: string;
+  project_id: string;
+  title: string;
+  content: string;
+  source_message_id?: string | null;
+  created_at: number;
+}
+
 export interface ResultPayload {
   title: string;
   viz: "bar" | "line" | "pie" | "card" | "table";
@@ -60,7 +69,8 @@ export type PendingResolver =
   | "sheet_pick"
   | "table_pick"
   | "ingest_pick"
-  | "connect_url";
+  | "connect_url"
+  | "clarify_text";
 
 export interface Pending {
   resolver: PendingResolver;

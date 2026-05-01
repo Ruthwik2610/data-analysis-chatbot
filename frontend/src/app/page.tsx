@@ -211,6 +211,12 @@ export default function Home() {
         return;
       }
 
+      if (pending.resolver === "clarify_text") {
+        updateMessage(messageId, { resolved: true, content: `${msg.content}\n\n${value}` });
+        handleSend(`${pending.args.original}\n\nClarification: ${value}`);
+        return;
+      }
+
       // sheet_pick / table_pick / ingest_pick → resolve_pending
       updateMessage(messageId, { resolved: true, thinking: "Loading", content: msg.content });
       try {
@@ -306,7 +312,20 @@ export default function Home() {
               const snapshot = fullText;
               updateMessage(assistantId, { content: snapshot, thinking: null });
             } else if (ev.event === "clarify") {
-              updateMessage(assistantId, { content: ev.data.content, thinking: null });
+              updateMessage(assistantId, {
+                content: ev.data.content,
+                thinking: null,
+                pending: {
+                  resolver: "clarify_text",
+                  hint: "Add the missing detail",
+                  options: [
+                    { label: "Revenue", value: "Use revenue as the metric" },
+                    { label: "Monthly", value: "Group it by month" },
+                    { label: "Top 10", value: "Show the top 10 results" },
+                  ],
+                  args: { original: question },
+                },
+              });
               setLoading(false);
             } else if (ev.event === "error") {
               updateMessage(assistantId, { content: ev.data.message, error: true, thinking: null });
@@ -444,6 +463,30 @@ export default function Home() {
     refreshSources();
   }, [addMessage, refreshSources]);
 
+  const handleSaveProjectNote = useCallback(async (message: Extract<Message, { role: "assistant" }>) => {
+    if (!currentProjectId) return;
+    const title = message.result?.title || message.content.split(/\n+/)[0]?.replace(/[#*_`]/g, "").slice(0, 60) || "Saved analysis";
+    const content = [
+      message.content,
+      message.result?.sql ? `\nSQL:\n${message.result.sql}` : "",
+    ].join("").trim();
+    try {
+      await api.createProjectNote(currentProjectId, {
+        title,
+        content,
+        source_message_id: message.id,
+      });
+      setProjectDialogOpen(true);
+    } catch (e: any) {
+      addMessage({
+        id: `local_${Date.now()}`,
+        role: "assistant",
+        content: `Couldn't save that note: ${e?.message || "unknown error"}`,
+        error: true,
+      });
+    }
+  }, [currentProjectId, addMessage]);
+
   useEffect(() => {
     if (!currentChatId) {
       setChatTitle("New chat");
@@ -496,6 +539,9 @@ export default function Home() {
           onPendingChoice={handlePendingChoice}
           onPickFile={handlePickFile}
           onConnectClick={() => connectorClickRef.current()}
+          currentProjectId={currentProjectId}
+          onSaveProjectNote={handleSaveProjectNote}
+          onAskFollowUp={(prompt) => handleSend(prompt)}
         />
         <InputBar
           onSend={handleSend}

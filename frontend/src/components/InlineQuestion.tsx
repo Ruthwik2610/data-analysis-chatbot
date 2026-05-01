@@ -8,15 +8,23 @@ interface InlineQuestionProps {
   options: { label: string; value: string }[];
   onChoose: (value: string) => void;
   disabled?: boolean;
+  allowCustom?: boolean;
 }
 
-export function InlineQuestion({ label, options, onChoose, disabled }: InlineQuestionProps) {
+export function InlineQuestion({ label, options, onChoose, disabled, allowCustom }: InlineQuestionProps) {
   const [chosen, setChosen] = useState<string | null>(null);
+  const [customValue, setCustomValue] = useState("");
 
   const pick = (value: string) => {
     if (disabled || chosen) return;
     setChosen(value);
     onChoose(value);
+  };
+  const submitCustom = () => {
+    const trimmed = customValue.trim();
+    if (!trimmed || disabled || chosen) return;
+    setChosen(trimmed);
+    onChoose(trimmed);
   };
 
   return (
@@ -56,6 +64,42 @@ export function InlineQuestion({ label, options, onChoose, disabled }: InlineQue
           );
         })}
       </div>
+      {allowCustom && (
+        <div className="mt-2 flex gap-2">
+          <input
+            aria-label="Clarification answer"
+            value={customValue}
+            onChange={(e) => setCustomValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitCustom();
+              }
+            }}
+            disabled={!!chosen || disabled}
+            className="min-w-0 flex-1 rounded-[8px] px-2.5 py-1.5 text-[12.5px] outline-none"
+            style={{
+              background: "var(--color-background-primary)",
+              border: "0.5px solid var(--color-border-secondary)",
+              color: "var(--color-text-primary)",
+            }}
+            placeholder="Type the missing detail"
+          />
+          <button
+            type="button"
+            aria-label="Send clarification"
+            onClick={submitCustom}
+            disabled={!customValue.trim() || !!chosen || disabled}
+            className="rounded-[8px] px-3 py-1.5 text-[12px] disabled:opacity-40"
+            style={{
+              background: "var(--color-text-primary)",
+              color: "var(--color-background-primary)",
+            }}
+          >
+            Send
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -129,6 +129,35 @@ def test_project_can_be_renamed(isolated_server):
     assert storage.get_project(project["id"])["title"] == "Restaurant sandbox"
 
 
+def test_project_notes_endpoints_create_list_and_delete(isolated_server):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    client = TestClient(server.app)
+    project = storage.create_project("Notes")
+
+    created = client.post(
+        f"/projects/{project['id']}/notes",
+        json={
+            "title": "Revenue finding",
+            "content": "Revenue increased by 12%.",
+            "source_message_id": "msg_1",
+        },
+    )
+
+    assert created.status_code == 200
+    note = created.json()
+    assert note["title"] == "Revenue finding"
+
+    listed = client.get(f"/projects/{project['id']}/notes")
+    assert listed.status_code == 200
+    assert listed.json()[0]["content"] == "Revenue increased by 12%."
+
+    deleted = client.delete(f"/projects/{project['id']}/notes/{note['id']}")
+    assert deleted.status_code == 200
+    assert client.get(f"/projects/{project['id']}/notes").json() == []
+
+
 def test_model_mode_maps_to_safe_model_ids(monkeypatch):
     import backend.server as server
 
