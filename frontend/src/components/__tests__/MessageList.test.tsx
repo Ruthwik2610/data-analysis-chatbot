@@ -83,4 +83,18 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByTitle("Download CSV")).toBeInTheDocument();
     expect(screen.getByTitle("Show table")).toBeInTheDocument();
   });
+
+  it("uses a responsive layout for empty-state action cards", () => {
+    render(
+      <MessageList
+        messages={[]}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("empty-action-grid")).toHaveClass("flex-col", "sm:flex-row");
+  });
 });

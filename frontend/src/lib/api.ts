@@ -1,4 +1,4 @@
-import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile } from "./types";
+import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ModelMode } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY || "";
@@ -102,6 +102,15 @@ export const api = {
   listProjects: () => jget<Project[]>("/projects"),
   createProject: (title: string) => jpost<Project>("/projects", { title }),
   getProject: (id: string) => jget<Project>(`/projects/${id}`),
+  updateProject: (id: string, body: { title: string }) =>
+    fetch(`${BASE}/projects/${id}`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      return r.json() as Promise<Project>;
+    }),
   deleteProject: (id: string) => jdelete(`/projects/${id}`),
   addProjectFile: (projectId: string, filePath?: string, sheet?: string, sourceId?: string) =>
     jpost<ProjectFile>(`/projects/${projectId}/files`, { file_path: filePath, sheet, source_id: sourceId }),
@@ -124,7 +133,7 @@ export const api = {
 };
 
 export async function* streamQuery(
-  body: { chat_id: string | null; question: string; source_ids?: string[]; project_id?: string | null },
+  body: { chat_id: string | null; question: string; source_ids?: string[]; project_id?: string | null; model_mode?: ModelMode },
   signal?: AbortSignal,
 ): AsyncGenerator<SSEEvent> {
   const res = await fetch(`${BASE}/query`, {

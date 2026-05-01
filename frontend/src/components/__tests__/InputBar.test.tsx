@@ -1,11 +1,17 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { InputBar } from "../InputBar";
+import type { Source } from "@/lib/types";
 
 vi.mock("../ConnectorPopover", () => ({
   ConnectorPopover: () => null,
 }));
 
 describe("InputBar", () => {
+  const selectedSources: Source[] = [
+    { id: "s1", name: "pizza_sales.csv", kind: "csv", rows: 48620, active: true },
+    { id: "s2", name: "pizza_costs.csv", kind: "csv", rows: 96, active: true },
+  ];
+
   it("submits trimmed text on Enter and clears input", () => {
     const onSend = vi.fn();
     render(
@@ -54,8 +60,41 @@ describe("InputBar", () => {
 
     const toolbar = screen.getByRole("toolbar", { name: "Composer actions" });
     expect(toolbar).toBeInTheDocument();
-    expect(screen.getByTitle("Attach a file (CSV, Excel, database, JSON)")).toBeInTheDocument();
+    expect(screen.getByTitle("Attach a file (CSV, Excel, PDF, ZIP/7z, database, JSON)")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
+  });
+
+  it("lets users choose the query model mode in the composer", () => {
+    const onModelModeChange = vi.fn();
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onPickFile={vi.fn()}
+        onAttached={vi.fn()}
+        disabled={false}
+        modelMode="flash"
+        onModelModeChange={onModelModeChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Query model"), { target: { value: "pro" } });
+
+    expect(onModelModeChange).toHaveBeenCalledWith("pro");
+  });
+
+  it("shows selected sources in the composer context row", () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onPickFile={vi.fn()}
+        onAttached={vi.fn()}
+        disabled={false}
+        selectedSources={selectedSources}
+      />,
+    );
+
+    expect(screen.getByText("pizza_sales")).toBeInTheDocument();
+    expect(screen.getByText("+1")).toBeInTheDocument();
   });
 
   it("does not submit on Shift+Enter", () => {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, Plus, Trash2, FileText, Database, Server } from "lucide-react";
+import { X, Plus, Trash2, FileText, Database, Server, Save } from "lucide-react";
 import { api } from "@/lib/api";
 import type { MCPConnector, Project, Source } from "@/lib/types";
 
@@ -18,6 +18,8 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [selectedMcpId, setSelectedMcpId] = useState("");
   const [loading, setLoading] = useState(true);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
 
   const loadData = async () => {
     setLoading(true);
@@ -28,6 +30,7 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
         api.listMCPConnectors(),
       ]);
       setProject(projData);
+      setTitleDraft(projData.title);
       setSources(sourcesData);
       setMcpConnectors(mcpData);
     } catch (err) {
@@ -42,6 +45,21 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   }, [projectId]);
 
 
+  const handleRenameProject = async () => {
+    const nextTitle = titleDraft.trim();
+    if (!nextTitle || nextTitle === project?.title) return;
+    setSavingTitle(true);
+    try {
+      const updated = await api.updateProject(projectId, { title: nextTitle });
+      setProject(updated);
+      setTitleDraft(updated.title);
+      onUpdate();
+    } catch (err: any) {
+      alert(err.message || "Failed to rename project");
+    } finally {
+      setSavingTitle(false);
+    }
+  };
 
   const handleTransferSource = async () => {
     if (!selectedSourceId) return;
@@ -96,15 +114,51 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col max-h-[85vh] overflow-hidden border border-gray-200">
         <div className="flex items-center justify-between p-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-gray-800 truncate">
-            {project?.title || "Project Details"}
-          </h2>
+          <div className="min-w-0 flex-1 pr-3">
+            <h2 className="text-lg font-semibold text-gray-800 truncate">
+              Project sandbox
+            </h2>
+            <p className="text-xs text-gray-500 truncate">
+              Ask inside this saved context, then come back to add or remove sources.
+            </p>
+          </div>
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg transition-colors">
             <X size={20} className="text-gray-500" />
           </button>
         </div>
 
         <div className="p-4 overflow-y-auto flex-1 space-y-6">
+          <div>
+            <label htmlFor="project-name" className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 block">
+              Project name
+            </label>
+            <div className="flex gap-2">
+              <input
+                id="project-name"
+                aria-label="Project name"
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleRenameProject();
+                  }
+                }}
+                className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+              />
+              <button
+                onClick={handleRenameProject}
+                disabled={savingTitle || !titleDraft.trim() || titleDraft.trim() === project?.title}
+                className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-all flex items-center gap-2"
+                aria-label="Save project name"
+                title="Save project name"
+              >
+                <Save size={15} />
+                <span className="hidden sm:inline">{savingTitle ? "Saving" : "Save"}</span>
+              </button>
+            </div>
+          </div>
+
           <div>
             <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">
               Linked Context

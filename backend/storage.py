@@ -491,6 +491,17 @@ class Storage:
         project["files"] = [dict(f) for f in files]
         return project
 
+    def update_project(self, project_id: str, title: str) -> dict[str, Any] | None:
+        now = time.time()
+        with self._conn() as con:
+            cur = con.execute(
+                "UPDATE projects SET title = ?, updated_at = ? WHERE id = ?",
+                (title, now, project_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_project(project_id)
+
     def delete_project(self, project_id: str) -> None:
         with self._conn() as con:
             con.execute("DELETE FROM projects WHERE id = ?", (project_id,))

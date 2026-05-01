@@ -13,7 +13,7 @@ interface FilePickButtonProps {
   children?: React.ReactNode;
 }
 
-const ACCEPT = ".csv,.xlsx,.xls,.duckdb,.db,.json";
+const ACCEPT = ".csv,.xlsx,.xls,.pdf,.zip,.7z,.duckdb,.db,.json";
 
 export function FilePickButton({
   onPick,

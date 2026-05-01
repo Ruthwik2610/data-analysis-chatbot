@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import unittest
+import types
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pandas as pd
 
+from src.data_sources import prepare_pdf_source
 from src.prompting import build_intent_prompt, xml_escape
 from src.query_engine import build_query_plan, heuristic_intent
 from src.visualization import choose_visualization
@@ -19,6 +24,25 @@ ALLOWED = {
     "qty",
     "payment_mode",
 }
+
+
+class _PdfPage:
+    def __init__(self, tables: list[list[list[str]]]) -> None:
+        self._tables = tables
+
+    def extract_tables(self) -> list[list[list[str]]]:
+        return self._tables
+
+
+class _PdfDoc:
+    def __init__(self, pages: list[_PdfPage]) -> None:
+        self.pages = pages
+
+    def __enter__(self) -> "_PdfDoc":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
 
 
 class PromptTests(unittest.TestCase):
@@ -64,6 +88,43 @@ class QueryPlanTests(unittest.TestCase):
         plan = build_query_plan(intent, "give me a table by location", allowed)
         self.assertIn('SUM(TRY_CAST("revenue" AS DOUBLE))', plan.sql)
         self.assertEqual(plan.sql.count('"location" AS "location"'), 1)
+
+
+class PdfSourceTests(unittest.TestCase):
+    def test_prepare_pdf_source_extracts_tabular_data(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "printed-sheet.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(
+                open=lambda _: _PdfDoc([
+                    _PdfPage([
+                        [
+                            ["Region", "Revenue", "Orders"],
+                            ["North", "1200", "12"],
+                            ["South", "900", "9"],
+                        ],
+                    ]),
+                ]),
+            )
+            with patch.dict("sys.modules", {"pdfplumber": module}):
+                source = prepare_pdf_source(pdf_path, logger=None)
+
+        self.assertEqual(source.source_kind, "PDF table")
+        self.assertEqual(source.display_name, "printed-sheet.pdf")
+        self.assertEqual(source.row_count, 2)
+        self.assertIsNotNone(source.dataframe)
+        assert source.dataframe is not None
+        self.assertEqual(source.dataframe.columns.tolist(), ["region", "revenue", "orders"])
+        self.assertEqual(source.dataframe["revenue"].tolist(), [1200, 900])
+
+    def test_prepare_pdf_source_rejects_pdf_without_tables(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "scan.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 fake")
+            module = types.SimpleNamespace(open=lambda _: _PdfDoc([_PdfPage([])]))
+            with patch.dict("sys.modules", {"pdfplumber": module}):
+                with self.assertRaisesRegex(ValueError, "No tables found"):
+                    prepare_pdf_source(pdf_path, logger=None)
 
 
 if __name__ == "__main__":

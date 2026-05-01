@@ -47,6 +47,9 @@ The app supports:
 
 - CSV uploads
 - Excel uploads (`.xlsx`, `.xls`)
+- PDF table uploads (`.pdf`)
+- ZIP uploads containing PDF tables (`.zip`)
+- 7z uploads containing PDF tables (`.7z`)
 - JSON uploads
 - DuckDB database files
 - JSON APIs with optional bearer auth

@@ -8,7 +8,7 @@ import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
 import { InputBar } from "@/components/InputBar";
 import { api, streamQuery } from "@/lib/api";
-import type { ChatSummary, Source, Message, ResultPayload, Pending, Project } from "@/lib/types";
+import type { ChatSummary, Source, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
 
@@ -23,6 +23,7 @@ export default function Home() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [modelMode, setModelMode] = useState<ModelMode>("flash");
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -142,6 +143,18 @@ export default function Home() {
               },
             });
           }
+        } else if (res.sources?.length) {
+          const ids = res.sources.map((source) => source.id);
+          setSelectedSourceIds((currentIds) => Array.from(new Set([...currentIds, ...ids])));
+          const totalRows = res.sources.reduce((sum, source) => sum + (source.rows || 0), 0);
+          const skippedCount = res.skipped?.length || 0;
+          const skippedNote = skippedCount ? ` ${skippedCount} PDF${skippedCount === 1 ? " was" : "s were"} skipped because no readable tables were found.` : "";
+          updateMessage(placeholderId, {
+            thinking: null,
+            progress: null,
+            content: `Got **${res.sources.length} PDF${res.sources.length === 1 ? "" : "s"}** from **${file.name}** — ${totalRows.toLocaleString()} rows ready.${skippedNote} Ask me anything about them.`,
+          });
+          refreshSources();
         } else if ("id" in res && res.id) {
           setSelectedSourceIds((ids) => Array.from(new Set([...ids, res.id as string])));
           updateMessage(placeholderId, {
@@ -268,6 +281,7 @@ export default function Home() {
           question, 
           source_ids: selectedSourceIds,
           project_id: currentProjectId,
+          model_mode: modelMode,
         }, queryAbortRef.current.signal)) {
           // flushSync forces React to commit before the next await — without this,
           // updates inside async iteration get batched until the loop finishes,
@@ -321,7 +335,7 @@ export default function Home() {
         queryAbortRef.current = null;
       }
     },
-    [selectedSourceIds, currentChatId, currentProjectId, addMessage, updateMessage, refreshChats],
+    [selectedSourceIds, currentChatId, currentProjectId, modelMode, addMessage, updateMessage, refreshChats],
   );
 
   const handleStop = useCallback(() => {
@@ -492,6 +506,9 @@ export default function Home() {
           disabled={false}
           placeholder={selectedSources.length ? "Ask across the selected sources, or paste a URL…" : "Drop a file, paste a URL, or connect an MCP bridge…"}
           currentProjectId={currentProjectId}
+          selectedSources={selectedSources}
+          modelMode={modelMode}
+          onModelModeChange={setModelMode}
         />
       </main>
       {projectDialogOpen && currentProjectId && (

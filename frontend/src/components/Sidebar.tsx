@@ -26,6 +26,7 @@ const KIND_COLOR: Record<string, string> = {
   csv: "var(--color-text-success)",
   xlsx: "var(--color-text-success)",
   json: "var(--color-text-success)",
+  pdf: "var(--color-text-success)",
   duckdb: "var(--color-text-warning)",
   api: "var(--color-text-info)",
   mcp: "var(--color-text-warning)",

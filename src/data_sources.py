@@ -72,6 +72,60 @@ def coerce_date_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        non_null = df[col].dropna().astype(str).str.strip()
+        if non_null.empty:
+            continue
+        cleaned = non_null.str.replace(r"[$,\s]", "", regex=True)
+        parsed = pd.to_numeric(cleaned, errors="coerce")
+        if int(parsed.notna().sum()) < max(1, len(non_null) // 2):
+            continue
+        full_cleaned = df[col].astype(str).str.strip().str.replace(r"[$,\s]", "", regex=True)
+        df[col] = pd.to_numeric(full_cleaned, errors="coerce")
+    return df
+
+
+def _table_to_dataframe(table: list[list[Any]]) -> pd.DataFrame | None:
+    cleaned_rows: list[list[str]] = []
+    for row in table:
+        values = ["" if value is None else str(value).strip() for value in row]
+        if any(values):
+            cleaned_rows.append(values)
+    if len(cleaned_rows) < 2:
+        return None
+    width = max(len(row) for row in cleaned_rows)
+    normalized_rows = [row + [""] * (width - len(row)) for row in cleaned_rows]
+    header = normalized_rows[0]
+    body = [row for row in normalized_rows[1:] if any(cell.strip() for cell in row)]
+    if not body:
+        return None
+    df = pd.DataFrame(body, columns=header)
+    return df.replace("", pd.NA).dropna(axis=1, how="all")
+
+
+def read_pdf_tables(pdf_path: Path) -> pd.DataFrame:
+    try:
+        import pdfplumber
+    except Exception as exc:  # pragma: no cover - dependency availability
+        raise RuntimeError("PDF table extraction requires pdfplumber. Install requirements.txt first.") from exc
+
+    frames: list[pd.DataFrame] = []
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables() or []:
+                df = _table_to_dataframe(table)
+                if df is not None and not df.empty:
+                    frames.append(df)
+    if not frames:
+        raise ValueError(
+            "No tables found in this PDF. If it is a scanned/image PDF, run OCR or export the sheet as CSV/XLSX first.",
+        )
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
 def prepare_csv_source(data_path: Path, cache_dir: Path, logger: Any, force: bool) -> DataSource:
     schema = ensure_cache(data_path, cache_dir, logger=logger, force=force)
     return DataSource(source_kind="CSV cache", schema=schema, display_name=data_path.name, db_path=str(cache_paths(cache_dir)["db"]))
@@ -132,6 +186,20 @@ def prepare_excel_source(excel_path: Path, sheet_name: str | int | None, logger:
     schema = schema_from_dataframe(df, source_name=f"Excel sheet {selected_sheet}")
     log_event(logger, "excel_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(excel_path))
     return DataSource(source_kind="Excel direct", schema=schema, display_name=excel_path.name, memory_key=memory_key, dataframe=df)
+
+
+def prepare_pdf_source(pdf_path: Path, logger: Any) -> DataSource:
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+    df = read_pdf_tables(pdf_path)
+    df = normalize_dataframe_columns(df)
+    df = coerce_numeric_columns(df)
+    df = coerce_date_columns(df)
+    memory_key = f"pdf::{pdf_path.resolve()}::{pdf_path.stat().st_mtime_ns}"
+    schema = schema_from_dataframe(df, source_name="PDF tables")
+    if logger:
+        log_event(logger, "pdf_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(pdf_path))
+    return DataSource(source_kind="PDF table", schema=schema, display_name=pdf_path.name, memory_key=memory_key, dataframe=df)
 
 
 def prepare_duckdb_source(db_path: Path, table_name: str, logger: Any) -> DataSource:
@@ -215,6 +283,11 @@ def prepare_uploaded_source(
         if ingest_method == "sql" and source.dataframe is not None:
             return dataframe_to_duckdb_source(source.dataframe, cache_dir, logger, destination.name, "Excel SQL cache")
         return source
+    if suffix == ".pdf":
+        source = prepare_pdf_source(destination, logger)
+        if ingest_method == "sql" and source.dataframe is not None:
+            return dataframe_to_duckdb_source(source.dataframe, cache_dir, logger, destination.name, "PDF SQL cache")
+        return source
     if suffix in {".duckdb", ".db"}:
         return prepare_duckdb_source(destination, table_name, logger)
     if suffix == ".json":
@@ -229,7 +302,7 @@ def prepare_uploaded_source(
         if ingest_method == "sql":
             return dataframe_to_duckdb_source(df, cache_dir, logger, destination.name, "JSON SQL cache")
         return DataSource(source_kind="Uploaded JSON", schema=schema, display_name=destination.name, memory_key=f"json::{destination}", dataframe=df)
-    raise ValueError("Unsupported upload type. Use CSV, XLSX, XLS, JSON, or DuckDB.")
+    raise ValueError("Unsupported upload type. Use CSV, XLSX, XLS, PDF, JSON, or DuckDB.")
 
 
 def prepare_local_file_source(path: Path, cache_dir: Path, logger: Any, table_name: str, sheet_name: str | int | None, force: bool, ingest_method: str = "sql") -> DataSource:
@@ -242,6 +315,11 @@ def prepare_local_file_source(path: Path, cache_dir: Path, logger: Any, table_na
         source = prepare_excel_source(path, sheet_name, logger=logger)
         if ingest_method == "sql" and source.dataframe is not None:
             return dataframe_to_duckdb_source(source.dataframe, cache_dir, logger, path.name, "Excel SQL cache")
+        return source
+    if suffix == ".pdf":
+        source = prepare_pdf_source(path, logger=logger)
+        if ingest_method == "sql" and source.dataframe is not None:
+            return dataframe_to_duckdb_source(source.dataframe, cache_dir, logger, path.name, "PDF SQL cache")
         return source
     if suffix in {".duckdb", ".db"}:
         return prepare_duckdb_source(path, table_name, logger=logger)
@@ -256,7 +334,7 @@ def prepare_local_file_source(path: Path, cache_dir: Path, logger: Any, table_na
         if ingest_method == "sql":
             return dataframe_to_duckdb_source(df, cache_dir, logger, path.name, "JSON SQL cache")
         return DataSource(source_kind="Local JSON", schema=schema, display_name=path.name, memory_key=f"local-json::{path}", dataframe=df)
-    raise ValueError("Unsupported local file type. Use CSV, XLSX, XLS, JSON, or DuckDB.")
+    raise ValueError("Unsupported local file type. Use CSV, XLSX, XLS, PDF, JSON, or DuckDB.")
 
 
 def parse_records_to_source(records: Any, cache_dir: Path, logger: Any, display_name: str, source_kind: str, ingest_method: str) -> DataSource:
@@ -269,5 +347,3 @@ def parse_records_to_source(records: Any, cache_dir: Path, logger: Any, display_
         return dataframe_to_duckdb_source(df, cache_dir, logger, display_name, f"{source_kind} SQL cache")
     schema = schema_from_dataframe(df, source_name=source_kind)
     return DataSource(source_kind=source_kind, schema=schema, display_name=display_name, memory_key=f"{source_kind}::{display_name}", dataframe=df)
-
-

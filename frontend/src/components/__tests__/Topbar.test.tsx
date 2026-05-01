@@ -24,4 +24,37 @@ describe("Topbar", () => {
     expect(screen.getByText("pizza_sales")).toBeInTheDocument();
     expect(screen.getByText("+2")).toBeInTheDocument();
   });
+
+  it("keeps model controls out of the topbar", () => {
+    render(
+      <Topbar
+        title="Pizza analysis"
+        activeSource={sources[0]}
+        selectedSources={sources}
+        projectName="Restaurant ops"
+      />,
+    );
+
+    expect(screen.queryByLabelText("Query model")).not.toBeInTheDocument();
+  });
+
+  it("constrains long selected source names", () => {
+    const longSource: Source = {
+      id: "long",
+      name: "very_long_enterprise_revenue_extract_for_all_regions_and_channels.csv",
+      kind: "csv",
+      rows: 1245000,
+      active: true,
+    };
+    render(
+      <Topbar
+        title="Long source analysis"
+        activeSource={longSource}
+        selectedSources={[longSource]}
+        projectName="Restaurant ops"
+      />,
+    );
+
+    expect(screen.getByText("very_long_enterprise_revenue_extract_for_all_regions_and_channels")).toHaveClass("truncate");
+  });
 });

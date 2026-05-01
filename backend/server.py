@@ -13,6 +13,7 @@ import socket
 import sys
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
@@ -39,6 +40,7 @@ from src.data_sources import (
     prepare_duckdb_source,
     prepare_excel_source,
     prepare_local_file_source,
+    prepare_pdf_source,
 )
 from src.logging_config import log_event, setup_loggers
 from src.mcp_pool import extract_text_content, get_pool, parse_tool_result_to_dataframe
@@ -107,6 +109,38 @@ ROUTER = LLMRouter(
     logger=LOGGERS["llm"],
     char_budget=CONFIG.prompt_char_budget,
 )
+
+MODEL_PRESETS = {
+    "flash": {
+        "model": os.getenv("MODEL_FLASH", "openrouter/google/gemini-2.5-flash"),
+        "agent_model": os.getenv("AGENT_MODEL_FLASH", os.getenv("MODEL_FLASH", "openrouter/google/gemini-2.5-flash")),
+    },
+    "pro": {
+        "model": os.getenv("MODEL_PRO", CONFIG.model),
+        "agent_model": os.getenv("AGENT_MODEL_PRO", CONFIG.agent_model),
+    },
+}
+_ROUTER_CACHE: dict[str, LLMRouter] = {}
+
+
+def _model_preset_for_mode(mode: str | None) -> dict[str, str]:
+    normalized = (mode or "flash").strip().lower()
+    return MODEL_PRESETS.get(normalized) or MODEL_PRESETS["flash"]
+
+
+def _router_for_model_mode(mode: str | None) -> LLMRouter:
+    preset = _model_preset_for_mode(mode)
+    key = f"{preset['model']}::{preset['agent_model']}"
+    if key not in _ROUTER_CACHE:
+        _ROUTER_CACHE[key] = LLMRouter(
+            openrouter_api_key=CONFIG.openrouter_api_key,
+            openrouter_provider_order=CONFIG.openrouter_provider_order,
+            model=preset["model"],
+            agent_model=preset["agent_model"],
+            logger=LOGGERS["llm"],
+            char_budget=CONFIG.prompt_char_budget,
+        )
+    return _ROUTER_CACHE[key]
 
 
 PUBLIC_PATHS = {"/health"}
@@ -296,6 +330,8 @@ async def _rehydrate_source(row: dict[str, Any]) -> DataSource:
             return await asyncio.to_thread(prepare_duckdb_source, Path(origin["path"]), origin.get("table", "orders"), cache_logger)
         if typ == "json":
             return await asyncio.to_thread(prepare_local_file_source, Path(origin["path"]), cache_dir, cache_logger, "orders", None, False, "direct")
+        if typ == "pdf":
+            return await asyncio.to_thread(prepare_pdf_source, Path(origin["path"]), cache_logger)
         if typ == "api":
             await _assert_public_url(origin["url"])
             return await asyncio.to_thread(prepare_api_source, origin["url"], cache_logger, origin.get("auth"))
@@ -488,6 +524,10 @@ class ProjectCreate(BaseModel):
     title: str
 
 
+class ProjectUpdate(BaseModel):
+    title: str
+
+
 class ProjectAddFile(BaseModel):
     file_path: str | None = None
     source_id: str | None = None
@@ -503,6 +543,7 @@ class QueryRequest(BaseModel):
     question: str
     source_ids: list[str] | None = None
     project_id: str | None = None
+    model_mode: str | None = None
 
 
 # -- health ----------------------------------------------------------------
@@ -612,6 +653,128 @@ def _save_upload_sync(file_obj: Any, dest: Path) -> None:
         shutil.copyfileobj(file_obj, out)
 
 
+def _extract_pdf_members_from_zip(zip_path: Path, destination_dir: Path) -> list[Path]:
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    pdf_paths: list[Path] = []
+    used_names: set[str] = set()
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                member_name = Path(member.filename).name
+                if not member_name or member_name.startswith("."):
+                    continue
+                if Path(member_name).suffix.lower() != ".pdf":
+                    continue
+                safe_name = _safe_upload_filename(member_name)
+                stem = Path(safe_name).stem
+                suffix = Path(safe_name).suffix
+                candidate = safe_name
+                counter = 2
+                while candidate.lower() in used_names:
+                    candidate = f"{stem}_{counter}{suffix}"
+                    counter += 1
+                used_names.add(candidate.lower())
+                out_path = destination_dir / candidate
+                with archive.open(member) as src, out_path.open("wb") as out:
+                    shutil.copyfileobj(src, out)
+                pdf_paths.append(out_path)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Uploaded ZIP file is not a valid archive.") from exc
+    return pdf_paths
+
+
+def _copy_archive_pdf_to_destination(source_path: Path, destination_dir: Path, original_name: str, used_names: set[str]) -> Path:
+    safe_name = _safe_upload_filename(Path(original_name).name)
+    stem = Path(safe_name).stem
+    suffix = Path(safe_name).suffix
+    candidate = safe_name
+    counter = 2
+    while candidate.lower() in used_names:
+        candidate = f"{stem}_{counter}{suffix}"
+        counter += 1
+    used_names.add(candidate.lower())
+    out_path = destination_dir / candidate
+    shutil.copyfile(source_path, out_path)
+    return out_path
+
+
+def _extract_pdf_members_from_7z(archive_path: Path, destination_dir: Path) -> list[Path]:
+    try:
+        import py7zr
+    except Exception as exc:  # pragma: no cover - dependency availability
+        raise RuntimeError("7z extraction requires py7zr. Install requirements.txt first.") from exc
+
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir = destination_dir / "_7z_staging"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    used_names: set[str] = set()
+    pdf_paths: list[Path] = []
+    try:
+        with py7zr.SevenZipFile(archive_path, mode="r") as archive:
+            targets = []
+            for name in archive.getnames():
+                path = Path(name)
+                if path.is_absolute() or ".." in path.parts:
+                    continue
+                if path.name and not path.name.startswith(".") and path.suffix.lower() == ".pdf":
+                    targets.append(name)
+            if not targets:
+                return []
+            archive.extract(path=staging_dir, targets=targets)
+        for name in targets:
+            extracted = (staging_dir / name).resolve()
+            if not str(extracted).startswith(str(staging_dir.resolve())) or not extracted.exists():
+                continue
+            pdf_paths.append(_copy_archive_pdf_to_destination(extracted, destination_dir, name, used_names))
+    except py7zr.Bad7zFile as exc:
+        raise ValueError("Uploaded 7z file is not a valid archive.") from exc
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+    return pdf_paths
+
+
+def _extract_pdf_members_from_archive(archive_path: Path, destination_dir: Path) -> list[Path]:
+    suffix = archive_path.suffix.lower()
+    if suffix == ".zip":
+        return _extract_pdf_members_from_zip(archive_path, destination_dir)
+    if suffix == ".7z":
+        return _extract_pdf_members_from_7z(archive_path, destination_dir)
+    raise ValueError(f"Unsupported archive type: {suffix}")
+
+
+def _archive_label(archive_path: Path) -> str:
+    return "7z" if archive_path.suffix.lower() == ".7z" else "ZIP"
+
+
+def _prepare_archive_pdf_sources(archive_path: Path, extraction_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    pdf_paths = _extract_pdf_members_from_archive(archive_path, extraction_dir)
+    if not pdf_paths:
+        raise ValueError(f"No PDF files found in this {_archive_label(archive_path)}.")
+
+    attached: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for pdf_path in pdf_paths:
+        try:
+            source = prepare_pdf_source(pdf_path, LOGGERS["cache"])
+            origin = {"type": "pdf", "path": str(pdf_path), "archive": str(archive_path)}
+            attached.append(_persist_source(_make_id(), source, "pdf", origin))
+        except Exception as exc:
+            skipped.append({"file_name": pdf_path.name, "error": str(exc)})
+    if not attached:
+        details = "; ".join(f"{item['file_name']}: {item['error']}" for item in skipped[:5])
+        raise ValueError(f"No readable PDF tables found in this {_archive_label(archive_path)}. {details}".strip())
+    return attached, skipped
+
+
+def _prepare_zip_pdf_sources(zip_path: Path, extraction_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    return _prepare_archive_pdf_sources(zip_path, extraction_dir)
+
+
 @app.post("/sources/upload")
 async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
     _cleanup_pending()
@@ -685,6 +848,15 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
             )
             origin = {"type": "json", "path": str(dest)}
             return _persist_source(_make_id(), source, "json", origin)
+
+        if suffix == ".pdf":
+            source = await asyncio.to_thread(prepare_pdf_source, dest, LOGGERS["cache"])
+            origin = {"type": "pdf", "path": str(dest)}
+            return _persist_source(_make_id(), source, "pdf", origin)
+
+        if suffix in {".zip", ".7z"}:
+            sources, skipped = await asyncio.to_thread(_prepare_archive_pdf_sources, dest, upload_dir / "unpacked")
+            return {"sources": sources, "skipped": skipped}
 
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
     except HTTPException:
@@ -829,6 +1001,17 @@ def create_project(body: ProjectCreate) -> dict[str, Any]:
 @app.get("/projects/{project_id}")
 def get_project(project_id: str) -> dict[str, Any]:
     p = DB.get_project(project_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return p
+
+
+@app.patch("/projects/{project_id}")
+def update_project(project_id: str, body: ProjectUpdate) -> dict[str, Any]:
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Project title is required")
+    p = DB.update_project(project_id, title)
     if not p:
         raise HTTPException(status_code=404, detail="Project not found")
     return p
@@ -1215,12 +1398,14 @@ async def _run_mcp_agent(
     history: list[dict[str, Any]],
     request_id: str,
     allowed_connector_ids: set[str] | None = None,
+    llm_router: LLMRouter | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Drive the function-calling agent loop, stream SSE events, and persist the
     final assistant message. Picks the LAST tabular tool result (>=2 rows,
     >=2 cols) and emits it as a `result` event so ResultBlock renders a chart.
     The agent's natural sequence is explore (describe/list) → fetch (query/get) →
     answer; the data the user actually asked for is always the last fetch."""
+    router = llm_router or ROUTER
     pool = get_pool()
     specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
     if not specs:
@@ -1267,7 +1452,7 @@ async def _run_mcp_agent(
     last_tool_call: dict[str, Any] | None = None
 
     try:
-        async for ev in ROUTER.agent_loop_stream(
+        async for ev in router.agent_loop_stream(
             request_id=request_id,
             user_question=question,
             conversation_summary=conversation_summary(history),
@@ -1332,6 +1517,7 @@ async def _run_local_agent(
     history: list[dict[str, Any]],
     request_id: str,
     model_used: str,
+    llm_router: LLMRouter | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Drive a function-calling loop against the local DuckDB source.
 
@@ -1339,6 +1525,7 @@ async def _run_local_agent(
     chains two queries where the second depends on the first's result. The LLM
     calls run_sql once to find the anchor (e.g. peak month), reads the result,
     then calls run_sql again parameterized by that anchor."""
+    router = llm_router or ROUTER
     system_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
 
     tool_specs = [{
@@ -1400,7 +1587,7 @@ async def _run_local_agent(
     full_text_parts: list[str] = []
 
     try:
-        async for ev in ROUTER.agent_loop_stream(
+        async for ev in router.agent_loop_stream(
             request_id=request_id,
             user_question=question,
             conversation_summary=conversation_summary(history),
@@ -1461,7 +1648,9 @@ async def _run_multi_source_agent(
     history: list[dict[str, Any]],
     request_id: str,
     allowed_connector_ids: set[str] | None = None,
+    llm_router: LLMRouter | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
+    router = llm_router or ROUTER
     pool = get_pool()
     specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
     loop = asyncio.get_running_loop()
@@ -1547,7 +1736,7 @@ async def _run_multi_source_agent(
 
     full_text_parts: list[str] = []
     try:
-        async for ev in ROUTER.agent_loop_stream(
+        async for ev in router.agent_loop_stream(
             request_id=request_id,
             user_question=question,
             conversation_summary=conversation_summary(history),
@@ -1646,6 +1835,8 @@ async def _load_query_sources(
 @app.post("/query")
 async def query(body: QueryRequest):
     chat_id = body.chat_id or DB.create_chat()["id"]
+    llm_router = _router_for_model_mode(body.model_mode)
+    model_preset = _model_preset_for_mode(body.model_mode)
     if body.project_id:
         DB.update_chat_project(chat_id, body.project_id)
     chat = DB.get_chat(chat_id)
@@ -1721,7 +1912,7 @@ async def query(body: QueryRequest):
 
         if len(selected_sources) > 1 or selected_mcp or (source is None and has_mcp):
             try:
-                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids):
+                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router):
                     yield ev
             except Exception as exc:
                 log_event(LOGGERS["errors"], "multi_source_agent_error", request_id=request_id, error=str(exc))
@@ -1733,10 +1924,10 @@ async def query(body: QueryRequest):
 
         try:
             mcp_summary_text = _build_mcp_summary(pool, allowed_mcp_ids) if has_mcp else ""
-            if ROUTER.available:
+            if llm_router.available:
                 intent, model_used = await loop.run_in_executor(
                     None,
-                    lambda: ROUTER.classify_intent(
+                    lambda: llm_router.classify_intent(
                         request_id=request_id,
                         user_question=question,
                         schema_context=source.schema,
@@ -1747,18 +1938,20 @@ async def query(body: QueryRequest):
                 )
             else:
                 intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
+            if model_used != "offline-heuristic":
+                model_used = model_preset["model"]
 
             route = (intent.get("route") or "local").lower()
 
             # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
             if route == "mcp" and has_mcp:
-                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids):
+                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router):
                     yield ev
                 return
 
             # Compound question that needs sequential SQL — route to local agent loop.
             if intent.get("intent_type") == "multi_step" and source is not None:
-                async for ev in _run_local_agent(chat_id, question, source, history, request_id, model_used):
+                async for ev in _run_local_agent(chat_id, question, source, history, request_id, model_used, llm_router):
                     yield ev
                 return
 
@@ -1780,7 +1973,7 @@ async def query(body: QueryRequest):
                 # Safety net: if the classifier missed the route field but MCP is connected,
                 # let the agent try (e.g. user asked about BigQuery while a CSV is active).
                 if has_mcp:
-                    async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids):
+                    async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids, llm_router):
                         yield ev
                     return
                 content = (
@@ -1848,9 +2041,9 @@ async def query(body: QueryRequest):
                 except Exception as exc:  # pragma: no cover - secondary query best-effort
                     log_event(LOGGERS["query"], "grand_total_failed", request_id=request_id, error=str(exc))
 
-            if ROUTER.available:
+            if llm_router.available:
                 try:
-                    chunks_iter = ROUTER.summarize_answer_stream(
+                    chunks_iter = llm_router.summarize_answer_stream(
                         request_id=request_id,
                         user_question=question,
                         intent=intent,

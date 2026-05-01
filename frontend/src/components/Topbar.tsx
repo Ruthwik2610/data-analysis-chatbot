@@ -38,7 +38,7 @@ export function Topbar({ title, activeSource, selectedSources, projectName }: To
         )}
         {firstSource && (
           <span
-            className="inline-flex items-center gap-1.5 text-[11px] px-2 py-[3px] rounded-full"
+            className="inline-flex items-center gap-1.5 min-w-0 max-w-[220px] text-[11px] px-2 py-[3px] rounded-full"
             title={`${firstSource.kind.toUpperCase()} · ${firstSource.rows.toLocaleString()} rows`}
             style={{
               background: "var(--color-background-info)",
@@ -47,7 +47,7 @@ export function Topbar({ title, activeSource, selectedSources, projectName }: To
             }}
           >
             <span className="w-[5px] h-[5px] rounded-full" style={{ background: "var(--color-text-info)" }} />
-            {stripExt(firstSource.name)}
+            <span className="truncate">{stripExt(firstSource.name)}</span>
           </span>
         )}
         {overflow > 0 && (

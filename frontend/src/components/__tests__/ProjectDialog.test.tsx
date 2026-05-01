@@ -36,6 +36,13 @@ vi.mock("@/lib/api", () => ({
     ]),
     bindProjectMCP: vi.fn().mockResolvedValue({ ok: true }),
     unbindProjectMCP: vi.fn().mockResolvedValue(undefined),
+    updateProject: vi.fn().mockResolvedValue({
+      id: "proj_1",
+      title: "Restaurant sandbox",
+      created_at: 1,
+      updated_at: 3,
+      files: [],
+    }),
     addProjectFile: vi.fn(),
     removeProjectFile: vi.fn(),
   },
@@ -53,6 +60,20 @@ describe("ProjectDialog", () => {
 
     await waitFor(() => {
       expect(api.bindProjectMCP).toHaveBeenCalledWith("proj_1", "mcp_bigquery");
+    });
+  });
+
+  it("renames the project from the dialog", async () => {
+    const onUpdate = vi.fn();
+    render(<ProjectDialog projectId="proj_1" onClose={vi.fn()} onUpdate={onUpdate} />);
+
+    const titleInput = await screen.findByLabelText("Project name");
+    fireEvent.change(titleInput, { target: { value: "Restaurant sandbox" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save project name" }));
+
+    await waitFor(() => {
+      expect(api.updateProject).toHaveBeenCalledWith("proj_1", { title: "Restaurant sandbox" });
+      expect(onUpdate).toHaveBeenCalled();
     });
   });
 });

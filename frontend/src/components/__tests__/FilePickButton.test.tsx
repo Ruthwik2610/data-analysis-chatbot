@@ -19,4 +19,12 @@ describe("FilePickButton", () => {
     fireEvent.change(input, { target: { files: [] } });
     expect(onPick).not.toHaveBeenCalled();
   });
+
+  it("accepts PDF, ZIP, and 7z files alongside tabular uploads", () => {
+    const { container } = render(<FilePickButton onPick={vi.fn()} />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input.accept).toContain(".pdf");
+    expect(input.accept).toContain(".zip");
+    expect(input.accept).toContain(".7z");
+  });
 });

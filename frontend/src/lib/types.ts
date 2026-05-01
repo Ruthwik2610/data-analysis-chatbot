@@ -1,4 +1,5 @@
-export type SourceKind = "csv" | "xlsx" | "duckdb" | "api" | "json" | "mcp" | "multi";
+export type SourceKind = "csv" | "xlsx" | "duckdb" | "api" | "json" | "pdf" | "mcp" | "multi";
+export type ModelMode = "flash" | "pro";
 
 export interface Source {
   id: string;
@@ -127,6 +128,9 @@ export interface UploadResponse {
   kind?: SourceKind;
   rows?: number;
   active?: boolean;
+  // ...or several finished sources from an archive...
+  sources?: Source[];
+  skipped?: { file_name: string; error: string }[];
   // ...or a pending decision
   pending?: {
     kind: "sheet_pick" | "table_pick" | "ingest_pick";

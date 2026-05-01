@@ -1,5 +1,7 @@
 import pytest
 import pandas as pd
+from io import BytesIO
+from zipfile import ZipFile
 from backend.server import _df_to_payload
 
 def test_df_to_payload_handles_nat():
@@ -111,6 +113,35 @@ def test_project_mcp_endpoints_bind_and_unbind(isolated_server):
     assert client.get(f"/projects/{project['id']}/mcp").json() == []
 
 
+def test_project_can_be_renamed(isolated_server):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    project = storage.create_project("Old sandbox")
+
+    response = TestClient(server.app).patch(
+        f"/projects/{project['id']}",
+        json={"title": "Restaurant sandbox"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Restaurant sandbox"
+    assert storage.get_project(project["id"])["title"] == "Restaurant sandbox"
+
+
+def test_model_mode_maps_to_safe_model_ids(monkeypatch):
+    import backend.server as server
+
+    monkeypatch.setattr(server, "MODEL_PRESETS", {
+        "flash": {"model": "openrouter/google/gemini-2.5-flash", "agent_model": "openrouter/google/gemini-2.5-flash"},
+        "pro": {"model": "openrouter/deepseek/deepseek-v4-pro", "agent_model": "openrouter/deepseek/deepseek-v4-pro"},
+    })
+
+    assert server._model_preset_for_mode("flash")["model"] == "openrouter/google/gemini-2.5-flash"
+    assert server._model_preset_for_mode("pro")["model"] == "openrouter/deepseek/deepseek-v4-pro"
+    assert server._model_preset_for_mode("anything-else")["model"] == "openrouter/google/gemini-2.5-flash"
+
+
 def test_sources_mcp_synthetic_source_uses_project_scope(isolated_server):
     server, storage, pool = isolated_server
     from fastapi.testclient import TestClient
@@ -150,6 +181,90 @@ def test_sources_mcp_synthetic_source_uses_project_scope(isolated_server):
     assert "global-db" in mcp_source["name"]
     assert "project-db" in mcp_source["name"]
     assert "other-db" not in mcp_source["name"]
+
+
+def test_upload_zip_auto_adds_pdf_sources(isolated_server, monkeypatch):
+    server, _storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+    from src.data_sources import DataSource
+
+    def fake_prepare_pdf_source(path, logger):
+        return DataSource(
+            source_kind="PDF table",
+            schema={"row_count": 2, "columns": [{"name": "region", "type": "object"}]},
+            display_name=path.name,
+            dataframe=pd.DataFrame({"region": ["North", "South"]}),
+        )
+
+    monkeypatch.setattr(server, "prepare_pdf_source", fake_prepare_pdf_source)
+    archive = BytesIO()
+    with ZipFile(archive, "w") as zf:
+        zf.writestr("reports/april.pdf", b"%PDF-1.4 april")
+        zf.writestr("may.pdf", b"%PDF-1.4 may")
+        zf.writestr("notes.txt", "ignore me")
+    archive.seek(0)
+
+    response = TestClient(server.app).post(
+        "/sources/upload",
+        files={"file": ("reports.zip", archive.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [source["kind"] for source in body["sources"]] == ["pdf", "pdf"]
+    assert {source["name"] for source in body["sources"]} == {"april.pdf", "may.pdf"}
+    assert body["skipped"] == []
+
+
+def test_upload_7z_auto_adds_pdf_sources(isolated_server, monkeypatch, tmp_path):
+    server, _storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+    from src.data_sources import DataSource
+
+    def fake_extract_7z(path, destination_dir):
+        pdf_path = destination_dir / "april.pdf"
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path.write_bytes(b"%PDF-1.4 april")
+        return [pdf_path]
+
+    def fake_prepare_pdf_source(path, logger):
+        return DataSource(
+            source_kind="PDF table",
+            schema={"row_count": 2, "columns": [{"name": "region", "type": "object"}]},
+            display_name=path.name,
+            dataframe=pd.DataFrame({"region": ["North", "South"]}),
+        )
+
+    monkeypatch.setattr(server, "_extract_pdf_members_from_7z", fake_extract_7z)
+    monkeypatch.setattr(server, "prepare_pdf_source", fake_prepare_pdf_source)
+
+    response = TestClient(server.app).post(
+        "/sources/upload",
+        files={"file": ("reports.7z", b"fake 7z bytes", "application/x-7z-compressed")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [source["kind"] for source in body["sources"]] == ["pdf"]
+    assert body["sources"][0]["name"] == "april.pdf"
+
+
+def test_upload_zip_rejects_archives_without_pdfs(isolated_server):
+    server, _storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    archive = BytesIO()
+    with ZipFile(archive, "w") as zf:
+        zf.writestr("notes.txt", "ignore me")
+    archive.seek(0)
+
+    response = TestClient(server.app).post(
+        "/sources/upload",
+        files={"file": ("reports.zip", archive.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 400
+    assert "No PDF files found" in response.json()["detail"]
 
 
 def test_allowed_mcp_ids_for_project_chat_include_global_and_project(isolated_server):

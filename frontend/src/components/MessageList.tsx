@@ -135,7 +135,7 @@ function timeOfDayGreeting(): string {
 
 function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => void; onConnectClick: () => void }) {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center px-8 py-10 gap-6 fade-in">
+    <div className="flex-1 flex flex-col items-center justify-center px-5 py-10 gap-6 fade-in sm:px-8">
       <div className="text-center max-w-[480px]">
         <h2 className="text-[26px] font-medium mb-2" style={{ color: "var(--color-text-primary)" }}>
           {timeOfDayGreeting()}
@@ -143,21 +143,21 @@ function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => voi
         <p className="text-[14px]" style={{ color: "var(--color-text-secondary)" }}>
           Ask plain-English questions about your data — I&apos;ll write the SQL, run it, and chart the result.
         </p>
-        <ul className="text-[12.5px] mt-4 space-y-1 text-left inline-block" style={{ color: "var(--color-text-tertiary)" }}>
-          <li>• Analyze CSV / Excel uploads — totals, trends, top-N, breakdowns</li>
-          <li>• Query connected sources like Salesforce</li>
-          <li>• Connect to APIs on the fly by pasting a URL</li>
-        </ul>
+        <div className="mt-4 flex flex-wrap justify-center gap-1.5 text-[12px]" style={{ color: "var(--color-text-secondary)" }}>
+          <span className="rounded-full px-2 py-1" style={{ background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)" }}>Top 10 by revenue</span>
+          <span className="rounded-full px-2 py-1" style={{ background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)" }}>Find anomalies</span>
+          <span className="rounded-full px-2 py-1" style={{ background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)" }}>Compare periods</span>
+        </div>
       </div>
 
-      <div className="flex gap-3 w-full max-w-[480px]">
+      <div data-testid="empty-action-grid" className="flex flex-col gap-3 w-full max-w-[480px] sm:flex-row">
         <FilePickButton
           onPick={onPickFile}
           variant="card"
           title="Attach a file"
           className="flex-1 flex flex-col items-center gap-2 px-4 py-5 rounded-[14px] transition-all"
         >
-          <CardInner icon={<Paperclip size={18} strokeWidth={1.4} />} label="Attach a file" sub="CSV, Excel, database, JSON" />
+          <CardInner icon={<Paperclip size={18} strokeWidth={1.4} />} label="Attach a file" sub="CSV, Excel, PDF, ZIP/7z, database, JSON" />
         </FilePickButton>
         <button
           onClick={onConnectClick}
@@ -174,7 +174,7 @@ function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => voi
       </div>
 
       <div className="text-[11.5px] text-center" style={{ color: "var(--color-text-tertiary)" }}>
-        Tip: paste a URL in chat to connect to an API on the fly.
+        Paste a URL in chat to connect to an API on the fly.
       </div>
     </div>
   );
@@ -200,7 +200,7 @@ function CardInner({ icon, label, sub }: { icon: React.ReactNode; label: string;
         {icon}
       </div>
       <div className="text-[13.5px] font-medium">{label}</div>
-      <div className="text-[11.5px]" style={{ color: "var(--color-text-tertiary)" }}>
+      <div className="max-w-full text-center text-[11.5px]" style={{ color: "var(--color-text-secondary)" }}>
         {sub}
       </div>
     </div>

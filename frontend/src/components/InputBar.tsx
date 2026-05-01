@@ -4,7 +4,7 @@ import { ArrowUp, Paperclip, Plug, Square } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { FilePickButton } from "./FilePickButton";
 import { ConnectorPopover } from "./ConnectorPopover";
-import type { Source } from "@/lib/types";
+import type { ModelMode, Source } from "@/lib/types";
 
 interface InputBarProps {
   onSend: (q: string) => void;
@@ -15,13 +15,30 @@ interface InputBarProps {
   disabled: boolean;
   placeholder?: string;
   currentProjectId?: string | null;
+  selectedSources?: Source[];
+  modelMode?: ModelMode;
+  onModelModeChange?: (mode: ModelMode) => void;
 }
 
-export function InputBar({ onSend, onStop, onPickFile, onAttached, loading, disabled, placeholder, currentProjectId }: InputBarProps) {
+export function InputBar({
+  onSend,
+  onStop,
+  onPickFile,
+  onAttached,
+  loading,
+  disabled,
+  placeholder,
+  currentProjectId,
+  selectedSources = [],
+  modelMode = "flash",
+  onModelModeChange,
+}: InputBarProps) {
   const [value, setValue] = useState("");
   const [popOpen, setPopOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const plugRef = useRef<HTMLButtonElement>(null);
+  const firstSource = selectedSources[0];
+  const sourceOverflow = Math.max(0, selectedSources.length - 1);
 
   useEffect(() => {
     if (ref.current) {
@@ -53,11 +70,11 @@ export function InputBar({ onSend, onStop, onPickFile, onAttached, loading, disa
           borderRadius: 14,
         }}
       >
-        <div role="toolbar" aria-label="Composer actions" className="flex items-center gap-1">
+        <div role="toolbar" aria-label="Composer actions" className="flex flex-wrap items-center gap-1.5">
           <FilePickButton
             onPick={onPickFile}
             disabled={disabled}
-            title="Attach a file (CSV, Excel, database, JSON)"
+            title="Attach a file (CSV, Excel, PDF, ZIP/7z, database, JSON)"
             variant="card"
             className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[8px] text-[11.5px] transition-colors"
           >
@@ -86,6 +103,57 @@ export function InputBar({ onSend, onStop, onPickFile, onAttached, loading, disa
             anchorRef={plugRef}
             currentProjectId={currentProjectId}
           />
+          <label
+            className="ml-auto inline-flex items-center gap-1.5 rounded-[8px] px-1.5 py-1 text-[11.5px]"
+            style={{
+              color: "var(--color-text-secondary)",
+              background: "var(--color-background-primary)",
+              border: "0.5px solid var(--color-border-tertiary)",
+            }}
+          >
+            <span className="hidden sm:inline">Model</span>
+            <select
+              aria-label="Query model"
+              value={modelMode}
+              onChange={(e) => onModelModeChange?.(e.target.value as ModelMode)}
+              className="bg-transparent text-[11.5px] outline-none"
+              style={{ color: "var(--color-text-primary)" }}
+              title={modelMode === "pro" ? "Deeper reasoning, higher cost" : "Normal reasoning, lower cost"}
+            >
+              <option value="flash">Flash</option>
+              <option value="pro">Pro</option>
+            </select>
+          </label>
+          {firstSource && (
+            <div
+              className="flex min-w-0 max-w-full items-center gap-1.5 text-[11.5px] sm:max-w-[42%]"
+              title={selectedSources.map((s) => s.name).join(", ")}
+            >
+              <span
+                className="inline-flex min-w-0 items-center gap-1.5 rounded-full px-2 py-[3px]"
+                style={{
+                  background: "var(--color-background-info)",
+                  border: "0.5px solid var(--color-border-info)",
+                  color: "var(--color-text-info)",
+                }}
+              >
+                <span className="h-[5px] w-[5px] flex-shrink-0 rounded-full" style={{ background: "var(--color-text-info)" }} />
+                <span className="truncate">{stripExt(firstSource.name)}</span>
+              </span>
+              {sourceOverflow > 0 && (
+                <span
+                  className="flex-shrink-0 rounded-full px-2 py-[3px]"
+                  style={{
+                    background: "var(--color-background-primary)",
+                    border: "0.5px solid var(--color-border-tertiary)",
+                    color: "var(--color-text-secondary)",
+                  }}
+                >
+                  +{sourceOverflow}
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-end gap-2">
           <textarea
@@ -137,4 +205,8 @@ export function InputBar({ onSend, onStop, onPickFile, onAttached, loading, disa
       </div>
     </div>
   );
+}
+
+function stripExt(name: string): string {
+  return name.replace(/\.[^./\\]+$/, "") || name;
 }
