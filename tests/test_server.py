@@ -162,13 +162,44 @@ def test_model_mode_maps_to_safe_model_ids(monkeypatch):
     import backend.server as server
 
     monkeypatch.setattr(server, "MODEL_PRESETS", {
-        "flash": {"model": "openrouter/google/gemini-2.5-flash", "agent_model": "openrouter/google/gemini-2.5-flash"},
-        "pro": {"model": "openrouter/deepseek/deepseek-v4-pro", "agent_model": "openrouter/deepseek/deepseek-v4-pro"},
+        "flash": {"model": "openrouter/deepseek/deepseek-v4-flash", "agent_model": "openrouter/deepseek/deepseek-v4-flash", "provider_order": "DeepSeek"},
+        "pro": {"model": "openrouter/deepseek/deepseek-v4-pro", "agent_model": "openrouter/deepseek/deepseek-v4-pro", "provider_order": "DeepSeek"},
     })
 
-    assert server._model_preset_for_mode("flash")["model"] == "openrouter/google/gemini-2.5-flash"
+    assert server._model_preset_for_mode("flash")["model"] == "openrouter/deepseek/deepseek-v4-flash"
     assert server._model_preset_for_mode("pro")["model"] == "openrouter/deepseek/deepseek-v4-pro"
-    assert server._model_preset_for_mode("anything-else")["model"] == "openrouter/google/gemini-2.5-flash"
+    assert server._model_preset_for_mode("anything-else")["model"] == "openrouter/deepseek/deepseek-v4-flash"
+
+
+def test_flash_router_uses_deepseek_flash_provider(monkeypatch):
+    import backend.server as server
+
+    captured: dict[str, str] = {}
+
+    class FakeRouter:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(server, "_ROUTER_CACHE", {})
+    monkeypatch.setattr(server, "LLMRouter", FakeRouter)
+    monkeypatch.setattr(server, "MODEL_PRESETS", {
+        "flash": {
+            "model": "openrouter/deepseek/deepseek-v4-flash",
+            "agent_model": "openrouter/deepseek/deepseek-v4-flash",
+            "provider_order": "DeepSeek",
+        },
+        "pro": {
+            "model": "openrouter/deepseek/deepseek-v4-pro",
+            "agent_model": "openrouter/deepseek/deepseek-v4-pro",
+            "provider_order": "DeepSeek",
+        },
+    })
+
+    router = server._router_for_model_mode("flash")
+
+    assert router is not None
+    assert captured["model"] == "openrouter/deepseek/deepseek-v4-flash"
+    assert captured["openrouter_provider_order"] == "DeepSeek"
 
 
 def test_sources_mcp_synthetic_source_uses_project_scope(isolated_server):
@@ -210,6 +241,130 @@ def test_sources_mcp_synthetic_source_uses_project_scope(isolated_server):
     assert "global-db" in mcp_source["name"]
     assert "project-db" in mcp_source["name"]
     assert "other-db" not in mcp_source["name"]
+
+
+def test_source_instruction_endpoints_create_and_update(isolated_server):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    storage.upsert_source(
+        source_id="src_pizza",
+        name="pizza_sales.csv",
+        kind="csv",
+        rows=48620,
+        schema_json='{"columns":[{"name":"order_id"},{"name":"quantity"}],"row_count":48620}',
+        origin={"type": "csv_memory", "path": "/tmp/pizza_sales.csv"},
+    )
+
+    client = TestClient(server.app)
+    initial = client.get("/sources/src_pizza/instructions")
+    assert initial.status_code == 200
+    assert initial.json()["instructions"]["entities"]["order"] == "order_id"
+
+    updated = client.patch(
+        "/sources/src_pizza/instructions",
+        json={
+            "instructions": {
+                "row_grain": "line_item",
+                "entities": {"order": "order_id"},
+                "metrics": {"items_sold": {"column": "quantity", "aggregation": "sum"}},
+                "notes": "Pizza rows are order line items.",
+            }
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["instructions"]["notes"] == "Pizza rows are order line items."
+
+
+def test_project_instruction_endpoints_and_rebuild(isolated_server):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    project = storage.create_project("Pizza sales")
+    client = TestClient(server.app)
+
+    patched = client.patch(
+        f"/projects/{project['id']}/instructions",
+        json={"instructions": {"category": "sales", "notes": "Use restaurant KPI definitions."}},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["instructions"]["category"] == "sales"
+
+    rebuilt = client.post(f"/projects/{project['id']}/profile/rebuild")
+    assert rebuilt.status_code == 200
+    assert rebuilt.json()["instructions"]["category"] == "sales"
+
+
+def test_project_memory_search_is_project_scoped(isolated_server):
+    _server, storage, _pool = isolated_server
+
+    p1 = storage.create_project("Pizza")
+    p2 = storage.create_project("Finance")
+    storage.upsert_project_instructions(p1["id"], {"category": "sales", "notes": "Orders are unique order_id values."})
+    storage.upsert_project_instructions(p2["id"], {"category": "finance", "notes": "Invoices are bill numbers."})
+    storage.rebuild_project_memory(p1["id"])
+    storage.rebuild_project_memory(p2["id"])
+
+    results = storage.search_project_memory(p1["id"], "orders invoices", limit=5)
+
+    assert any("order_id" in item["content"] for item in results)
+    assert all("Invoices are bill numbers" not in item["content"] for item in results)
+
+
+def test_upload_response_includes_clarification_suggestions(isolated_server, monkeypatch, tmp_path):
+    server, _storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+    from src.data_sources import DataSource
+
+    def fake_prepare_csv_memory_source(path, logger):
+        return DataSource(
+            source_kind="CSV memory",
+            schema={
+                "row_count": 48620,
+                "columns": [
+                    {"name": "order_details_id", "type": "BIGINT"},
+                    {"name": "order_id", "type": "BIGINT"},
+                    {"name": "quantity", "type": "BIGINT"},
+                ],
+            },
+            display_name=path.name,
+            dataframe=pd.DataFrame({"order_details_id": [1, 2], "order_id": [1, 1], "quantity": [1, 2]}),
+        )
+
+    monkeypatch.setattr(server, "prepare_csv_memory_source", fake_prepare_csv_memory_source)
+
+    response = TestClient(server.app).post(
+        "/sources/upload",
+        files={"file": ("pizza_sales.csv", b"order_details_id,order_id,quantity\n1,1,1\n", "text/csv")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["clarifications"][0]["id"] == "row_grain"
+    assert "line item" in data["clarifications"][0]["question"].lower()
+
+
+def test_source_clarification_updates_instructions(isolated_server):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    storage.upsert_source(
+        source_id="src_pizza",
+        name="pizza_sales.csv",
+        kind="csv",
+        rows=48620,
+        schema_json='{"columns":[{"name":"order_id"},{"name":"quantity"}],"row_count":48620}',
+        origin=None,
+    )
+
+    response = TestClient(server.app).post(
+        "/sources/src_pizza/clarifications",
+        json={"answers": {"row_grain": "line_item"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["instructions"]["row_grain"] == "line_item"
 
 
 def test_upload_zip_auto_adds_pdf_sources(isolated_server, monkeypatch):

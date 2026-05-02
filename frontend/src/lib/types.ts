@@ -8,6 +8,7 @@ export interface Source {
   rows: number;
   active: boolean;
   loaded?: boolean;
+  clarifications?: SourceClarification[];
 }
 
 export interface Connector {
@@ -53,6 +54,19 @@ export interface ProjectNote {
   created_at: number;
 }
 
+export interface SourceClarification {
+  id: string;
+  question: string;
+  options: { label: string; value: string }[];
+}
+
+export interface InstructionsResponse {
+  source_id?: string;
+  project_id?: string;
+  instructions: Record<string, any>;
+  updated_at?: number;
+}
+
 export interface ResultPayload {
   title: string;
   viz: "bar" | "line" | "pie" | "card" | "table";
@@ -69,6 +83,7 @@ export type PendingResolver =
   | "sheet_pick"
   | "table_pick"
   | "ingest_pick"
+  | "source_clarification"
   | "connect_url"
   | "clarify_text";
 
@@ -150,4 +165,5 @@ export interface UploadResponse {
     tables?: string[];
     size_mb?: number;
   };
+  clarifications?: SourceClarification[];
 }

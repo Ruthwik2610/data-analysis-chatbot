@@ -46,6 +46,14 @@ from src.logging_config import log_event, setup_loggers
 from src.mcp_pool import extract_text_content, get_pool, parse_tool_result_to_dataframe
 from src.model_router import LLMRouter, LLMUnavailable
 from src.prompting import build_local_agent_system_prompt
+from src.project_intelligence import (
+    apply_instruction_rules,
+    build_instruction_context,
+    clarification_suggestions,
+    default_source_instructions,
+    detect_project_category,
+    normalize_instructions,
+)
 from src.query_engine import (
     build_query_plan,
     build_total_plan,
@@ -70,6 +78,8 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 PENDING: dict[str, dict[str, Any]] = {}  # upload_id -> { path, kind, file_name, created_at, ... }
 PENDING_TTL_SECONDS = 1800
 ARCHIVE_PDF_MAX_BYTES = int(float(os.getenv("ARCHIVE_PDF_MAX_MB", "0")) * 1024 * 1024)
+DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "2GB")
+DUCKDB_THREADS = max(1, int(os.getenv("DUCKDB_THREADS", "1")))
 
 
 def _cleanup_pending(max_age_seconds: int = PENDING_TTL_SECONDS) -> None:
@@ -113,12 +123,14 @@ ROUTER = LLMRouter(
 
 MODEL_PRESETS = {
     "flash": {
-        "model": os.getenv("MODEL_FLASH", "openrouter/google/gemini-2.5-flash"),
-        "agent_model": os.getenv("AGENT_MODEL_FLASH", os.getenv("MODEL_FLASH", "openrouter/google/gemini-2.5-flash")),
+        "model": os.getenv("MODEL_FLASH", "openrouter/deepseek/deepseek-v4-flash"),
+        "agent_model": os.getenv("AGENT_MODEL_FLASH", os.getenv("MODEL_FLASH", "openrouter/deepseek/deepseek-v4-flash")),
+        "provider_order": os.getenv("OPENROUTER_PROVIDER_ORDER_FLASH", CONFIG.openrouter_provider_order),
     },
     "pro": {
         "model": os.getenv("MODEL_PRO", CONFIG.model),
         "agent_model": os.getenv("AGENT_MODEL_PRO", CONFIG.agent_model),
+        "provider_order": os.getenv("OPENROUTER_PROVIDER_ORDER_PRO", CONFIG.openrouter_provider_order),
     },
 }
 _ROUTER_CACHE: dict[str, LLMRouter] = {}
@@ -131,11 +143,11 @@ def _model_preset_for_mode(mode: str | None) -> dict[str, str]:
 
 def _router_for_model_mode(mode: str | None) -> LLMRouter:
     preset = _model_preset_for_mode(mode)
-    key = f"{preset['model']}::{preset['agent_model']}"
+    key = f"{preset['model']}::{preset['agent_model']}::{preset.get('provider_order', '')}"
     if key not in _ROUTER_CACHE:
         _ROUTER_CACHE[key] = LLMRouter(
             openrouter_api_key=CONFIG.openrouter_api_key,
-            openrouter_provider_order=CONFIG.openrouter_provider_order,
+            openrouter_provider_order=preset.get("provider_order", CONFIG.openrouter_provider_order),
             model=preset["model"],
             agent_model=preset["agent_model"],
             logger=LOGGERS["llm"],
@@ -227,6 +239,19 @@ def _join_key_score(name: str) -> int:
     return score
 
 
+def _connect_duckdb(path: str = ":memory:", *, read_only: bool = False):
+    import duckdb
+
+    con = duckdb.connect(path, read_only=read_only)
+    with contextlib.suppress(Exception):
+        con.execute(f"SET threads={DUCKDB_THREADS}")
+    with contextlib.suppress(Exception):
+        con.execute(f"SET memory_limit='{DUCKDB_MEMORY_LIMIT}'")
+    with contextlib.suppress(Exception):
+        con.execute("SET preserve_insertion_order=false")
+    return con
+
+
 def _detect_join_candidates(source_summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for i, left in enumerate(source_summaries):
@@ -302,8 +327,44 @@ def _persist_source(source_id: str, source: DataSource, kind: str, origin: dict[
         schema_json=json.dumps(source.schema, default=str),
         origin=origin,
     )
+    if DB.get_source_instructions(source_id) is None:
+        DB.upsert_source_instructions(source_id, default_source_instructions(source.schema, source.display_name))
     DB.set_active_source(source_id)
     return _serialize_source(source_id, source, kind, active=True)
+
+
+def _source_allowed_columns_from_row(row: dict[str, Any]) -> set[str]:
+    try:
+        schema = json.loads(row.get("schema_json") or "{}")
+    except Exception:
+        schema = {}
+    return {str(c.get("name") or c.get("column")) for c in schema.get("columns", []) if c.get("name") or c.get("column")}
+
+
+def _source_schema_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(row.get("schema_json") or "{}")
+    except Exception:
+        return {}
+
+
+def _source_with_clarifications(result: dict[str, Any], source: DataSource) -> dict[str, Any]:
+    suggestions = clarification_suggestions(source.schema, source.display_name)
+    if suggestions:
+        result = {**result, "clarifications": suggestions}
+    return result
+
+
+def _get_or_create_source_instructions(source_id: str) -> dict[str, Any]:
+    existing = DB.get_source_instructions(source_id)
+    if existing is not None:
+        return existing
+    row = DB.get_source(source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Source not found")
+    instructions = default_source_instructions(_source_schema_from_row(row), row.get("name") or "")
+    DB.upsert_source_instructions(source_id, instructions)
+    return instructions
 
 
 async def _rehydrate_source(row: dict[str, Any]) -> DataSource:
@@ -529,6 +590,14 @@ class ProjectUpdate(BaseModel):
     title: str
 
 
+class InstructionsUpdate(BaseModel):
+    instructions: dict[str, Any]
+
+
+class SourceClarificationUpdate(BaseModel):
+    answers: dict[str, Any]
+
+
 class ProjectAddFile(BaseModel):
     file_path: str | None = None
     source_id: str | None = None
@@ -645,7 +714,7 @@ def _list_excel_sheets(path: Path) -> list[str]:
 def _list_duckdb_tables(path: Path) -> list[str]:
     import duckdb
 
-    con = duckdb.connect(str(path), read_only=True)
+    con = _connect_duckdb(str(path), read_only=True)
     try:
         rows = con.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_schema='main' ORDER BY table_name"
@@ -824,7 +893,7 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
             sheet = sheets[0] if sheets else None
             source = await asyncio.to_thread(prepare_excel_source, dest, sheet, LOGGERS["cache"])
             origin = {"type": "excel", "path": str(dest), "sheet": sheet, "ingest": "direct"}
-            return _persist_source(_make_id(), source, "xlsx", origin)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin), source)
 
         if suffix in {".duckdb", ".db"}:
             tables = await asyncio.to_thread(_list_duckdb_tables, dest)
@@ -839,7 +908,7 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
             table = tables[0] if tables else "orders"
             source = await asyncio.to_thread(prepare_duckdb_source, dest, table, LOGGERS["cache"])
             origin = {"type": "duckdb", "path": str(dest), "table": table}
-            return _persist_source(_make_id(), source, "duckdb", origin)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "duckdb", origin), source)
 
         if suffix == ".csv":
             if size_mb > 100:
@@ -852,7 +921,7 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
                 }}
             source = await asyncio.to_thread(prepare_csv_memory_source, dest, LOGGERS["cache"])
             origin = {"type": "csv_memory", "path": str(dest)}
-            return _persist_source(_make_id(), source, "csv", origin)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "csv", origin), source)
 
         if suffix == ".json":
             from src.data_sources import prepare_local_file_source
@@ -862,12 +931,12 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
                 dest, CONFIG.cache_dir, LOGGERS["cache"], "orders", None, False, "direct",
             )
             origin = {"type": "json", "path": str(dest)}
-            return _persist_source(_make_id(), source, "json", origin)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "json", origin), source)
 
         if suffix == ".pdf":
             source = await asyncio.to_thread(prepare_pdf_source, dest, LOGGERS["cache"])
             origin = {"type": "pdf", "path": str(dest)}
-            return _persist_source(_make_id(), source, "pdf", origin)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "pdf", origin), source)
 
         if suffix in {".zip", ".7z"}:
             sources, skipped = await asyncio.to_thread(_prepare_archive_pdf_sources, dest, upload_dir / "unpacked")
@@ -895,11 +964,11 @@ def resolve_pending(body: ResolvePending) -> dict[str, Any]:
         if record["kind"] == "xlsx":
             source = prepare_excel_source(path, body.value, LOGGERS["cache"])
             origin = {"type": "excel", "path": str(path), "sheet": body.value, "ingest": "direct"}
-            result = _persist_source(_make_id(), source, "xlsx", origin)
+            result = _source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin), source)
         elif record["kind"] == "duckdb":
             source = prepare_duckdb_source(path, body.value, logger=LOGGERS["cache"])
             origin = {"type": "duckdb", "path": str(path), "table": body.value}
-            result = _persist_source(_make_id(), source, "duckdb", origin)
+            result = _source_with_clarifications(_persist_source(_make_id(), source, "duckdb", origin), source)
         elif record["kind"] == "csv":
             ingest = body.value if body.value in ("direct", "sql") else "direct"
             if ingest == "sql":
@@ -907,7 +976,7 @@ def resolve_pending(body: ResolvePending) -> dict[str, Any]:
             else:
                 source = prepare_csv_memory_source(path, logger=LOGGERS["cache"])
             origin = {"type": f"csv_{ingest}", "path": str(path)}
-            result = _persist_source(_make_id(), source, "csv", origin)
+            result = _source_with_clarifications(_persist_source(_make_id(), source, "csv", origin), source)
         else:
             raise HTTPException(status_code=400, detail=f"Unknown pending kind: {record['kind']}")
     except HTTPException:
@@ -929,6 +998,38 @@ def delete_source(source_id: str) -> dict[str, Any]:
 def activate_source(source_id: str) -> dict[str, Any]:
     DB.set_active_source(source_id)
     return {"ok": True}
+
+
+@app.get("/sources/{source_id}/instructions")
+def get_source_instructions(source_id: str) -> dict[str, Any]:
+    row = DB.get_source(source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Source not found")
+    instructions = _get_or_create_source_instructions(source_id)
+    return {"source_id": source_id, "instructions": instructions}
+
+
+@app.patch("/sources/{source_id}/instructions")
+def update_source_instructions(source_id: str, body: InstructionsUpdate) -> dict[str, Any]:
+    row = DB.get_source(source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Source not found")
+    normalized = normalize_instructions(body.instructions, _source_allowed_columns_from_row(row))
+    return DB.upsert_source_instructions(source_id, normalized)
+
+
+@app.post("/sources/{source_id}/clarifications")
+def apply_source_clarifications(source_id: str, body: SourceClarificationUpdate) -> dict[str, Any]:
+    row = DB.get_source(source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Source not found")
+    allowed = _source_allowed_columns_from_row(row)
+    instructions = _get_or_create_source_instructions(source_id)
+    answers = body.answers or {}
+    if answers.get("row_grain"):
+        instructions["row_grain"] = str(answers["row_grain"])
+    normalized = normalize_instructions(instructions, allowed)
+    return DB.upsert_source_instructions(source_id, normalized)
 
 
 # -- chats -----------------------------------------------------------------
@@ -1036,6 +1137,44 @@ def update_project(project_id: str, body: ProjectUpdate) -> dict[str, Any]:
 def delete_project(project_id: str) -> dict[str, Any]:
     DB.delete_project(project_id)
     return {"ok": True}
+
+
+@app.get("/projects/{project_id}/instructions")
+def get_project_instructions(project_id: str) -> dict[str, Any]:
+    project = DB.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    instructions = DB.get_project_instructions(project_id)
+    if instructions is None:
+        source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+        instructions = {"category": detect_project_category(project, [r for r in source_rows if r]), "notes": "", "metrics": {}, "entities": {}}
+        DB.upsert_project_instructions(project_id, instructions)
+    return {"project_id": project_id, "instructions": instructions}
+
+
+@app.patch("/projects/{project_id}/instructions")
+def update_project_instructions(project_id: str, body: InstructionsUpdate) -> dict[str, Any]:
+    if not DB.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    instructions = dict(body.instructions or {})
+    category = str(instructions.get("category") or "").strip().lower()
+    if category and category not in {"general", "sales", "finance", "inventory", "operations", "customer_support"}:
+        instructions["category"] = "general"
+    return DB.upsert_project_instructions(project_id, instructions)
+
+
+@app.post("/projects/{project_id}/profile/rebuild")
+def rebuild_project_profile(project_id: str) -> dict[str, Any]:
+    project = DB.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    existing = DB.get_project_instructions(project_id) or {}
+    if not existing.get("category"):
+        source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+        existing["category"] = detect_project_category(project, [r for r in source_rows if r])
+    saved = DB.upsert_project_instructions(project_id, existing)
+    DB.rebuild_project_memory(project_id)
+    return saved
 
 
 @app.post("/projects/{project_id}/files")
@@ -1282,7 +1421,7 @@ def _run_query(plan, source: DataSource) -> tuple[pd.DataFrame, int]:
     p_key = params_key(plan.params)
     if source.db_path:
         params = json.loads(p_key)
-        con = duckdb.connect(source.db_path, read_only=True)
+        con = _connect_duckdb(source.db_path, read_only=True)
         try:
             if source.table_name != "orders":
                 safe_table = '"' + source.table_name.replace('"', '""') + '"'
@@ -1292,7 +1431,7 @@ def _run_query(plan, source: DataSource) -> tuple[pd.DataFrame, int]:
             con.close()
     elif source.dataframe is not None:
         params = json.loads(p_key)
-        con = duckdb.connect(":memory:")
+        con = _connect_duckdb(":memory:")
         try:
             con.register("orders", source.dataframe)
             df = con.execute(plan.sql, params).fetchdf()
@@ -1315,7 +1454,7 @@ def _prepare_workspace_sync(chat_id: str, selected: list[tuple[dict[str, Any], D
     work_dir = CONFIG.cache_dir / "workspaces"
     work_dir.mkdir(parents=True, exist_ok=True)
     work_path = work_dir / f"{chat_id}.duckdb"
-    con = duckdb.connect(str(work_path))
+    con = _connect_duckdb(str(work_path))
     summaries: list[dict[str, Any]] = []
     used_tables: set[str] = set()
     try:
@@ -1366,7 +1505,7 @@ def _run_workspace_sql_sync(chat_id: str, sql: str) -> tuple[pd.DataFrame, int]:
     chat_id = Path(chat_id).name
     work_path = CONFIG.cache_dir / "workspaces" / f"{chat_id}.duckdb"
     start = time.perf_counter()
-    con = duckdb.connect(str(work_path), read_only=True)
+    con = _connect_duckdb(str(work_path), read_only=True)
     try:
         df = con.execute(sql).fetchdf()
     finally:
@@ -1379,7 +1518,7 @@ def _materialize_workspace_df_sync(chat_id: str, table_name: str, df: pd.DataFra
 
     chat_id = Path(chat_id).name
     work_path = CONFIG.cache_dir / "workspaces" / f"{chat_id}.duckdb"
-    con = duckdb.connect(str(work_path))
+    con = _connect_duckdb(str(work_path))
     try:
         con.register("mcp_df", df)
         con.execute(f"CREATE OR REPLACE TABLE {quote_ident(table_name)} AS SELECT * FROM mcp_df")
@@ -1592,7 +1731,7 @@ async def _run_local_agent(
     def _run_sql_blocking(sql: str) -> pd.DataFrame:
         import duckdb
         if source.db_path:
-            con = duckdb.connect(source.db_path, read_only=True)
+            con = _connect_duckdb(source.db_path, read_only=True)
             try:
                 if source.table_name != "orders":
                     safe = '"' + source.table_name.replace('"', '""') + '"'
@@ -1601,7 +1740,7 @@ async def _run_local_agent(
             finally:
                 con.close()
         if source.dataframe is not None:
-            con = duckdb.connect(":memory:")
+            con = _connect_duckdb(":memory:")
             try:
                 con.register("orders", source.dataframe)
                 return con.execute(sql).fetchdf()
@@ -1917,11 +2056,21 @@ async def query(body: QueryRequest):
         DB.update_chat_title(chat_id, question[:60])
 
     history = _load_history(chat_id)
+    project_instructions: dict[str, Any] | None = None
+    source_instructions: dict[str, Any] | None = None
+    memory_snippets: list[dict[str, Any]] = []
     if chat and chat.get("project_id"):
+        project_instructions = DB.get_project_instructions(chat["project_id"])
+        if project_instructions is None:
+            project_instructions = get_project_instructions(chat["project_id"])["instructions"]
+        DB.rebuild_project_memory(chat["project_id"])
+        memory_snippets = DB.search_project_memory(chat["project_id"], question, limit=5)
         notes = DB.list_project_notes(chat["project_id"])[:6]
         if notes:
             note_lines = "\n".join(f"- {n['title']}: {n['content'][:300]}" for n in notes)
             history.append({"role": "project_notes", "content": f"Saved project notes:\n{note_lines}"})
+    if active_row:
+        source_instructions = _get_or_create_source_instructions(active_row["id"])
     request_id = uuid.uuid4().hex[:12]
 
     async def event_stream() -> AsyncIterator[dict[str, Any]]:
@@ -1974,6 +2123,13 @@ async def query(body: QueryRequest):
 
         try:
             mcp_summary_text = _build_mcp_summary(pool, allowed_mcp_ids) if has_mcp else ""
+            instruction_context = build_instruction_context(
+                source_instructions=source_instructions,
+                project_instructions=project_instructions,
+                memory_snippets=memory_snippets,
+                allowed_columns=source.allowed_columns,
+                char_budget=3000,
+            )
             if llm_router.available:
                 intent, model_used = await loop.run_in_executor(
                     None,
@@ -1984,12 +2140,20 @@ async def query(body: QueryRequest):
                         conversation_summary=conversation_summary(history),
                         mcp_summary=mcp_summary_text,
                         local_source_name=active_row["name"],
+                        instruction_context=instruction_context,
                     ),
                 )
             else:
                 intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
             if model_used != "offline-heuristic":
                 model_used = model_preset["model"]
+            intent = apply_instruction_rules(
+                intent,
+                question,
+                source.allowed_columns,
+                source_instructions=source_instructions,
+                project_instructions=project_instructions,
+            )
 
             route = (intent.get("route") or "local").lower()
 

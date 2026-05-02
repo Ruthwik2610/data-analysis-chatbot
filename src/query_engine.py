@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-VALID_AGGREGATIONS = {"sum", "avg", "count", "min", "max"}
+VALID_AGGREGATIONS = {"sum", "avg", "count", "count_distinct", "min", "max"}
 
 # Hint words used only by the offline heuristic when neither the LLM nor the
 # question text identified a column. Each entry is a substring to look for in
@@ -294,6 +294,30 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
     if intent_type == "lookup":
         return build_lookup_plan(intent.get("filters") or [], intent, allowed_columns)
 
+    multi_metrics = intent.get("metrics") or []
+    if isinstance(multi_metrics, list) and multi_metrics:
+        selects: list[str] = []
+        for metric in multi_metrics[:5]:
+            if not isinstance(metric, dict):
+                continue
+            name = canonical_column(metric.get("name") or metric.get("column") or "metric")
+            column = canonical_column(metric.get("column") or "")
+            aggregation = infer_aggregation(question, metric.get("aggregation"))
+            expr, _alias = metric_expression(column, aggregation, allowed_columns, alias=name)
+            selects.append(expr)
+        if selects:
+            where_sql, params = build_filters(intent.get("filters") or [], allowed_columns)
+            sql = f"SELECT {', '.join(selects)} FROM orders"
+            if where_sql:
+                sql += f" WHERE {where_sql}"
+            return QueryPlan(
+                sql=sql,
+                params=params,
+                display_type="card",
+                title="Key Metrics",
+                how=f"Computed {len(selects)} instruction-defined metric(s); filters: {len(params)} parameter(s).",
+            )
+
     dimensions = infer_dimensions(question, intent.get("dimensions") or [], allowed_columns)
     aggregation = infer_aggregation(question, intent.get("aggregation"))
     metric_column = (
@@ -306,7 +330,12 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
 
     selects: list[str] = []
     groups: list[str] = []
-    metric_sql, order_alias = metric_expression(metric_column, aggregation, allowed_columns)
+    metric_sql, order_alias = metric_expression(
+        metric_column,
+        aggregation,
+        allowed_columns,
+        alias=canonical_column(intent.get("metric_definition") or "") or None,
+    )
     date_column = primary_date_column(allowed_columns)
     has_period = bool(date_grain and date_column)
     if has_period:
@@ -341,6 +370,7 @@ def metric_expression(
     metric_column: str | None,
     aggregation: str,
     allowed_columns: set[str],
+    alias: str | None = None,
 ) -> tuple[str, str]:
     """Build the SELECT expression for an aggregation over an actual schema column.
     Returns (sql_fragment, alias). Falls back to COUNT(*) when the column is missing
@@ -348,12 +378,16 @@ def metric_expression(
     agg = (aggregation or "sum").lower()
     if agg not in VALID_AGGREGATIONS:
         agg = "sum"
+    if agg == "count_distinct" and metric_column and metric_column in allowed_columns:
+        out_alias = alias or metric_column
+        return f"COUNT(DISTINCT {quote_ident(metric_column)}) AS {quote_ident(out_alias)}", out_alias
     if agg == "count" or not metric_column or metric_column not in allowed_columns:
         return "COUNT(*) AS count", "count"
     op = agg.upper()
+    out_alias = alias or metric_column
     return (
-        f"{op}(TRY_CAST({quote_ident(metric_column)} AS DOUBLE)) AS {quote_ident(metric_column)}",
-        metric_column,
+        f"{op}(TRY_CAST({quote_ident(metric_column)} AS DOUBLE)) AS {quote_ident(out_alias)}",
+        out_alias,
     )
 
 
@@ -421,7 +455,7 @@ def build_filters(filters: list[dict[str, Any]], allowed_columns: set[str]) -> t
     return " AND ".join(clauses), params
 
 
-_AGG_LABELS = {"sum": "Total", "avg": "Average", "count": "Count", "min": "Min", "max": "Max"}
+_AGG_LABELS = {"sum": "Total", "avg": "Average", "count": "Count", "count_distinct": "Distinct Count", "min": "Min", "max": "Max"}
 
 
 def make_title(

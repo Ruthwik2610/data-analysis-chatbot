@@ -32,6 +32,7 @@ def build_intent_prompt(
     char_budget: int,
     mcp_summary: str = "",
     local_source_name: str = "the loaded dataset",
+    instruction_context: str = "",
 ) -> str:
     schema_xml = xml_escape(compact_json(schema_context))
     conversation_xml = xml_escape(conversation_summary[-3000:])
@@ -39,6 +40,7 @@ def build_intent_prompt(
     local_name_xml = xml_escape(local_source_name)
     has_mcp = bool(mcp_summary.strip())
     mcp_xml = xml_escape(mcp_summary) if has_mcp else ""
+    instruction_xml = xml_escape(instruction_context) if instruction_context else ""
 
     if has_mcp:
         scope_rule = (
@@ -106,6 +108,7 @@ def build_intent_prompt(
     <rule>PII can be included only when the user explicitly asks for a row-level lookup or personal field.</rule>
   </system_rules>
 {sources_block}
+  <project_and_source_instructions>{instruction_xml}</project_and_source_instructions>
   <conversation_summary>{conversation_xml}</conversation_summary>
   <user_question>{question_xml}</user_question>
   <output_contract>
@@ -238,4 +241,3 @@ Chain as many tool calls as you need.
 - Hide SQL/JSON/tool internals unless the user explicitly asks for the query.
 - Never mention "MCP", "tool", "function call", "BigQuery", "Salesforce metadata", or other infrastructure names — speak naturally about the data.
 """
-

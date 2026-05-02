@@ -31,7 +31,7 @@ describe("ConnectorPopover", () => {
     );
 
     expect(screen.getByRole("tab", { name: "API" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "MCP" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("tab", { name: "Database/MCP" })).toHaveAttribute("aria-selected", "false");
     expect(screen.getByRole("tab", { name: "Excel" })).toHaveAttribute("aria-selected", "false");
 
     fireEvent.click(screen.getByRole("tab", { name: "Excel" }));
@@ -53,7 +53,7 @@ describe("ConnectorPopover", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("tab", { name: "MCP" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Database/MCP" }));
     fireEvent.change(screen.getByPlaceholderText("Server name (optional, e.g. BigQuery)"), {
       target: { value: "Warehouse" },
     });

@@ -157,11 +157,26 @@ export default function Home() {
           refreshSources();
         } else if ("id" in res && res.id) {
           setSelectedSourceIds((ids) => Array.from(new Set([...ids, res.id as string])));
-          updateMessage(placeholderId, {
-            thinking: null,
-            progress: null,
-            content: `Got **${res.name}** — ${res.rows?.toLocaleString()} rows ready. Ask me anything about it.`,
-          });
+          const firstClarification = res.clarifications?.[0];
+          if (firstClarification) {
+            updateMessage(placeholderId, {
+              thinking: null,
+              progress: null,
+              content: `Got **${res.name}** — ${res.rows?.toLocaleString()} rows ready.\n\n${firstClarification.question}`,
+              pending: {
+                resolver: "source_clarification",
+                hint: "Set file meaning",
+                options: firstClarification.options,
+                args: { source_id: res.id, clarification_id: firstClarification.id, source_name: res.name, rows: res.rows },
+              },
+            });
+          } else {
+            updateMessage(placeholderId, {
+              thinking: null,
+              progress: null,
+              content: `Got **${res.name}** — ${res.rows?.toLocaleString()} rows ready. Ask me anything about it.`,
+            });
+          }
           refreshSources();
         }
       } catch (e: any) {
@@ -217,15 +232,45 @@ export default function Home() {
         return;
       }
 
+      if (pending.resolver === "source_clarification") {
+        updateMessage(messageId, { resolved: true, thinking: "Saving file rules", content: `${msg.content}\n\n${value}` });
+        try {
+          await api.applySourceClarifications(pending.args.source_id, { [pending.args.clarification_id]: value });
+          updateMessage(messageId, {
+            thinking: null,
+            content: `Got **${pending.args.source_name}** — ${Number(pending.args.rows || 0).toLocaleString()} rows ready. I saved that file meaning for more accurate answers.`,
+          });
+          refreshSources();
+        } catch (e: any) {
+          updateMessage(messageId, { thinking: null, content: `I loaded the file, but couldn't save that rule: ${e?.message || "unknown"}`, error: true });
+        }
+        return;
+      }
+
       // sheet_pick / table_pick / ingest_pick → resolve_pending
       updateMessage(messageId, { resolved: true, thinking: "Loading", content: msg.content });
       try {
         const src = await api.resolvePending(pending.args.upload_id, value);
         setSelectedSourceIds((ids) => Array.from(new Set([...ids, src.id])));
-        updateMessage(messageId, {
-          thinking: null,
-          content: `Got **${src.name}** — ${src.rows.toLocaleString()} rows. Ask me anything about it.`,
-        });
+        const firstClarification = src.clarifications?.[0];
+        if (firstClarification) {
+          updateMessage(messageId, {
+            resolved: false,
+            thinking: null,
+            content: `Got **${src.name}** — ${src.rows.toLocaleString()} rows.\n\n${firstClarification.question}`,
+            pending: {
+              resolver: "source_clarification",
+              hint: "Set file meaning",
+              options: firstClarification.options,
+              args: { source_id: src.id, clarification_id: firstClarification.id, source_name: src.name, rows: src.rows },
+            },
+          });
+        } else {
+          updateMessage(messageId, {
+            thinking: null,
+            content: `Got **${src.name}** — ${src.rows.toLocaleString()} rows. Ask me anything about it.`,
+          });
+        }
         refreshSources();
       } catch (e: any) {
         updateMessage(messageId, { thinking: null, content: `Couldn't finish loading: ${e?.message || "unknown"}`, error: true });

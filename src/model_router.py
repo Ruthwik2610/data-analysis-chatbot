@@ -156,6 +156,7 @@ class LLMRouter:
         conversation_summary: str,
         mcp_summary: str = "",
         local_source_name: str = "the loaded dataset",
+        instruction_context: str = "",
     ) -> tuple[dict[str, Any], str]:
         prompt = build_intent_prompt(
             schema_context=schema_context,
@@ -164,6 +165,7 @@ class LLMRouter:
             char_budget=self.char_budget,
             mcp_summary=mcp_summary,
             local_source_name=local_source_name,
+            instruction_context=instruction_context,
         )
         try:
             intent = self._generate_json(prompt, request_id)

@@ -259,7 +259,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef, current
 
       <div role="tablist" aria-label="Source type" className="px-3 pt-3 grid grid-cols-3 gap-1">
         <TabButton label="API" selected={tab === "api"} onClick={() => setTab("api")} />
-        <TabButton label="MCP" selected={tab === "mcp"} onClick={() => setTab("mcp")} />
+        <TabButton label="Database/MCP" selected={tab === "mcp"} onClick={() => setTab("mcp")} />
         <TabButton label="Excel" selected={tab === "excel"} onClick={() => setTab("excel")} />
       </div>
 

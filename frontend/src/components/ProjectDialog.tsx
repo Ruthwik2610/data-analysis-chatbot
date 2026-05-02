@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, Plus, Trash2, FileText, Database, Server, Save, StickyNote } from "lucide-react";
+import { X, Plus, Trash2, FileText, Database, Server, Save, StickyNote, Wand2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { MCPConnector, Project, ProjectNote, Source } from "@/lib/types";
 
@@ -18,6 +18,12 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   const [notes, setNotes] = useState<ProjectNote[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [selectedMcpId, setSelectedMcpId] = useState("");
+  const [projectCategory, setProjectCategory] = useState("general");
+  const [projectRules, setProjectRules] = useState("");
+  const [savingRules, setSavingRules] = useState(false);
+  const [selectedInstructionSourceId, setSelectedInstructionSourceId] = useState("");
+  const [sourceRowGrain, setSourceRowGrain] = useState("row");
+  const [sourceRules, setSourceRules] = useState("");
   const [loading, setLoading] = useState(true);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
@@ -25,17 +31,20 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   const loadData = async () => {
     setLoading(true);
     try {
-      const [projData, sourcesData, mcpData, noteData] = await Promise.all([
+      const [projData, sourcesData, mcpData, noteData, projectInstructions] = await Promise.all([
         api.getProject(projectId),
         api.listSources(projectId),
         api.listMCPConnectors(),
         api.listProjectNotes(projectId),
+        api.getProjectInstructions(projectId),
       ]);
       setProject(projData);
       setTitleDraft(projData.title);
       setSources(sourcesData);
       setMcpConnectors(mcpData);
       setNotes(noteData);
+      setProjectCategory(projectInstructions.instructions.category || "general");
+      setProjectRules(projectInstructions.instructions.notes || "");
     } catch (err) {
       console.error("Failed to load project data", err);
     } finally {
@@ -118,6 +127,53 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
     }
   };
 
+  const handleSaveProjectRules = async () => {
+    setSavingRules(true);
+    try {
+      await api.updateProjectInstructions(projectId, {
+        category: projectCategory,
+        notes: projectRules,
+      });
+      await api.rebuildProjectProfile(projectId);
+      onUpdate();
+    } catch (err: any) {
+      alert(err.message || "Failed to save project instructions");
+    } finally {
+      setSavingRules(false);
+    }
+  };
+
+  const loadSourceInstructions = async (sourceId: string) => {
+    setSelectedInstructionSourceId(sourceId);
+    if (!sourceId) {
+      setSourceRowGrain("row");
+      setSourceRules("");
+      return;
+    }
+    try {
+      const response = await api.getSourceInstructions(sourceId);
+      setSourceRowGrain(response.instructions.row_grain || "row");
+      setSourceRules(response.instructions.notes || "");
+    } catch (err: any) {
+      alert(err.message || "Failed to load file instructions");
+    }
+  };
+
+  const handleSaveSourceRules = async () => {
+    if (!selectedInstructionSourceId) return;
+    try {
+      const current = await api.getSourceInstructions(selectedInstructionSourceId);
+      await api.updateSourceInstructions(selectedInstructionSourceId, {
+        ...current.instructions,
+        row_grain: sourceRowGrain,
+        notes: sourceRules,
+      });
+      onUpdate();
+    } catch (err: any) {
+      alert(err.message || "Failed to save file instructions");
+    }
+  };
+
   const linkedMCPs = mcpConnectors.filter((c) => c.project_ids?.includes(projectId));
   const availableMCPs = mcpConnectors.filter((c) => !c.project_ids?.includes(projectId));
 
@@ -169,6 +225,44 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                 <Save size={15} />
                 <span className="hidden sm:inline">{savingTitle ? "Saving" : "Save"}</span>
               </button>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-gray-100">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">
+                Project instructions
+              </h3>
+              <button
+                onClick={handleSaveProjectRules}
+                disabled={savingRules}
+                className="px-3 py-1.5 bg-gray-900 text-white rounded-lg text-xs font-medium hover:bg-gray-800 disabled:opacity-50 transition-all flex items-center gap-2"
+              >
+                <Wand2 size={14} />
+                {savingRules ? "Saving" : "Save rules"}
+              </button>
+            </div>
+            <div className="grid grid-cols-[120px_1fr] gap-2">
+              <select
+                aria-label="Project category"
+                value={projectCategory}
+                onChange={(e) => setProjectCategory(e.target.value)}
+                className="px-3 py-2 text-sm border border-gray-200 rounded-xl bg-white outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="general">General</option>
+                <option value="sales">Sales</option>
+                <option value="finance">Finance</option>
+                <option value="inventory">Inventory</option>
+                <option value="operations">Operations</option>
+                <option value="customer_support">Support</option>
+              </select>
+              <textarea
+                aria-label="Project rules"
+                value={projectRules}
+                onChange={(e) => setProjectRules(e.target.value)}
+                placeholder="Shared rules for this project, for example: orders mean distinct order_id; revenue means total_price."
+                className="min-h-20 resize-none px-3 py-2 text-sm border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500"
+              />
             </div>
           </div>
 
@@ -303,6 +397,55 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                 <Plus size={16} />
                 Add
               </button>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-gray-100">
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">
+              File instructions
+            </h3>
+            <div className="space-y-2">
+              <select
+                aria-label="Instruction source"
+                value={selectedInstructionSourceId}
+                onChange={(e) => loadSourceInstructions(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-xl bg-white outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">Select a linked file...</option>
+                {project?.files.filter((file) => file.source_id).map((file) => (
+                  <option key={file.id} value={file.source_id || ""}>
+                    {file.source_name || file.source_id}
+                  </option>
+                ))}
+              </select>
+              {selectedInstructionSourceId && (
+                <div className="grid gap-2">
+                  <select
+                    aria-label="Row grain"
+                    value={sourceRowGrain}
+                    onChange={(e) => setSourceRowGrain(e.target.value)}
+                    className="px-3 py-2 text-sm border border-gray-200 rounded-xl bg-white outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="row">Generic row</option>
+                    <option value="line_item">Line item</option>
+                    <option value="order">Order</option>
+                    <option value="transaction">Transaction</option>
+                  </select>
+                  <textarea
+                    aria-label="File rules"
+                    value={sourceRules}
+                    onChange={(e) => setSourceRules(e.target.value)}
+                    placeholder="File-specific meaning, for example: one row is a pizza line item; orders are distinct order_id; quantity is pizzas sold."
+                    className="min-h-20 resize-none px-3 py-2 text-sm border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button
+                    onClick={handleSaveSourceRules}
+                    className="justify-self-end px-3 py-1.5 bg-gray-900 text-white rounded-lg text-xs font-medium hover:bg-gray-800 transition-all"
+                  >
+                    Save file rules
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 

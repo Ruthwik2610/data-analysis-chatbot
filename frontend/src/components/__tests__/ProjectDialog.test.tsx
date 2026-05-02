@@ -9,7 +9,7 @@ vi.mock("@/lib/api", () => ({
       title: "Restaurant ops",
       created_at: 1,
       updated_at: 2,
-      files: [],
+      files: [{ id: "file_1", project_id: "proj_1", file_path: null, source_id: "src_pizza", source_name: "pizza_sales.csv", sheet_name: null, created_at: 1 }],
     }),
     listSources: vi.fn().mockResolvedValue([]),
     listMCPConnectors: vi.fn().mockResolvedValue([
@@ -44,6 +44,26 @@ vi.mock("@/lib/api", () => ({
         created_at: 1,
       },
     ]),
+    getProjectInstructions: vi.fn().mockResolvedValue({
+      project_id: "proj_1",
+      instructions: { category: "sales", notes: "Orders are distinct order_id." },
+    }),
+    updateProjectInstructions: vi.fn().mockResolvedValue({
+      project_id: "proj_1",
+      instructions: { category: "sales", notes: "Orders are distinct order_id." },
+    }),
+    rebuildProjectProfile: vi.fn().mockResolvedValue({
+      project_id: "proj_1",
+      instructions: { category: "sales", notes: "Orders are distinct order_id." },
+    }),
+    getSourceInstructions: vi.fn().mockResolvedValue({
+      source_id: "src_pizza",
+      instructions: { row_grain: "line_item", notes: "Quantity means pizzas sold." },
+    }),
+    updateSourceInstructions: vi.fn().mockResolvedValue({
+      source_id: "src_pizza",
+      instructions: { row_grain: "line_item", notes: "Quantity means pizzas sold." },
+    }),
     deleteProjectNote: vi.fn().mockResolvedValue(undefined),
     bindProjectMCP: vi.fn().mockResolvedValue({ ok: true }),
     unbindProjectMCP: vi.fn().mockResolvedValue(undefined),
@@ -93,5 +113,33 @@ describe("ProjectDialog", () => {
 
     expect(await screen.findByText("Revenue finding")).toBeInTheDocument();
     expect(screen.getByText("Revenue increased by 12%.")).toBeInTheDocument();
+  });
+
+  it("saves project and file instructions", async () => {
+    render(<ProjectDialog projectId="proj_1" onClose={vi.fn()} onUpdate={vi.fn()} />);
+
+    const projectRules = await screen.findByLabelText("Project rules");
+    expect(projectRules).toHaveValue("Orders are distinct order_id.");
+    fireEvent.change(projectRules, { target: { value: "Revenue means total_price." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save rules" }));
+
+    await waitFor(() => {
+      expect(api.updateProjectInstructions).toHaveBeenCalledWith("proj_1", {
+        category: "sales",
+        notes: "Revenue means total_price.",
+      });
+    });
+
+    fireEvent.change(screen.getByLabelText("Instruction source"), { target: { value: "src_pizza" } });
+    expect(await screen.findByLabelText("File rules")).toHaveValue("Quantity means pizzas sold.");
+    fireEvent.change(screen.getByLabelText("File rules"), { target: { value: "Orders are distinct order_id." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save file rules" }));
+
+    await waitFor(() => {
+      expect(api.updateSourceInstructions).toHaveBeenCalledWith("src_pizza", expect.objectContaining({
+        row_grain: "line_item",
+        notes: "Orders are distinct order_id.",
+      }));
+    });
   });
 });

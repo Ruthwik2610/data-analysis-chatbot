@@ -1,4 +1,4 @@
-import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ProjectNote, ModelMode } from "./types";
+import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ProjectNote, ModelMode, InstructionsResponse } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY || "";
@@ -70,6 +70,19 @@ export const api = {
   },
   resolvePending: (upload_id: string, value: string) =>
     jpost<Source>("/sources/resolve_pending", { upload_id, value }),
+  getSourceInstructions: (sourceId: string) =>
+    jget<InstructionsResponse>(`/sources/${sourceId}/instructions`),
+  updateSourceInstructions: (sourceId: string, instructions: Record<string, any>) =>
+    fetch(`${BASE}/sources/${sourceId}/instructions`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ instructions }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      return r.json() as Promise<InstructionsResponse>;
+    }),
+  applySourceClarifications: (sourceId: string, answers: Record<string, any>) =>
+    jpost<InstructionsResponse>(`/sources/${sourceId}/clarifications`, { answers }),
   attachAPI: (url: string, auth: string | null, save_connector: boolean) =>
     jpost<Source>("/sources/api", { url, auth, ingest: "direct", save_connector }),
   deleteSource: (id: string) => jdelete(`/sources/${id}`),
@@ -112,6 +125,19 @@ export const api = {
       return r.json() as Promise<Project>;
     }),
   deleteProject: (id: string) => jdelete(`/projects/${id}`),
+  getProjectInstructions: (projectId: string) =>
+    jget<InstructionsResponse>(`/projects/${projectId}/instructions`),
+  updateProjectInstructions: (projectId: string, instructions: Record<string, any>) =>
+    fetch(`${BASE}/projects/${projectId}/instructions`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ instructions }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      return r.json() as Promise<InstructionsResponse>;
+    }),
+  rebuildProjectProfile: (projectId: string) =>
+    jpost<InstructionsResponse>(`/projects/${projectId}/profile/rebuild`, {}),
   addProjectFile: (projectId: string, filePath?: string, sheet?: string, sourceId?: string) =>
     jpost<ProjectFile>(`/projects/${projectId}/files`, { file_path: filePath, sheet, source_id: sourceId }),
   removeProjectFile: (projectId: string, fileId: string) =>

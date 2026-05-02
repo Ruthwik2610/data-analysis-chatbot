@@ -1,6 +1,6 @@
 # Data Analysis Chatbot
 
-A local FastAPI + Next.js chatbot for asking plain-English questions over uploaded files, API responses, and connected MCP data bridges. DuckDB performs the tabular work locally; OpenRouter-backed models handle intent parsing, multi-step planning, and concise answer wording.
+A local FastAPI + Next.js chatbot for asking plain-English questions over uploaded files, API responses, external Databases, and connected MCP data bridges. DuckDB performs the tabular work locally; OpenRouter-backed models handle intent parsing, multi-step planning, and concise answer wording.
 
 ## Setup
 
@@ -59,6 +59,7 @@ The app supports:
 - 7z uploads containing PDF tables (`.7z`)
 - JSON uploads
 - DuckDB database files
+- SQL Databases (MySQL, PostgreSQL, etc.) via project-scoped MCP bridges
 - JSON APIs with optional bearer auth
 - MCP bridges, such as BigQuery/Salesforce-style tool servers
 

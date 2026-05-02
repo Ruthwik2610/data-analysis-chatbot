@@ -16,7 +16,17 @@ def load_dotenv_if_present(path: str = ".env") -> None:
         key, value = line.split("=", 1)
         clean_key = key.strip()
         clean_value = value.strip().strip('"').strip("'")
-        if clean_key.startswith("OPENROUTER_") or clean_key in {"MODEL", "AGENT_MODEL", "DATA_PATH", "CACHE_DIR", "PROMPT_CHAR_BUDGET"}:
+        if clean_key.startswith("OPENROUTER_") or clean_key in {
+            "MODEL",
+            "AGENT_MODEL",
+            "MODEL_FLASH",
+            "AGENT_MODEL_FLASH",
+            "MODEL_PRO",
+            "AGENT_MODEL_PRO",
+            "DATA_PATH",
+            "CACHE_DIR",
+            "PROMPT_CHAR_BUDGET",
+        }:
             os.environ[clean_key] = clean_value
         else:
             os.environ.setdefault(clean_key, clean_value)

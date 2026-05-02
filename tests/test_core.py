@@ -10,6 +10,11 @@ import pandas as pd
 
 from src.data_sources import prepare_pdf_source
 from src.prompting import build_intent_prompt, xml_escape
+from src.project_intelligence import (
+    apply_instruction_rules,
+    build_instruction_context,
+    default_source_instructions,
+)
 from src.query_engine import build_query_plan, heuristic_intent
 from src.visualization import choose_visualization
 
@@ -141,6 +146,110 @@ class QueryPlanTests(unittest.TestCase):
         plan = build_query_plan(intent, "give me a table by location", allowed)
         self.assertIn('SUM(TRY_CAST("revenue" AS DOUBLE))', plan.sql)
         self.assertEqual(plan.sql.count('"location" AS "location"'), 1)
+
+    def test_pizza_instructions_distinguish_items_sold_and_orders(self) -> None:
+        allowed = {
+            "order_details_id",
+            "order_id",
+            "pizza_id",
+            "quantity",
+            "order_date",
+            "total_price",
+            "pizza_category",
+        }
+        instructions = default_source_instructions(
+            {"columns": [{"name": col} for col in sorted(allowed)], "row_count": 48620},
+            "pizza_sales.csv",
+        )
+        intent = apply_instruction_rules(
+            heuristic_intent("how many items sold vs how many orders", allowed),
+            "how many items sold vs how many orders",
+            allowed,
+            source_instructions=instructions,
+        )
+
+        plan = build_query_plan(intent, "how many items sold vs how many orders", allowed)
+
+        self.assertIn('SUM(TRY_CAST("quantity" AS DOUBLE)) AS "items_sold"', plan.sql)
+        self.assertIn('COUNT(DISTINCT "order_id") AS "orders"', plan.sql)
+
+    def test_pizza_instructions_count_rows_line_items_and_distinct_orders(self) -> None:
+        allowed = {"order_details_id", "order_id", "quantity", "total_price"}
+        instructions = default_source_instructions(
+            {"columns": [{"name": col} for col in sorted(allowed)], "row_count": 48620},
+            "pizza_sales.csv",
+        )
+
+        rows_intent = apply_instruction_rules(
+            heuristic_intent("how many rows are there", allowed),
+            "how many rows are there",
+            allowed,
+            source_instructions=instructions,
+        )
+        rows_plan = build_query_plan(rows_intent, "how many rows are there", allowed)
+        self.assertIn("COUNT(*) AS count", rows_plan.sql)
+
+        orders_intent = apply_instruction_rules(
+            heuristic_intent("how many orders", allowed),
+            "how many orders",
+            allowed,
+            source_instructions=instructions,
+        )
+        orders_plan = build_query_plan(orders_intent, "how many orders", allowed)
+        self.assertIn('COUNT(DISTINCT "order_id") AS "orders"', orders_plan.sql)
+
+    def test_instruction_context_is_compact_and_schema_safe(self) -> None:
+        allowed = {"order_id", "quantity"}
+        instructions = {
+            "row_grain": "line_item",
+            "entities": {"order": "order_id", "bad": "missing_column"},
+            "metrics": {
+                "items_sold": {"column": "quantity", "aggregation": "sum", "synonyms": ["items sold"]},
+                "bad_metric": {"column": "missing_column", "aggregation": "sum"},
+            },
+            "notes": "Use order_id as the order number.",
+        }
+
+        context = build_instruction_context(
+            source_instructions=instructions,
+            project_instructions={"category": "sales", "notes": "Restaurant reporting."},
+            memory_snippets=[{"title": "Order meaning", "content": "Orders are unique order_id values."}],
+            allowed_columns=allowed,
+            char_budget=1000,
+        )
+
+        self.assertIn("line_item", context)
+        self.assertIn("order_id", context)
+        self.assertIn("items_sold", context)
+        self.assertNotIn("missing_column", context)
+
+    def test_real_pizza_csv_instruction_metrics_execute(self) -> None:
+        csv_path = Path("/Users/rajasekharbandreddy/Downloads/pizza_sales.csv")
+        if not csv_path.exists():
+            self.skipTest("local pizza_sales.csv fixture is not available")
+        import duckdb
+
+        df = pd.read_csv(csv_path)
+        allowed = set(df.columns)
+        instructions = default_source_instructions(
+            {"columns": [{"name": col} for col in sorted(allowed)], "row_count": len(df)},
+            "pizza_sales.csv",
+        )
+        intent = apply_instruction_rules(
+            heuristic_intent("how many items sold vs how many orders", allowed),
+            "how many items sold vs how many orders",
+            allowed,
+            source_instructions=instructions,
+        )
+        plan = build_query_plan(intent, "how many items sold vs how many orders", allowed)
+        con = duckdb.connect(":memory:")
+        try:
+            con.register("orders", df)
+            result = con.execute(plan.sql, plan.params).fetchone()
+        finally:
+            con.close()
+
+        self.assertEqual(result, (49574.0, 21350))
 
 
 class PdfSourceTests(unittest.TestCase):

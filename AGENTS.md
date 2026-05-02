@@ -22,6 +22,16 @@ ssh datachat-vps systemctl status datachat-backend.service --no-pager
 
 For frontend (Next.js) changes also restart `datachat-frontend.service`. `mcp_connectors.json` is excluded from rsync so the server's connected MCP bridges (BigQuery, etc.) survive deploys.
 
+# Model Routing
+
+This project intentionally uses DeepSeek models through OpenRouter:
+
+- **Flash mode:** `openrouter/deepseek/deepseek-v4-flash`
+- **Pro mode:** `openrouter/deepseek/deepseek-v4-pro`
+- **Provider order:** `DeepSeek`
+
+Do not switch Flash mode to Gemini or another provider/model unless the user explicitly asks for that change. If model availability breaks, verify the OpenRouter model id and provider routing first before changing defaults.
+
 # Jules + Codex Development Workflow
 
 Jules is allowed to work on this repository only through GitHub branches, issues, and pull requests. Treat Jules as an async cloud contributor, not as a production deploy agent.

@@ -77,6 +77,18 @@ CREATE TABLE IF NOT EXISTS connectors (
   created_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS source_instructions (
+  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+  instructions_json TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_instructions (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  instructions_json TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mcp_connectors (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -130,6 +142,7 @@ class Storage:
                 pass
 
             con.executescript(SCHEMA)
+            self._ensure_project_memory_table(con)
             con.execute("PRAGMA journal_mode=WAL")
 
     @contextmanager
@@ -142,6 +155,27 @@ class Storage:
             con.commit()
         finally:
             con.close()
+
+    def _ensure_project_memory_table(self, con: sqlite3.Connection) -> None:
+        try:
+            con.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS project_memory_fts
+                USING fts5(project_id UNINDEXED, kind UNINDEXED, ref_id UNINDEXED, title, content)
+                """
+            )
+        except sqlite3.OperationalError:
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS project_memory_fts (
+                  project_id TEXT,
+                  kind TEXT,
+                  ref_id TEXT,
+                  title TEXT,
+                  content TEXT
+                )
+                """
+            )
 
     # -- chats ---------------------------------------------------------------
     def create_chat(self, title: str | None = None) -> dict[str, Any]:
@@ -258,6 +292,28 @@ class Storage:
         with self._conn() as con:
             row = con.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
         return dict(row) if row else None
+
+    def get_source_instructions(self, source_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute("SELECT instructions_json FROM source_instructions WHERE source_id = ?", (source_id,)).fetchone()
+        if not row:
+            return None
+        return json.loads(row["instructions_json"])
+
+    def upsert_source_instructions(self, source_id: str, instructions: dict[str, Any]) -> dict[str, Any]:
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO source_instructions (source_id, instructions_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                  instructions_json=excluded.instructions_json,
+                  updated_at=excluded.updated_at
+                """,
+                (source_id, json.dumps(instructions, default=str), now),
+            )
+        return {"source_id": source_id, "instructions": instructions, "updated_at": now}
 
     def delete_source(self, source_id: str) -> None:
         with self._conn() as con:
@@ -516,6 +572,110 @@ class Storage:
     def delete_project(self, project_id: str) -> None:
         with self._conn() as con:
             con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+    def get_project_instructions(self, project_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute("SELECT instructions_json FROM project_instructions WHERE project_id = ?", (project_id,)).fetchone()
+        if not row:
+            return None
+        return json.loads(row["instructions_json"])
+
+    def upsert_project_instructions(self, project_id: str, instructions: dict[str, Any]) -> dict[str, Any]:
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO project_instructions (project_id, instructions_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                  instructions_json=excluded.instructions_json,
+                  updated_at=excluded.updated_at
+                """,
+                (project_id, json.dumps(instructions, default=str), now),
+            )
+            con.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+        return {"project_id": project_id, "instructions": instructions, "updated_at": now}
+
+    def rebuild_project_memory(self, project_id: str) -> None:
+        project = self.get_project(project_id)
+        if not project:
+            return
+        entries: list[tuple[str, str, str, str, str]] = []
+        project_instructions = self.get_project_instructions(project_id)
+        if project_instructions:
+            entries.append((
+                project_id,
+                "project_instructions",
+                project_id,
+                "Project instructions",
+                json.dumps(project_instructions, ensure_ascii=False, default=str),
+            ))
+        for note in self.list_project_notes(project_id):
+            entries.append((project_id, "note", note["id"], note["title"], note["content"]))
+        for file_rec in project.get("files", []):
+            source_id = file_rec.get("source_id")
+            if not source_id:
+                continue
+            source = self.get_source(source_id)
+            if source:
+                entries.append((
+                    project_id,
+                    "source",
+                    source_id,
+                    source.get("name") or source_id,
+                    source.get("schema_json") or "",
+                ))
+            source_instructions = self.get_source_instructions(source_id)
+            if source_instructions:
+                entries.append((
+                    project_id,
+                    "source_instructions",
+                    source_id,
+                    f"{source.get('name') if source else source_id} instructions",
+                    json.dumps(source_instructions, ensure_ascii=False, default=str),
+                ))
+        with self._conn() as con:
+            con.execute("DELETE FROM project_memory_fts WHERE project_id = ?", (project_id,))
+            con.executemany(
+                "INSERT INTO project_memory_fts (project_id, kind, ref_id, title, content) VALUES (?, ?, ?, ?, ?)",
+                entries,
+            )
+
+    def search_project_memory(self, project_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        terms = [part.strip("*\"'") for part in query.split() if part.strip()]
+        clean_query = " OR ".join(repr(part) for part in terms)[:200]
+        if not clean_query:
+            return []
+        with self._conn() as con:
+            try:
+                rows = con.execute(
+                    """
+                    SELECT project_id, kind, ref_id, title, content
+                    FROM project_memory_fts
+                    WHERE project_id = ? AND project_memory_fts MATCH ?
+                    LIMIT ?
+                    """,
+                    (project_id, clean_query, limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            if not rows:
+                terms = [part.strip("*\"'").lower() for part in query.split() if part.strip()]
+                like_clauses = " OR ".join(["LOWER(title) LIKE ? OR LOWER(content) LIKE ?"] * len(terms))
+                params: list[Any] = [project_id]
+                for term in terms:
+                    params.extend([f"%{term}%", f"%{term}%"])
+                params.append(limit)
+                rows = con.execute(
+                    f"""
+                    SELECT project_id, kind, ref_id, title, content
+                    FROM project_memory_fts
+                    WHERE project_id = ? AND ({like_clauses})
+                    LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
+        return [dict(r) for r in rows]
 
     def add_file_to_project(
         self,
