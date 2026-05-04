@@ -1380,9 +1380,9 @@ async def use_connector(connector_id: str) -> dict[str, Any]:
 def _df_to_payload(df: pd.DataFrame, limit: int = 200) -> dict[str, Any]:
     head = df.head(limit)
     rows: list[list[Any]] = []
-    for _, row in head.iterrows():
+    for row in head.itertuples(index=False, name=None):
         cleaned: list[Any] = []
-        for v in row.tolist():
+        for v in row:
             if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
                 cleaned.append(None)
             elif pd.isna(v):
