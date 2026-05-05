@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.agents import get_agent_for_domain
 from src.config import AppConfig
 from src.data_sources import (
     DataSource,
@@ -416,6 +417,22 @@ def _serialize_source(source_id: str, source: DataSource, kind: str, active: boo
         "columns": [c["name"] for c in source.schema.get("columns", [])],
         "active": active,
     }
+
+
+def _get_domain_prompt(chat_id: str) -> str:
+    chat = DB.get_chat(chat_id)
+    if not chat or not chat.get("project_id"):
+        return ""
+    project_instructions = DB.get_project_instructions(chat["project_id"])
+    if not project_instructions:
+        return ""
+    category = project_instructions.get("category")
+    if not category:
+        return ""
+    agent = get_agent_for_domain(category)
+    if not agent:
+        return ""
+    return agent.get_system_prompt()
 
 
 def _metadata_description(name: str, tools: list[dict[str, Any]]) -> str:
@@ -1587,7 +1604,7 @@ def _materialize_workspace_df_sync(chat_id: str, table_name: str, df: pd.DataFra
     return {"table": table_name, "rows": int(len(df)), "columns": columns}
 
 
-def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary: str, join_candidates: list[dict[str, Any]]) -> str:
+def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary: str, join_candidates: list[dict[str, Any]], domain_prompt: str = "") -> str:
     source_lines: list[str] = []
     for src in source_summaries:
         cols = ", ".join(f"{c['name']}:{c['type']}" for c in src.get("columns", [])[:40])
@@ -1596,7 +1613,7 @@ def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary:
         f"- {c['left_table']}.{c['left_column']} = {c['right_table']}.{c['right_column']} (confidence {c['confidence']:.2f})"
         for c in join_candidates[:10]
     ]
-    return f"""You are a multi-source data analyst. Use tools to retrieve data and run DuckDB SQL.
+    base_prompt = f"""You are a multi-source data analyst. Use tools to retrieve data and run DuckDB SQL.
 
 ## Local workspace tables
 {chr(10).join(source_lines) if source_lines else "- No local tables loaded yet. Use connected tools to fetch data first."}
@@ -1614,6 +1631,9 @@ def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary:
 - Never mention MCP, tool internals, or function calls in the final answer unless the user asks.
 - Keep final answers to one short sentence. The result table/chart appears below your answer.
 """
+    if domain_prompt:
+        return f"{domain_prompt}\n\n{base_prompt}"
+    return base_prompt
 
 
 def _build_mcp_summary(pool, allowed_connector_ids: set[str] | None = None) -> str:
@@ -1692,6 +1712,7 @@ async def _run_mcp_agent(
 
     full_text_parts: list[str] = []
     last_tool_call: dict[str, Any] | None = None
+    domain_prompt = _get_domain_prompt(chat_id)
 
     try:
         async for ev in router.agent_loop_stream(
@@ -1701,6 +1722,7 @@ async def _run_mcp_agent(
             tool_specs=specs,
             connector_summary=connector_summary,
             on_tool_call=on_tool_call,
+            system_prompt=f"{domain_prompt}\n\n{build_mcp_agent_system_prompt(connector_summary)}" if domain_prompt else None,
         ):
             kind = ev["kind"]
             if kind == "tool_call":
@@ -1768,7 +1790,9 @@ async def _run_local_agent(
     calls run_sql once to find the anchor (e.g. peak month), reads the result,
     then calls run_sql again parameterized by that anchor."""
     router = llm_router or ROUTER
-    system_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
+    domain_prompt = _get_domain_prompt(chat_id)
+    base_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
+    system_prompt = f"{domain_prompt}\n\n{base_prompt}" if domain_prompt else base_prompt
 
     tool_specs = [{
         "name": "run_sql",
@@ -1985,7 +2009,7 @@ async def _run_multi_source_agent(
             tool_specs=tool_specs,
             connector_summary=connector_summary,
             on_tool_call=on_tool_call,
-            system_prompt=_workspace_prompt(source_summaries, connector_summary, join_candidates),
+            system_prompt=_workspace_prompt(source_summaries, connector_summary, join_candidates, domain_prompt=_get_domain_prompt(chat_id)),
         ):
             kind = ev["kind"]
             if kind == "tool_call":
