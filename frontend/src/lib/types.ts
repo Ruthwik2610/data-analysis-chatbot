@@ -77,6 +77,7 @@ export interface ResultPayload {
   rows: any[][];
   row_count: number;
   truncated: boolean;
+  view_type?: string;
 }
 
 export type PendingResolver =

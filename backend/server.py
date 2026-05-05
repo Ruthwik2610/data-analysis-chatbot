@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.agents import get_agent_for_domain
 from src.config import AppConfig
 from src.data_sources import (
     DataSource,
@@ -416,6 +417,37 @@ def _serialize_source(source_id: str, source: DataSource, kind: str, active: boo
         "columns": [c["name"] for c in source.schema.get("columns", [])],
         "active": active,
     }
+
+
+def _get_view_type(chat_id: str) -> str:
+    chat = DB.get_chat(chat_id)
+    if not chat or not chat.get("project_id"):
+        return "table"
+    project_instructions = DB.get_project_instructions(chat["project_id"])
+    if not project_instructions:
+        return "table"
+    category = project_instructions.get("category")
+    if category == "education":
+        return "timetable"
+    return "table"
+
+
+def _get_domain_agent(chat_id: str) -> DomainAgent | None:
+    chat = DB.get_chat(chat_id)
+    if not chat or not chat.get("project_id"):
+        return None
+    project_instructions = DB.get_project_instructions(chat["project_id"])
+    if not project_instructions:
+        return None
+    category = project_instructions.get("category")
+    if not category:
+        return None
+    return get_agent_for_domain(category)
+
+
+def _get_domain_prompt(chat_id: str) -> str:
+    agent = _get_domain_agent(chat_id)
+    return agent.get_system_prompt() if agent else ""
 
 
 def _metadata_description(name: str, tools: list[dict[str, Any]]) -> str:
@@ -1159,7 +1191,7 @@ def update_project_instructions(project_id: str, body: InstructionsUpdate) -> di
     instructions = dict(body.instructions or {})
     category = str(instructions.get("category") or "").strip().lower()
     from src.agents import DOMAIN_AGENTS
-    allowed_categories = {"general"} | set(DOMAIN_AGENTS.keys())
+    allowed_categories = {"general", "sales", "finance", "inventory", "operations", "customer_support"} | set(DOMAIN_AGENTS.keys())
     if category and category not in allowed_categories:
         instructions["category"] = "general"
     return DB.upsert_project_instructions(project_id, instructions)
@@ -1171,9 +1203,10 @@ def rebuild_project_profile(project_id: str) -> dict[str, Any]:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     existing = DB.get_project_instructions(project_id) or {}
-    if not existing.get("category"):
-        source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
-        existing["category"] = detect_project_category(project, [r for r in source_rows if r])
+    source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+    new_category = detect_project_category(project, [r for r in source_rows if r])
+    if new_category != "general" or not existing.get("category"):
+        existing["category"] = new_category
     saved = DB.upsert_project_instructions(project_id, existing)
     DB.rebuild_project_memory(project_id)
     return saved
@@ -1186,15 +1219,30 @@ def add_project_file(project_id: str, body: ProjectAddFile) -> dict[str, Any]:
         s = DB.get_source(body.source_id)
         if not s:
             raise HTTPException(status_code=404, detail="Source not found")
-        return DB.add_file_to_project(project_id, None, source_id=body.source_id, sheet_name=body.sheet)
+        res = DB.add_file_to_project(project_id, None, source_id=body.source_id, sheet_name=body.sheet)
+    else:
+        if not body.file_path:
+            raise HTTPException(status_code=400, detail="file_path or source_id required")
+            
+        path = Path(body.file_path).expanduser()
+        if not path.exists():
+            raise HTTPException(status_code=400, detail="File not found")
+        res = DB.add_file_to_project(project_id, str(path), sheet_name=body.sheet)
     
-    if not body.file_path:
-        raise HTTPException(status_code=400, detail="file_path or source_id required")
-        
-    path = Path(body.file_path).expanduser()
-    if not path.exists():
-        raise HTTPException(status_code=400, detail="File not found")
-    return DB.add_file_to_project(project_id, str(path), sheet_name=body.sheet)
+    # Auto-profile after adding a file
+    try:
+        project = DB.get_project(project_id)
+        if project:
+            instructions = DB.get_project_instructions(project_id) or {"category": "general", "notes": "", "metrics": {}, "entities": {}}
+            source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+            new_cat = detect_project_category(project, [r for r in source_rows if r])
+            if new_cat != "general" and instructions.get("category") == "general":
+                instructions["category"] = new_cat
+                DB.upsert_project_instructions(project_id, instructions)
+    except Exception as exc:
+        logging.warning(f"Failed to auto-profile project {project_id}: {exc}")
+
+    return res
 
 
 @app.delete("/projects/{project_id}/files/{file_id}")
@@ -1614,7 +1662,7 @@ def _materialize_workspace_df_sync(chat_id: str, table_name: str, df: pd.DataFra
     return {"table": table_name, "rows": int(len(df)), "columns": columns}
 
 
-def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary: str, join_candidates: list[dict[str, Any]]) -> str:
+def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary: str, join_candidates: list[dict[str, Any]], domain_prompt: str = "") -> str:
     source_lines: list[str] = []
     for src in source_summaries:
         cols = ", ".join(f"{c['name']}:{c['type']}" for c in src.get("columns", [])[:40])
@@ -1623,7 +1671,7 @@ def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary:
         f"- {c['left_table']}.{c['left_column']} = {c['right_table']}.{c['right_column']} (confidence {c['confidence']:.2f})"
         for c in join_candidates[:10]
     ]
-    return f"""You are a multi-source data analyst. Use tools to retrieve data and run DuckDB SQL.
+    base_prompt = f"""You are a multi-source data analyst. Use tools to retrieve data and run DuckDB SQL.
 
 ## Local workspace tables
 {chr(10).join(source_lines) if source_lines else "- No local tables loaded yet. Use connected tools to fetch data first."}
@@ -1641,6 +1689,9 @@ def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary:
 - Never mention MCP, tool internals, or function calls in the final answer unless the user asks.
 - Keep final answers to one short sentence. The result table/chart appears below your answer.
 """
+    if domain_prompt:
+        return f"{domain_prompt}\n\n{base_prompt}"
+    return base_prompt
 
 
 def _build_mcp_summary(pool, allowed_connector_ids: set[str] | None = None) -> str:
@@ -1719,15 +1770,22 @@ async def _run_mcp_agent(
 
     full_text_parts: list[str] = []
     last_tool_call: dict[str, Any] | None = None
+    agent = _get_domain_agent(chat_id)
+    domain_prompt = agent.get_system_prompt() if agent else ""
+    domain_tools = agent.get_tools() if agent else []
+    
+    # Merge domain tools into the specs if any
+    final_specs = specs + domain_tools
 
     try:
         async for ev in router.agent_loop_stream(
             request_id=request_id,
             user_question=question,
             conversation_summary=conversation_summary(history),
-            tool_specs=specs,
+            tool_specs=final_specs,
             connector_summary=connector_summary,
             on_tool_call=on_tool_call,
+            system_prompt=f"{domain_prompt}\n\n{build_mcp_agent_system_prompt(connector_summary)}" if domain_prompt else None,
         ):
             kind = ev["kind"]
             if kind == "tool_call":
@@ -1775,6 +1833,7 @@ async def _run_mcp_agent(
             "elapsed_ms": 0,
             "sql": "",
             "how": f"Source: {cname} via tool {tool_name}.",
+            "view_type": _get_view_type(chat_id),
             **_df_to_payload(df),
         }
         yield {"event": "result", "data": json.dumps(result_payload, default=str)}
@@ -1803,7 +1862,12 @@ async def _run_local_agent(
     calls run_sql once to find the anchor (e.g. peak month), reads the result,
     then calls run_sql again parameterized by that anchor."""
     router = llm_router or ROUTER
-    system_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
+    agent = _get_domain_agent(chat_id)
+    domain_prompt = agent.get_system_prompt() if agent else ""
+    domain_tools = agent.get_tools() if agent else []
+
+    base_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
+    system_prompt = f"{domain_prompt}\n\n{base_prompt}" if domain_prompt else base_prompt
 
     tool_specs = [{
         "name": "run_sql",
@@ -1816,7 +1880,7 @@ async def _run_local_agent(
             "required": ["query"],
             "additionalProperties": False,
         },
-    }]
+    }] + domain_tools
 
     collected: list[tuple[str, pd.DataFrame]] = []
     loop = asyncio.get_event_loop()
@@ -1911,6 +1975,7 @@ async def _run_local_agent(
             "elapsed_ms": 0,
             "sql": sql,
             "how": f"Source: {source.source_kind}. Model: {model_used}. Multi-step query (final). Display: {viz}.",
+            "view_type": _get_view_type(chat_id),
             **_df_to_payload(df),
         }
         yield {"event": "result", "data": json.dumps(result_payload, default=str)}
@@ -1952,6 +2017,9 @@ async def _run_multi_source_agent(
         connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
     connector_summary = "\n\n".join(connector_summary_lines)
 
+    agent = _get_domain_agent(chat_id)
+    domain_tools = agent.get_tools() if agent else []
+
     tool_specs = [{
         "name": "run_sql",
         "description": "Execute a read-only DuckDB SELECT against the per-chat workspace tables. Use this for joins, aggregation, filtering, and final result shaping.",
@@ -1961,7 +2029,7 @@ async def _run_multi_source_agent(
             "required": ["query"],
             "additionalProperties": False,
         },
-    }] + specs
+    }] + specs + domain_tools
 
     if len(tool_specs) == 1 and not source_summaries:
         msg_text = "I don't have any usable sources yet. Attach a file, connect an API, or add an MCP bridge first."
@@ -2025,7 +2093,7 @@ async def _run_multi_source_agent(
             tool_specs=tool_specs,
             connector_summary=connector_summary,
             on_tool_call=on_tool_call,
-            system_prompt=_workspace_prompt(source_summaries, connector_summary, join_candidates),
+            system_prompt=_workspace_prompt(source_summaries, connector_summary, join_candidates, domain_prompt=_get_domain_prompt(chat_id)),
         ):
             kind = ev["kind"]
             if kind == "tool_call":
@@ -2071,6 +2139,7 @@ async def _run_multi_source_agent(
             "elapsed_ms": elapsed_ms,
             "sql": sql,
             "how": f"Sources: {', '.join(s['name'] for s in source_summaries[:8])}. Display: {viz}.",
+            "view_type": _get_view_type(chat_id),
             **_df_to_payload(df),
         }
         yield {"event": "result", "data": json.dumps(result_payload, default=str)}
@@ -2325,6 +2394,7 @@ async def query(body: QueryRequest):
                 "elapsed_ms": elapsed_ms,
                 "sql": plan.sql,
                 "how": f"Source: {source.source_kind}. Model: {model_used}. {plan.how} Display: {viz}.",
+                "view_type": _get_view_type(chat_id),
                 **_df_to_payload(df),
             }
             yield {"event": "result", "data": json.dumps(result_payload, default=str)}

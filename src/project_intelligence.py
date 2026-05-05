@@ -115,6 +115,25 @@ def detect_project_category(project: dict[str, Any] | None, source_rows: list[di
     for row in source_rows or []:
         text_parts.append(str(row.get("name") or ""))
         text_parts.append(str(row.get("kind") or ""))
+        # Check direct columns list
+        cols = row.get("columns") or []
+        if isinstance(cols, list):
+            for c in cols:
+                if isinstance(c, dict):
+                    text_parts.append(str(c.get("name") or c.get("column") or ""))
+                else:
+                    text_parts.append(str(c))
+        
+        # Check schema_json if present
+        schema_json = row.get("schema_json")
+        if schema_json:
+            try:
+                schema = json.loads(schema_json)
+                for c in schema.get("columns", []):
+                    text_parts.append(str(c.get("name") or c.get("column") or ""))
+            except Exception:
+                pass
+
     text = " ".join(text_parts).lower()
     if any(term in text for term in ("pizza", "sales", "order", "revenue", "customer")):
         return "sales"
@@ -124,6 +143,8 @@ def detect_project_category(project: dict[str, Any] | None, source_rows: list[di
         return "inventory"
     if any(term in text for term in ("ticket", "support", "case")):
         return "customer_support"
+    if any(term in text for term in ("timetable", "schedule", "teacher", "class", "student", "enrollment", "school", "college")):
+        return "education"
     if any(term in text for term in ("ops", "operation", "delivery")):
         return "operations"
     return "general"
