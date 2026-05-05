@@ -584,3 +584,62 @@ def test_allowed_mcp_ids_for_project_chat_include_global_and_project(isolated_se
 
     assert server._allowed_mcp_connector_ids_for_chat(chat["id"]) == {"global-db", "project-db"}
     assert server._allowed_mcp_connector_ids_for_chat(None) == {"global-db"}
+
+
+def test_unsupported_local_table_query_does_not_fall_through_to_mcp(isolated_server):
+    server, storage, pool = isolated_server
+    from fastapi.testclient import TestClient
+    
+    project = storage.create_project("Test Project")
+    source_id = "src_timetable"
+    storage.upsert_source(
+        source_id=source_id,
+        name="timetable.xlsx",
+        kind="excel",
+        rows=10,
+        schema_json='{"columns":[{"name":"class"},{"name":"teacher"}],"row_count":10}',
+        origin={"type": "csv_memory", "path": "/tmp/test.csv"}
+    )
+    
+    storage.upsert_mcp_connector(
+        connector_id="rapidai",
+        name="RapidAI",
+        scope="global",
+        transport="stdio",
+        url=None,
+        command="mcp-mysql-server",
+        args=[],
+        tools=[],
+        status="connected",
+        last_error=None,
+        description="",
+        generated_description=None,
+        description_status="metadata"
+    )
+    
+    chat = storage.create_chat()
+    storage.update_chat_project(chat["id"], project["id"])
+
+
+
+    
+    client = TestClient(server.app)
+    
+    class DummyRouter:
+        available = True
+        def classify_intent(self, **kwargs):
+            return {"intent_type": "unsupported", "route": "ambiguous"}, "dummy"
+            
+    import backend.server
+    backend.server.LLMRouter = lambda *a, **kw: DummyRouter()
+    
+    response = client.post("/query", json={
+        "chat_id": chat["id"],
+        "question": "infer from the table and produce time table",
+        "source_ids": [source_id],
+        "mode": "smart"
+    })
+    
+    output = response.text
+    assert "clarify" in output
+    assert "I can only answer questions about the loaded source" in output

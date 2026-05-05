@@ -15,9 +15,14 @@ from src.project_intelligence import (
     build_instruction_context,
     default_source_instructions,
 )
-from src.query_engine import build_query_plan, heuristic_intent
+from src.query_engine import build_query_plan, heuristic_intent, is_underspecified
 from src.visualization import choose_visualization
 
+class RoutingTests(unittest.TestCase):
+    def test_pivot_timetable_question_is_not_underspecified(self) -> None:
+        intent = {"intent_type": "aggregate", "aggregation": "sum"}
+        question = "infer from the table and produce time table for each individual subject teacher"
+        self.assertFalse(is_underspecified(intent, question, {"class", "teacher", "subject", "period_1", "period_2"}))
 
 ALLOWED = {
     "order_key",

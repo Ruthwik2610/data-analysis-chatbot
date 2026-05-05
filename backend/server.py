@@ -2244,7 +2244,9 @@ async def query(body: QueryRequest):
             if intent.get("intent_type") == "unsupported":
                 # Safety net: if the classifier missed the route field but MCP is connected,
                 # let the agent try (e.g. user asked about BigQuery while a CSV is active).
-                if has_mcp:
+                # However, if the user explicitly asked about the "table" or "file" or if the
+                # prompt classified it explicitly as 'local' route, don't hallucinate MCP calls.
+                if has_mcp and route != "local" and "table" not in question.lower() and "file" not in question.lower():
                     async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids, llm_router):
                         yield ev
                     return

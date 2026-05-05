@@ -51,7 +51,7 @@ def build_intent_prompt(
             'Do NOT attempt to answer from training data.</rule>'
         )
         routing_rule = f'''<rule>ROUTING: Set "route" to one of:
-      - "local" — the question maps cleanly to columns/concepts in <local_schema>, AND the user did not name an MCP source.
+      - "local" — the question maps cleanly to columns/concepts in <local_schema>, OR the question explicitly refers to "the table", "the dataset", "this file", or "the uploaded file", AND the user did not explicitly name an MCP source.
       - "mcp" — the question explicitly names a connected MCP source (e.g. "BigQuery"), uses concepts only available via MCP tools, is a meta-query about external data ("list datasets", "show tables"), or the conversation_summary shows the user already chose an MCP source.
       - "ambiguous" — the question could plausibly be answered by EITHER the local source OR an MCP source, AND the user gave no hint. In that case ALSO set intent_type="clarification" and write clarifying_question as: "I can answer this from {{local_source_name}} or {{mcp_source_name}} — which would you like?". Use the actual source names from <local_source_name> and <mcp_sources>.
       Honor explicit user choice from conversation_summary (e.g. a prior reply like "use BigQuery") — route accordingly without asking again.
