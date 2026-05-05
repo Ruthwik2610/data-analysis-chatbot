@@ -124,6 +124,8 @@ def detect_project_category(project: dict[str, Any] | None, source_rows: list[di
         return "inventory"
     if any(term in text for term in ("ticket", "support", "case")):
         return "customer_support"
+    if any(term in text for term in ("timetable", "schedule", "teacher", "class", "student", "enrollment", "school", "college")):
+        return "education"
     if any(term in text for term in ("ops", "operation", "delivery")):
         return "operations"
     return "general"

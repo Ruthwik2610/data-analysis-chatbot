@@ -419,20 +419,22 @@ def _serialize_source(source_id: str, source: DataSource, kind: str, active: boo
     }
 
 
-def _get_domain_prompt(chat_id: str) -> str:
+def _get_domain_agent(chat_id: str) -> DomainAgent | None:
     chat = DB.get_chat(chat_id)
     if not chat or not chat.get("project_id"):
-        return ""
+        return None
     project_instructions = DB.get_project_instructions(chat["project_id"])
     if not project_instructions:
-        return ""
+        return None
     category = project_instructions.get("category")
     if not category:
-        return ""
-    agent = get_agent_for_domain(category)
-    if not agent:
-        return ""
-    return agent.get_system_prompt()
+        return None
+    return get_agent_for_domain(category)
+
+
+def _get_domain_prompt(chat_id: str) -> str:
+    agent = _get_domain_agent(chat_id)
+    return agent.get_system_prompt() if agent else ""
 
 
 def _metadata_description(name: str, tools: list[dict[str, Any]]) -> str:
@@ -1712,14 +1714,19 @@ async def _run_mcp_agent(
 
     full_text_parts: list[str] = []
     last_tool_call: dict[str, Any] | None = None
-    domain_prompt = _get_domain_prompt(chat_id)
+    agent = _get_domain_agent(chat_id)
+    domain_prompt = agent.get_system_prompt() if agent else ""
+    domain_tools = agent.get_tools() if agent else []
+    
+    # Merge domain tools into the specs if any
+    final_specs = specs + domain_tools
 
     try:
         async for ev in router.agent_loop_stream(
             request_id=request_id,
             user_question=question,
             conversation_summary=conversation_summary(history),
-            tool_specs=specs,
+            tool_specs=final_specs,
             connector_summary=connector_summary,
             on_tool_call=on_tool_call,
             system_prompt=f"{domain_prompt}\n\n{build_mcp_agent_system_prompt(connector_summary)}" if domain_prompt else None,
@@ -1739,8 +1746,15 @@ async def _run_mcp_agent(
                     yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
             elif kind == "text":
                 delta = ev.get("delta") or ""
-                full_text_parts.append(delta)
-                yield {"event": "text", "data": json.dumps({"delta": delta})}
+                # Prevent raw DSML from hitting the UI
+                if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
+                    full_text_parts.append(delta)
+                    # We still append the raw delta to the buffer so the agent can parse tool calls,
+                    # but we don't emit it to the user.
+                    pass
+                else:
+                    full_text_parts.append(delta)
+                    yield {"event": "text", "data": json.dumps({"delta": delta})}
     except LLMUnavailable as exc:
         err_text = "All language models are unavailable right now. Try again in a moment."
         msg = DB.add_message(chat_id, "assistant", err_text, payload={"kind": "error", "detail": str(exc)})
@@ -1790,7 +1804,10 @@ async def _run_local_agent(
     calls run_sql once to find the anchor (e.g. peak month), reads the result,
     then calls run_sql again parameterized by that anchor."""
     router = llm_router or ROUTER
-    domain_prompt = _get_domain_prompt(chat_id)
+    agent = _get_domain_agent(chat_id)
+    domain_prompt = agent.get_system_prompt() if agent else ""
+    domain_tools = agent.get_tools() if agent else []
+
     base_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
     system_prompt = f"{domain_prompt}\n\n{base_prompt}" if domain_prompt else base_prompt
 
@@ -1805,7 +1822,7 @@ async def _run_local_agent(
             "required": ["query"],
             "additionalProperties": False,
         },
-    }]
+    }] + domain_tools
 
     collected: list[tuple[str, pd.DataFrame]] = []
     loop = asyncio.get_event_loop()
@@ -1936,6 +1953,9 @@ async def _run_multi_source_agent(
         connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
     connector_summary = "\n\n".join(connector_summary_lines)
 
+    agent = _get_domain_agent(chat_id)
+    domain_tools = agent.get_tools() if agent else []
+
     tool_specs = [{
         "name": "run_sql",
         "description": "Execute a read-only DuckDB SELECT against the per-chat workspace tables. Use this for joins, aggregation, filtering, and final result shaping.",
@@ -1945,7 +1965,7 @@ async def _run_multi_source_agent(
             "required": ["query"],
             "additionalProperties": False,
         },
-    }] + specs
+    }] + specs + domain_tools
 
     if len(tool_specs) == 1 and not source_summaries:
         msg_text = "I don't have any usable sources yet. Attach a file, connect an API, or add an MCP bridge first."
@@ -2028,8 +2048,15 @@ async def _run_multi_source_agent(
                     yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
             elif kind == "text":
                 delta = ev.get("delta") or ""
-                full_text_parts.append(delta)
-                yield {"event": "text", "data": json.dumps({"delta": delta})}
+                # Prevent raw DSML from hitting the UI
+                if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
+                    full_text_parts.append(delta)
+                    # We still append the raw delta to the buffer so the agent can parse tool calls,
+                    # but we don't emit it to the user.
+                    pass
+                else:
+                    full_text_parts.append(delta)
+                    yield {"event": "text", "data": json.dumps({"delta": delta})}
     except LLMUnavailable as exc:
         err_msg = "The language model is unavailable, so I can't run a multi-source agent query right now."
         msg = DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
