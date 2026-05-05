@@ -1177,7 +1177,7 @@ def update_project_instructions(project_id: str, body: InstructionsUpdate) -> di
         raise HTTPException(status_code=404, detail="Project not found")
     instructions = dict(body.instructions or {})
     category = str(instructions.get("category") or "").strip().lower()
-    if category and category not in {"general", "sales", "finance", "inventory", "operations", "customer_support"}:
+    if category and category not in {"general", "sales", "finance", "inventory", "operations", "customer_support", "education"}:
         instructions["category"] = "general"
     return DB.upsert_project_instructions(project_id, instructions)
 
@@ -1188,9 +1188,10 @@ def rebuild_project_profile(project_id: str) -> dict[str, Any]:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     existing = DB.get_project_instructions(project_id) or {}
-    if not existing.get("category"):
-        source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
-        existing["category"] = detect_project_category(project, [r for r in source_rows if r])
+    source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+    new_category = detect_project_category(project, [r for r in source_rows if r])
+    if new_category != "general" or not existing.get("category"):
+        existing["category"] = new_category
     saved = DB.upsert_project_instructions(project_id, existing)
     DB.rebuild_project_memory(project_id)
     return saved
@@ -1203,15 +1204,30 @@ def add_project_file(project_id: str, body: ProjectAddFile) -> dict[str, Any]:
         s = DB.get_source(body.source_id)
         if not s:
             raise HTTPException(status_code=404, detail="Source not found")
-        return DB.add_file_to_project(project_id, None, source_id=body.source_id, sheet_name=body.sheet)
+        res = DB.add_file_to_project(project_id, None, source_id=body.source_id, sheet_name=body.sheet)
+    else:
+        if not body.file_path:
+            raise HTTPException(status_code=400, detail="file_path or source_id required")
+            
+        path = Path(body.file_path).expanduser()
+        if not path.exists():
+            raise HTTPException(status_code=400, detail="File not found")
+        res = DB.add_file_to_project(project_id, str(path), sheet_name=body.sheet)
     
-    if not body.file_path:
-        raise HTTPException(status_code=400, detail="file_path or source_id required")
-        
-    path = Path(body.file_path).expanduser()
-    if not path.exists():
-        raise HTTPException(status_code=400, detail="File not found")
-    return DB.add_file_to_project(project_id, str(path), sheet_name=body.sheet)
+    # Auto-profile after adding a file
+    try:
+        project = DB.get_project(project_id)
+        if project:
+            instructions = DB.get_project_instructions(project_id) or {"category": "general", "notes": "", "metrics": {}, "entities": {}}
+            source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+            new_cat = detect_project_category(project, [r for r in source_rows if r])
+            if new_cat != "general" and instructions.get("category") == "general":
+                instructions["category"] = new_cat
+                DB.upsert_project_instructions(project_id, instructions)
+    except Exception as exc:
+        logging.warning(f"Failed to auto-profile project {project_id}: {exc}")
+
+    return res
 
 
 @app.delete("/projects/{project_id}/files/{file_id}")
