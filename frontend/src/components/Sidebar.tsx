@@ -49,13 +49,8 @@ export function Sidebar(p: SidebarProps) {
         className="flex items-center gap-2 px-4 pb-3 pt-4 text-[13px] font-medium"
         style={{ borderBottom: "0.5px solid var(--color-border-tertiary)", color: "var(--color-text-primary)" }}
       >
-        <div
-          className="rounded-full w-5 h-5 flex items-center justify-center"
-          style={{ background: "var(--color-text-primary)" }}
-        >
-          <Circle size={10} stroke="var(--color-background-primary)" strokeWidth={1.5} fill="transparent" />
-        </div>
-        Data Chat
+        <img src="/unipro-icon.svg" alt="Unipro" className="w-5 h-5" />
+        Unipro Chat
       </div>
 
       <div className="px-3 pt-3 pb-2">

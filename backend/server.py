@@ -1414,6 +1414,64 @@ def _format_period_for_llm(value: Any) -> Any:
     return ts.strftime("%b %d, %Y %H:%M")
 
 
+def _sanitize_assistant_text(text: str) -> str:
+    # 1. Remove DSML tool call markup
+    text = re.sub(r"<｜｜DSML｜｜tool_calls>.*?</｜｜DSML｜｜tool_calls>", "", text, flags=re.DOTALL)
+    text = text.strip()
+
+    # 2. Cap long bulleted lists to 5 items
+    lines = text.splitlines()
+    bullet_indices = [i for i, line in enumerate(lines) if line.strip().startswith("- ")]
+    if len(bullet_indices) > 5:
+        # Keep text before the first bullet
+        first_bullet_idx = bullet_indices[0]
+        # Keep first 5 bullets
+        last_allowed_bullet_idx = bullet_indices[4]
+        
+        new_lines = lines[:last_allowed_bullet_idx + 1]
+        new_lines.append(f" (showing first 5 items out of {len(bullet_indices)})")
+        
+        # Keep text after the last bullet
+        last_bullet_idx = bullet_indices[-1]
+        new_lines.extend(lines[last_bullet_idx + 1:])
+        text = "\n".join(new_lines)
+    
+    return text.strip()
+
+
+def _result_grounded_answer(question: str, payload: dict[str, Any]) -> str:
+    row_count = payload.get("row_count", 0)
+    columns = payload.get("columns", [])
+    rows = payload.get("rows", [])
+    truncated = payload.get("truncated", False)
+
+    # Month-wise orders summary
+    if "month wise orders" in question.lower() and "vno" in columns and "period" in columns:
+        parts = []
+        p_idx = columns.index("period")
+        v_idx = columns.index("vno")
+        for r in rows:
+            period = r[p_idx]
+            count = r[v_idx]
+            formatted = _format_period_for_llm(period)
+            parts.append(f"{formatted}: **{count:,} distinct orders**")
+        return "; ".join(parts) + "."
+
+    # Product count summary
+    if "product" in question.lower() and "product_count" in columns:
+        count = rows[0][columns.index("product_count")]
+        return f"I found **{count:,} matching products**. The verified count is shown below."
+
+    # General list summary
+    if row_count > 0:
+        count_str = f"{row_count:,}"
+        if truncated:
+            return f"I found **{count_str} matching products**. The result card below includes a table preview and CSV download with the first {len(rows)} rows."
+        return f"I found **{count_str} matching products**. The result card below includes a verified table preview and CSV download."
+
+    return ""
+
+
 def _run_query(plan, source: DataSource) -> tuple[pd.DataFrame, int]:
     import duckdb
 

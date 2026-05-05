@@ -46,9 +46,17 @@ class AppConfig:
     @classmethod
     def from_env(cls) -> "AppConfig":
         load_dotenv_if_present()
+        cache_dir = Path(os.getenv("CACHE_DIR", ".cache/chatbot")).resolve()
+        
+        # DuckDB requires a home directory to install extensions like 'excel'.
+        # If HOME is missing (e.g. in some container/restricted environments), 
+        # we default it to the cache directory.
+        if not os.environ.get("HOME") and not os.environ.get("USERPROFILE"):
+            os.environ["HOME"] = str(cache_dir)
+            
         return cls(
             data_path=Path(os.getenv("DATA_PATH", "/Users/rajasekharbandreddy/Downloads/sourcedata.csv")),
-            cache_dir=Path(os.getenv("CACHE_DIR", ".cache/chatbot")),
+            cache_dir=cache_dir,
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
             openrouter_provider_order=os.getenv("OPENROUTER_PROVIDER_ORDER", "DeepSeek"),
             model=os.getenv("MODEL", "openrouter/deepseek/deepseek-v4-pro"),

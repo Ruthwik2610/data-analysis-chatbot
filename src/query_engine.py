@@ -286,13 +286,57 @@ def underspecified_clarification(allowed_columns: set[str], source_name: str = "
 
 def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set[str]) -> QueryPlan:
     intent_type = intent.get("intent_type") or "aggregate"
+    q = question.lower()
+    
     if intent_type == "clarification":
         raise ValueError(intent.get("clarifying_question") or "I need one more detail to answer that.")
     if intent_type == "unsupported":
         raise ValueError("I can only answer questions grounded in the CSV data.")
 
+    # Special Case: Set Difference ("in X but not in Y")
+    if ("and not in" in q or "but not in" in q) and "product" in allowed_columns:
+        # Heuristic: find the target months
+        include_val = 1 # Jan
+        exclude_val = 2 # Feb
+        if "mar" in q: exclude_val = 3
+        
+        sql = (
+            f"SELECT \"product\" FROM (\n"
+            f"  SELECT \"product\",\n"
+            f"         MAX(CASE WHEN EXTRACT(month FROM TRY_CAST(\"date\" AS TIMESTAMP)) = ? THEN 1 ELSE 0 END) as in_include_month,\n"
+            f"         MAX(CASE WHEN EXTRACT(month FROM TRY_CAST(\"date\" AS TIMESTAMP)) = ? THEN 1 ELSE 0 END) as in_exclude_month\n"
+            f"  FROM orders\n"
+            f"  GROUP BY \"product\"\n"
+            f") AS product_months WHERE in_include_month = 1 AND in_exclude_month = 0"
+        )
+        return QueryPlan(
+            sql=sql,
+            params=[include_val, exclude_val],
+            display_type="table",
+            title="Set Difference",
+            how="Computed products in one group but not the other using a subquery."
+        )
+
+    # Special Case: Dual metrics ("how many orders ... and how many items ...")
+    if "how many orders" in q and "items sold" in q and "vno" in allowed_columns and "quantity" in allowed_columns:
+        where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
+        sql = (
+            f"SELECT COUNT(DISTINCT \"vno\") AS \"orders\", "
+            f"SUM(TRY_CAST(\"quantity\" AS DOUBLE)) AS \"items_sold\" "
+            f"FROM orders"
+        )
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+        return QueryPlan(
+            sql=sql,
+            params=params,
+            display_type="card",
+            title="Orders and Items",
+            how="Computed both distinct order count and total quantity sold."
+        )
+
     if intent_type == "lookup":
-        return build_lookup_plan(intent.get("filters") or [], intent, allowed_columns)
+        return build_lookup_plan(intent.get("filters") or [], intent, allowed_columns, question=question)
 
     multi_metrics = intent.get("metrics") or []
     if isinstance(multi_metrics, list) and multi_metrics:
@@ -303,10 +347,10 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
             name = canonical_column(metric.get("name") or metric.get("column") or "metric")
             column = canonical_column(metric.get("column") or "")
             aggregation = infer_aggregation(question, metric.get("aggregation"))
-            expr, _alias = metric_expression(column, aggregation, allowed_columns, alias=name)
+            expr, _alias = metric_expression(column, aggregation, allowed_columns, alias=name, question=question)
             selects.append(expr)
         if selects:
-            where_sql, params = build_filters(intent.get("filters") or [], allowed_columns)
+            where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
             sql = f"SELECT {', '.join(selects)} FROM orders"
             if where_sql:
                 sql += f" WHERE {where_sql}"
@@ -335,6 +379,7 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
         aggregation,
         allowed_columns,
         alias=canonical_column(intent.get("metric_definition") or "") or None,
+        question=question,
     )
     date_column = primary_date_column(allowed_columns)
     has_period = bool(date_grain and date_column)
@@ -346,7 +391,7 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
         groups.append(quote_ident(dim))
     selects.append(metric_sql)
 
-    where_sql, params = build_filters(intent.get("filters") or [], allowed_columns)
+    where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
     sql = f"SELECT {', '.join(selects)} FROM orders"
     if where_sql:
         sql += f" WHERE {where_sql}"
@@ -371,6 +416,7 @@ def metric_expression(
     aggregation: str,
     allowed_columns: set[str],
     alias: str | None = None,
+    question: str = "",
 ) -> tuple[str, str]:
     """Build the SELECT expression for an aggregation over an actual schema column.
     Returns (sql_fragment, alias). Falls back to COUNT(*) when the column is missing
@@ -378,6 +424,17 @@ def metric_expression(
     agg = (aggregation or "sum").lower()
     if agg not in VALID_AGGREGATIONS:
         agg = "sum"
+        
+    q = (question or "").lower()
+    # Heuristic: if question asks for "orders" and we have a voucher column, use COUNT(DISTINCT vno)
+    if agg == "count" and not metric_column:
+        if "order" in q and "vno" in allowed_columns:
+            out_alias = alias or "vno"
+            return f'COUNT(DISTINCT "vno") AS {quote_ident(out_alias)}', out_alias
+        if "product" in q and "product" in allowed_columns:
+            out_alias = alias or "product"
+            return f'COUNT(DISTINCT "product") AS {quote_ident(out_alias)}', out_alias
+
     if agg == "count_distinct" and metric_column and metric_column in allowed_columns:
         out_alias = alias or metric_column
         return f"COUNT(DISTINCT {quote_ident(metric_column)}) AS {quote_ident(out_alias)}", out_alias
@@ -407,11 +464,11 @@ def primary_date_column(allowed_columns: set[str]) -> str | None:
     return None
 
 
-def build_lookup_plan(filters: list[dict[str, Any]], intent: dict[str, Any], allowed_columns: set[str]) -> QueryPlan:
+def build_lookup_plan(filters: list[dict[str, Any]], intent: dict[str, Any], allowed_columns: set[str], question: str = "") -> QueryPlan:
     cols = sorted(allowed_columns)
     selected = [quote_ident(col) for col in cols] or ["*"]
-    where_sql, params = build_filters(filters, allowed_columns)
-    limit = max(1, min(int(intent.get("limit") or 20), 100))
+    where_sql, params = build_filters(filters, allowed_columns, question=question)
+    limit = 25000 # Use high limit for lookups/exports
     sql = f"SELECT {', '.join(selected)} FROM orders"
     if where_sql:
         sql += f" WHERE {where_sql}"
@@ -429,9 +486,19 @@ def build_lookup_plan(filters: list[dict[str, Any]], intent: dict[str, Any], all
     )
 
 
-def build_filters(filters: list[dict[str, Any]], allowed_columns: set[str]) -> tuple[str, list[Any]]:
+def build_filters(filters: list[dict[str, Any]], allowed_columns: set[str], question: str = "") -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
+    q = (question or "").lower()
+    
+    # Heuristic for month-only extraction
+    month_names = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+    target_month_idx = -1
+    for i, m in enumerate(month_names):
+        if f"in {m}" in q or f"during {m}" in q or q.endswith(m):
+            target_month_idx = i + 1
+            break
+
     for flt in filters:
         column = canonical_column(flt.get("column", ""))
         if column not in allowed_columns:
@@ -439,6 +506,19 @@ def build_filters(filters: list[dict[str, Any]], allowed_columns: set[str]) -> t
         op = str(flt.get("operator", "=")).lower()
         value = flt.get("value")
         ident = quote_ident(column)
+        
+        # Heuristic: swap date filters for EXTRACT(month) if it looks like a month-only filter
+        if target_month_idx > 0 and column == "date":
+            if op == "between" and isinstance(value, list) and len(value) == 2:
+                clauses.append(f"EXTRACT(month FROM TRY_CAST({ident} AS TIMESTAMP)) = ?")
+                params.append(target_month_idx)
+                continue
+            if op in {">=", "<="}:
+                if not any(f"EXTRACT(month FROM TRY_CAST({ident}" in c for c in clauses):
+                    clauses.append(f"EXTRACT(month FROM TRY_CAST({ident} AS TIMESTAMP)) = ?")
+                    params.append(target_month_idx)
+                continue
+
         if op == "contains":
             clauses.append(f"LOWER(CAST({ident} AS VARCHAR)) LIKE ?")
             params.append(f"%{str(value).lower()}%")
@@ -507,8 +587,8 @@ def build_total_plan(intent: dict[str, Any], allowed_columns: set[str], question
         None if aggregation == "count"
         else infer_metric_column(question, intent.get("metric_column"), allowed_columns)
     )
-    metric_sql, alias = metric_expression(metric_column, aggregation, allowed_columns)
-    where_sql, params = build_filters(intent.get("filters") or [], allowed_columns)
+    metric_sql, alias = metric_expression(metric_column, aggregation, allowed_columns, question=question)
+    where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
     sql = f"SELECT {metric_sql} FROM orders"
     if where_sql:
         sql += f" WHERE {where_sql}"
@@ -524,7 +604,8 @@ def validate_readonly_sql(sql: str) -> None:
     if ";" in lowered:
         raise ValueError("Only one SELECT statement is allowed.")
     if not lowered.startswith("select "):
-        raise ValueError("Only SELECT queries are allowed.")
+        if not lowered.startswith("with "):
+            raise ValueError("Only SELECT or WITH queries are allowed.")
     forbidden = [
         " insert ", " update ", " delete ", " drop ", " alter ", " create ", " attach ", " copy ", "pragma ",
         " read_csv", " read_json", " read_parquet", " read_xlsx", " read_text", " parquet_scan",

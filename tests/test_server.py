@@ -71,6 +71,7 @@ def isolated_server(monkeypatch, tmp_path):
 
     storage = Storage(tmp_path / "app.sqlite")
     monkeypatch.setattr(server, "DB", storage)
+    monkeypatch.setattr(server, "API_KEY", "")
     get_pool().connectors.clear()
     yield server, storage, get_pool()
     get_pool().connectors.clear()

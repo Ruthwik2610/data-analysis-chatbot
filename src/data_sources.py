@@ -116,6 +116,19 @@ _NUMBER_RE = re.compile(r"^-?\d[\d,]*(?:\.\d*)?$")
 _MONTH_RE = re.compile(r"^[A-Za-z]+20\d{2}$")
 
 
+def _normalize_report_month_name(name: str) -> str:
+    if not name:
+        return ""
+    # If it's already spaced, return as is
+    if " " in name:
+        return name
+    # If it matches MonthYear (e.g. January2026), insert space
+    match = re.search(r"([A-Za-z]+)(20\d{2})", name)
+    if match:
+        return f"{match.group(1)} {match.group(2)}"
+    return name
+
+
 def _split_serial_date(value: str) -> tuple[str, str] | None:
     match = _REPORT_ROW_RE.match(value)
     if not match:

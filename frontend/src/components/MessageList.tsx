@@ -168,7 +168,8 @@ function timeOfDayGreeting(): string {
 function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => void; onConnectClick: () => void }) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-5 py-10 gap-6 fade-in sm:px-8">
-      <div className="text-center max-w-[480px]">
+      <div className="text-center max-w-[480px] flex flex-col items-center">
+        <img src="/unipro-logo.svg" alt="Unipro Technologies Limited" className="h-12 mb-6" />
         <h2 className="text-[26px] font-medium mb-2" style={{ color: "var(--color-text-primary)" }}>
           {timeOfDayGreeting()}
         </h2>

@@ -3,7 +3,7 @@ import { WebVitalsReporter } from "./WebVitalsReporter";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Data Chat",
+  title: "Unipro Data Chat",
   description: "Chat with your CSV / Excel / PDF / DuckDB / API data",
 };
 
