@@ -419,6 +419,19 @@ def _serialize_source(source_id: str, source: DataSource, kind: str, active: boo
     }
 
 
+def _get_view_type(chat_id: str) -> str:
+    chat = DB.get_chat(chat_id)
+    if not chat or not chat.get("project_id"):
+        return "table"
+    project_instructions = DB.get_project_instructions(chat["project_id"])
+    if not project_instructions:
+        return "table"
+    category = project_instructions.get("category")
+    if category == "education":
+        return "timetable"
+    return "table"
+
+
 def _get_domain_agent(chat_id: str) -> DomainAgent | None:
     chat = DB.get_chat(chat_id)
     if not chat or not chat.get("project_id"):
@@ -1793,6 +1806,7 @@ async def _run_mcp_agent(
             "elapsed_ms": 0,
             "sql": "",
             "how": f"Source: {cname} via tool {tool_name}.",
+            "view_type": _get_view_type(chat_id),
             **_df_to_payload(df),
         }
         yield {"event": "result", "data": json.dumps(result_payload, default=str)}
@@ -1929,6 +1943,7 @@ async def _run_local_agent(
             "elapsed_ms": 0,
             "sql": sql,
             "how": f"Source: {source.source_kind}. Model: {model_used}. Multi-step query (final). Display: {viz}.",
+            "view_type": _get_view_type(chat_id),
             **_df_to_payload(df),
         }
         yield {"event": "result", "data": json.dumps(result_payload, default=str)}
@@ -2091,6 +2106,7 @@ async def _run_multi_source_agent(
             "elapsed_ms": elapsed_ms,
             "sql": sql,
             "how": f"Sources: {', '.join(s['name'] for s in source_summaries[:8])}. Display: {viz}.",
+            "view_type": _get_view_type(chat_id),
             **_df_to_payload(df),
         }
         yield {"event": "result", "data": json.dumps(result_payload, default=str)}
@@ -2344,6 +2360,7 @@ async def query(body: QueryRequest):
                 "elapsed_ms": elapsed_ms,
                 "sql": plan.sql,
                 "how": f"Source: {source.source_kind}. Model: {model_used}. {plan.how} Display: {viz}.",
+                "view_type": _get_view_type(chat_id),
                 **_df_to_payload(df),
             }
             yield {"event": "result", "data": json.dumps(result_payload, default=str)}

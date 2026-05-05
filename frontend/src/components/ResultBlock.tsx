@@ -57,7 +57,7 @@ export function ResultBlock({ result }: ResultBlockProps) {
           {result.title} · {result.row_count.toLocaleString()} rows · queried in {result.elapsed_ms} ms
         </div>
         <div className="flex items-center gap-1.5">
-          {hasChartControls && (
+          {hasChartControls && result.view_type !== "timetable" && (
             <label className="flex items-center gap-1 text-[11px]" style={{ color: "var(--color-text-secondary)" }}>
               <span className="hidden sm:inline">Chart</span>
               <select
@@ -85,7 +85,7 @@ export function ResultBlock({ result }: ResultBlockProps) {
           {result.sql && (
             <IconBtn onClick={() => navigator.clipboard?.writeText(result.sql)} title="Copy SQL" icon={<Copy size={11} strokeWidth={1.4} />} label="SQL" />
           )}
-          {hasChartControls && (
+          {hasChartControls && result.view_type !== "timetable" && (
             <IconBtn
               onClick={() => setShowTable((s) => !s)}
               title={showTable ? "Show chart" : "Show table"}
@@ -96,14 +96,20 @@ export function ResultBlock({ result }: ResultBlockProps) {
         </div>
       </div>
 
-      {!showTable && chartType !== "table" && shape.kind === "card" && <CardViz shape={shape} />}
-      {!showTable && chartType !== "table" && shape.kind === "bar" && <BarViz shape={shape} />}
-      {!showTable && chartType !== "table" && shape.kind === "pie" && <PieViz shape={shape} />}
-      {!showTable && chartType !== "table" && shape.kind === "line" && <LineViz shape={shape} />}
-      {(showTable || chartType === "table" || shape.kind === "table") && (
-        shape.kind === "bar" && shape.crosstab
-          ? <CrosstabTable data={shape.crosstab} />
-          : <DataTable result={result} />
+      {result.view_type === "timetable" ? (
+        <TimetableGrid result={result} />
+      ) : (
+        <>
+          {!showTable && chartType !== "table" && shape.kind === "card" && <CardViz shape={shape} />}
+          {!showTable && chartType !== "table" && shape.kind === "bar" && <BarViz shape={shape} />}
+          {!showTable && chartType !== "table" && shape.kind === "pie" && <PieViz shape={shape} />}
+          {!showTable && chartType !== "table" && shape.kind === "line" && <LineViz shape={shape} />}
+          {(showTable || chartType === "table" || shape.kind === "table") && (
+            shape.kind === "bar" && shape.crosstab
+              ? <CrosstabTable data={shape.crosstab} />
+              : <DataTable result={result} />
+          )}
+        </>
       )}
 
       {result.how && (
@@ -478,6 +484,29 @@ function DataTable({ result }: { result: ResultPayload }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function TimetableGrid({ result }: { result: ResultPayload }) {
+  return (
+    <div className="mt-1 mb-3">
+      <div className="flex items-center gap-2 mb-3">
+        <span
+          className="px-1.5 py-0.5 rounded-[4px] text-[10px] font-bold uppercase tracking-wider"
+          style={{
+            background: "rgba(99, 102, 241, 0.1)",
+            color: "#6366f1",
+            border: "0.5px solid rgba(99, 102, 241, 0.2)",
+          }}
+        >
+          Education View
+        </span>
+        <span className="text-[11px]" style={{ color: "var(--color-text-tertiary)" }}>
+          Timetable Format
+        </span>
+      </div>
+      <DataTable result={result} />
     </div>
   );
 }
