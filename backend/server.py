@@ -1158,7 +1158,9 @@ def update_project_instructions(project_id: str, body: InstructionsUpdate) -> di
         raise HTTPException(status_code=404, detail="Project not found")
     instructions = dict(body.instructions or {})
     category = str(instructions.get("category") or "").strip().lower()
-    if category and category not in {"general", "sales", "finance", "inventory", "operations", "customer_support"}:
+    from src.agents import DOMAIN_AGENTS
+    allowed_categories = {"general"} | set(DOMAIN_AGENTS.keys())
+    if category and category not in allowed_categories:
         instructions["category"] = "general"
     return DB.upsert_project_instructions(project_id, instructions)
 
@@ -1377,6 +1379,31 @@ async def use_connector(connector_id: str) -> dict[str, Any]:
 
 
 # -- query (SSE) -----------------------------------------------------------
+def _clean_column_name(name: str) -> str:
+    name = str(name).strip()
+    
+    # 1. If it has an explicit 'AS alias' or 'AS "alias"' or 'as alias', extract it.
+    match = re.search(r'\b[aA][sS]\s+["\']?([^"\']+)["\']?$', name)
+    if match:
+        return match.group(1)
+
+    # 2. If it's a raw SQL expression (contains parenthesis and capitals like MAX, CASE)
+    # clean it up. For example, "MAX(CASE WHEN slot_order=1 THEN class END)"
+    if "(" in name and ")" in name and re.search(r'\b[A-Z]{3,}\b', name):
+        # Remove common SQL keywords/functions to derive a readable header
+        cleaned = re.sub(r'\b(MAX|MIN|SUM|AVG|COUNT|COALESCE|CASE|WHEN|THEN|END|ELSE|CAST|TRY_CAST|EXTRACT|FROM|AS)\b', '', name, flags=re.IGNORECASE)
+        # Remove punctuation
+        cleaned = re.sub(r'[\(\)\[\]\',=]', ' ', cleaned)
+        # Remove basic operators
+        cleaned = re.sub(r'[-+*/<>|]', ' ', cleaned)
+        # Normalize whitespace and title case
+        cleaned = re.sub(r'[\s_]+', ' ', cleaned).strip().title()
+        if cleaned:
+            return cleaned
+            
+    return name
+
+
 def _df_to_payload(df: pd.DataFrame, limit: int = 200) -> dict[str, Any]:
     head = df.head(limit)
     rows: list[list[Any]] = []
@@ -1393,7 +1420,7 @@ def _df_to_payload(df: pd.DataFrame, limit: int = 200) -> dict[str, Any]:
                 cleaned.append(v)
         rows.append(cleaned)
     return {
-        "columns": [str(c) for c in df.columns],
+        "columns": [_clean_column_name(c) for c in df.columns],
         "rows": rows,
         "row_count": int(len(df)),
         "truncated": len(df) > limit,
@@ -1717,8 +1744,15 @@ async def _run_mcp_agent(
                     yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
             elif kind == "text":
                 delta = ev.get("delta") or ""
-                full_text_parts.append(delta)
-                yield {"event": "text", "data": json.dumps({"delta": delta})}
+                # Prevent raw DSML from hitting the UI
+                if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
+                    full_text_parts.append(delta)
+                    # We still append the raw delta to the buffer so the agent can parse tool calls,
+                    # but we don't emit it to the user.
+                    pass
+                else:
+                    full_text_parts.append(delta)
+                    yield {"event": "text", "data": json.dumps({"delta": delta})}
     except LLMUnavailable as exc:
         err_text = "All language models are unavailable right now. Try again in a moment."
         msg = DB.add_message(chat_id, "assistant", err_text, payload={"kind": "error", "detail": str(exc)})
@@ -1745,6 +1779,7 @@ async def _run_mcp_agent(
         }
         yield {"event": "result", "data": json.dumps(result_payload, default=str)}
 
+    full_text = _sanitize_assistant_text(full_text)
     assistant_payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "agent"}
     if result_payload:
         assistant_payload["result"] = result_payload
@@ -1850,8 +1885,12 @@ async def _run_local_agent(
                 else:
                     yield {"event": "thinking", "data": json.dumps({"step": "Got data"})}
             elif kind == "text":
-                full_text_parts.append(ev["delta"])
-                yield {"event": "text", "data": json.dumps({"delta": ev["delta"]})}
+                delta = ev.get("delta") or ""
+                if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
+                    full_text_parts.append(delta)
+                else:
+                    full_text_parts.append(delta)
+                    yield {"event": "text", "data": json.dumps({"delta": delta})}
     except LLMUnavailable as exc:
         err_msg = "All language models are rate-limited right now. Wait a minute and retry."
         DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
@@ -1876,6 +1915,7 @@ async def _run_local_agent(
         }
         yield {"event": "result", "data": json.dumps(result_payload, default=str)}
 
+    full_text = _sanitize_assistant_text(full_text)
     payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": model_used}
     if result_payload:
         payload["result"] = result_payload
@@ -2004,8 +2044,15 @@ async def _run_multi_source_agent(
                     yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
             elif kind == "text":
                 delta = ev.get("delta") or ""
-                full_text_parts.append(delta)
-                yield {"event": "text", "data": json.dumps({"delta": delta})}
+                # Prevent raw DSML from hitting the UI
+                if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
+                    full_text_parts.append(delta)
+                    # We still append the raw delta to the buffer so the agent can parse tool calls,
+                    # but we don't emit it to the user.
+                    pass
+                else:
+                    full_text_parts.append(delta)
+                    yield {"event": "text", "data": json.dumps({"delta": delta})}
     except LLMUnavailable as exc:
         err_msg = "The language model is unavailable, so I can't run a multi-source agent query right now."
         msg = DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
@@ -2030,6 +2077,7 @@ async def _run_multi_source_agent(
     elif source_summaries:
         full_text = full_text if full_text != "(no answer)" else "I fetched data, but did not get a final table to show."
 
+    full_text = _sanitize_assistant_text(full_text)
     payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "multi-source-agent"}
     if result_payload:
         payload["result"] = result_payload
