@@ -9,6 +9,7 @@ import { ThinkingIndicator } from "./ThinkingIndicator";
 import { FilePickButton } from "./FilePickButton";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { AnswerActions } from "./AnswerActions";
+import { FollowUpChips } from "./FollowUpChips";
 
 interface MessageListProps {
   messages: Message[];
@@ -21,9 +22,27 @@ interface MessageListProps {
   onAskFollowUp?: (content: string) => void;
 }
 
+function formatRelative(ts?: number): string {
+  if (!ts) return "";
+  const diff = Math.floor(Date.now() / 1000 - ts);
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return new Date(ts * 1000).toLocaleDateString();
+}
+
 export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentProjectId, onSaveProjectNote, onAskFollowUp }: MessageListProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isStreaming = messages.some((m) => m.role === "assistant" && m.streaming);
+
+  // Index of the last non-streaming assistant message with a result
+  const lastResultIdx = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "assistant" && m.result && !m.streaming) return i;
+    }
+    return -1;
+  })();
 
   useEffect(() => {
     ref.current?.scrollTo({
@@ -38,15 +57,20 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
 
   return (
     <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-5 flex flex-col gap-4">
-      {messages.map((msg) => (
-        <Bubble
-          key={msg.id}
-          message={msg}
-          onChoose={(v) => onPendingChoice(msg.id, v)}
-          currentProjectId={currentProjectId}
-          onSaveProjectNote={onSaveProjectNote}
-          onAskFollowUp={onAskFollowUp}
-        />
+      {messages.map((msg, idx) => (
+        <>
+          <Bubble
+            key={msg.id}
+            message={msg}
+            onChoose={(v) => onPendingChoice(msg.id, v)}
+            currentProjectId={currentProjectId}
+            onSaveProjectNote={onSaveProjectNote}
+            onAskFollowUp={onAskFollowUp}
+          />
+          {idx === lastResultIdx && onAskFollowUp && (
+            <FollowUpChips key={`chips-${msg.id}`} onSelect={onAskFollowUp} />
+          )}
+        </>
       ))}
     </div>
   );
@@ -67,7 +91,7 @@ function Bubble({
 }) {
   if (message.role === "user") {
     return (
-      <div className="self-end max-w-[640px] fade-in">
+      <div className="group self-end max-w-[640px] fade-in flex flex-col items-end">
         <div
           className="px-3.5 py-2.5 text-[13px] leading-[1.6] whitespace-pre-wrap"
           style={{
@@ -78,6 +102,15 @@ function Bubble({
         >
           {message.content}
         </div>
+        {message.created_at && (
+          <time
+            className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] mt-0.5 pr-1"
+            style={{ color: "var(--color-text-tertiary)" }}
+            title={new Date(message.created_at * 1000).toISOString()}
+          >
+            {formatRelative(message.created_at)}
+          </time>
+        )}
       </div>
     );
   }

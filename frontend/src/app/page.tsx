@@ -7,6 +7,8 @@ import { Topbar } from "@/components/Topbar";
 import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
 import { InputBar } from "@/components/InputBar";
+import { StreamingBar } from "@/components/StreamingBar";
+import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
 import { formatArchiveSkippedNote } from "@/lib/uploadMessages";
@@ -26,6 +28,7 @@ export default function Home() {
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [modelMode, setModelMode] = useState<ModelMode>("flash");
+  const [chatsReady, setChatsReady] = useState(false);
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -35,6 +38,7 @@ export default function Home() {
   }, [currentProjectId]);
   const refreshChats = useCallback(async () => {
     try { setChats(await api.listChats(currentProjectId)); } catch {}
+    finally { setChatsReady(true); }
   }, [currentProjectId]);
   const refreshProjects = useCallback(async () => {
     try { setProjects(await api.listProjects()); } catch {}
@@ -599,6 +603,12 @@ export default function Home() {
     };
   }, []);
 
+  useKeyboardShortcuts({
+    onNewChat: handleNewChat,
+    onStop: handleStop,
+    loading,
+  });
+
   return (
     <div className="flex h-screen w-screen overflow-hidden">
       <Sidebar
@@ -616,9 +626,11 @@ export default function Home() {
         onSelectProject={handleSelectProject}
         onNewProject={handleNewProject}
         onDeleteProject={handleDeleteProject}
+        chatLoading={!chatsReady}
       />
-      <main className="flex flex-col flex-1 min-w-0" style={{ background: "var(--color-background-primary)" }}>
-        <Topbar 
+      <main className="flex flex-col flex-1 min-w-0 relative" style={{ background: "var(--color-background-primary)" }}>
+        <StreamingBar visible={loading} />
+        <Topbar  
           title={chatTitle} 
           activeSource={activeSource} 
           selectedSources={selectedSources}

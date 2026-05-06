@@ -33,6 +33,27 @@
   --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
 }
 
+[data-theme="dark"] {
+  --color-background-primary: #111113;
+  --color-background-secondary: #1a1a1e;
+  --color-background-tertiary: #222228;
+  --color-background-info: #1a253d;
+  --color-background-elevated: #1f1f24;
+  --color-text-primary: #f0f0f2;
+  --color-text-secondary: #b0b0ba;
+  --color-text-tertiary: #72727e;
+  --color-text-success: #34d399;
+  --color-text-info: #60a5fa;
+  --color-text-warning: #fbbf24;
+  --color-border-primary: rgba(255,255,255,0.12);
+  --color-border-secondary: rgba(255,255,255,0.07);
+  --color-border-tertiary: rgba(255,255,255,0.04);
+  --color-border-info: rgba(96,165,250,0.2);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4);
+}
+
+
 html, body {
   height: 100%;
   margin: 0;
@@ -66,6 +87,28 @@ button { font-family: inherit; cursor: pointer; }
 }
 
 .fade-in { animation: fadeIn 0.18s ease-out; }
+
+@keyframes shimmer {
+  0% { background-position: -600px 0; }
+  100% { background-position: 600px 0; }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-background-tertiary) 25%,
+    var(--color-background-secondary) 50%,
+    var(--color-background-tertiary) 75%
+  );
+  background-size: 1200px 100%;
+  animation: shimmer 1.5s infinite linear;
+}
+
+@keyframes streamSlide {
+  0% { transform: translateX(-200%); }
+  100% { transform: translateX(500%); }
+}
+
 
 .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
 .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--color-border-secondary); border-radius: 4px; }

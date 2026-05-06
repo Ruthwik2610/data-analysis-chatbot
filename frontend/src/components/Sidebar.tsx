@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Database, Folder, MessageSquare, Plus, X } from "lucide-react";
 import type { ChatSummary, Source, Project } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
+import { SkeletonChatList } from "./SkeletonLoader";
 import clsx from "clsx";
 
 interface SidebarProps {
@@ -21,6 +22,7 @@ interface SidebarProps {
   onSelectProject: (id: string) => void;
   onNewProject: () => void;
   onDeleteProject: (id: string) => void;
+  chatLoading?: boolean;
 }
 
 const KIND_COLOR: Record<string, string> = {
@@ -90,18 +92,22 @@ export function Sidebar(p: SidebarProps) {
                 <Plus size={12} stroke="var(--color-text-tertiary)" />
               </button>
             </div>
-            {p.chats.length === 0 && (
-              <EmptyState>No chats yet</EmptyState>
+            {p.chatLoading ? (
+              <SkeletonChatList />
+            ) : (
+              <>
+                {p.chats.length === 0 && <EmptyState>No chats yet</EmptyState>}
+                {p.chats.map((chat) => (
+                  <ChatRow
+                    key={chat.id}
+                    chat={chat}
+                    isActive={chat.id === p.currentChatId}
+                    onSelect={() => p.onSelectChat(chat.id)}
+                    onDelete={() => p.onDeleteChat(chat.id)}
+                  />
+                ))}
+              </>
             )}
-            {p.chats.map((chat) => (
-              <ChatRow
-                key={chat.id}
-                chat={chat}
-                isActive={chat.id === p.currentChatId}
-                onSelect={() => p.onSelectChat(chat.id)}
-                onDelete={() => p.onDeleteChat(chat.id)}
-              />
-            ))}
           </>
         )}
 
@@ -280,23 +286,38 @@ function KbRow({
 }) {
   return (
     <div className="group flex items-center gap-1.5 py-[5px]">
-      <button
-        onClick={onToggle}
-        className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-[12px]"
-        style={{ color: "var(--color-text-secondary)" }}
-        title={`${source.kind.toUpperCase()} · ${source.rows.toLocaleString()} ${source.kind === "mcp" ? "tools" : "rows"}`}
-      >
-        <div
-          className="w-3 h-3 rounded-[4px] flex-shrink-0"
-          style={{
-            background: selected ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "transparent",
-            border: `1px solid ${selected ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "var(--color-border-secondary)"}`,
-          }}
-        />
-        <span className="truncate" style={{ color: selected ? "var(--color-text-primary)" : undefined }}>
-          {displaySourceName(source.name)}
-        </span>
-      </button>
+        <button
+          onClick={onToggle}
+          className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-[12px]"
+          style={{ color: "var(--color-text-secondary)" }}
+          title={`${source.kind.toUpperCase()} · ${source.rows.toLocaleString()} ${source.kind === "mcp" ? "tools" : "rows"}`}
+        >
+          <div
+            className="w-3 h-3 rounded-[4px] flex-shrink-0"
+            style={{
+              background: selected ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "transparent",
+              border: `1px solid ${selected ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "var(--color-border-secondary)"}`,
+            }}
+          />
+          <span className="truncate" style={{ color: selected ? "var(--color-text-primary)" : undefined }}>
+            {displaySourceName(source.name)}
+          </span>
+          <span
+            style={{
+              fontSize: 8,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: "0.07em",
+              padding: "1px 4px",
+              borderRadius: 3,
+              flexShrink: 0,
+              background: KIND_COLOR[source.kind] ? `${KIND_COLOR[source.kind]}20` : "var(--color-background-tertiary)",
+              color: KIND_COLOR[source.kind] || "var(--color-text-tertiary)",
+            }}
+          >
+            {source.kind}
+          </span>
+        </button>
       {source.kind !== "mcp" && (
         <button
           onClick={onDelete}

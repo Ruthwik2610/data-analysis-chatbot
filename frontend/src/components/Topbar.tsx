@@ -1,7 +1,10 @@
 "use client";
 
+import { useState, useEffect } from "react";
+import { Sun, Moon } from "lucide-react";
 import type { Source } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
+import { getTheme, toggleTheme, type Theme } from "@/lib/theme";
 
 interface TopbarProps {
   title: string;
@@ -14,6 +17,16 @@ export function Topbar({ title, activeSource, selectedSources, projectName }: To
   const sources = selectedSources?.length ? selectedSources : activeSource ? [activeSource] : [];
   const firstSource = sources[0];
   const overflow = Math.max(0, sources.length - 1);
+  const [theme, setThemeState] = useState<Theme>("light");
+
+  useEffect(() => {
+    setThemeState(getTheme());
+  }, []);
+
+  const handleToggle = () => {
+    toggleTheme();
+    setThemeState((t) => (t === "dark" ? "light" : "dark"));
+  };
 
   return (
     <div
@@ -65,6 +78,23 @@ export function Topbar({ title, activeSource, selectedSources, projectName }: To
           </span>
         )}
       </div>
+
+      {/* Dark mode toggle */}
+      <button
+        onClick={handleToggle}
+        title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        className="p-1.5 rounded-lg transition-colors flex-shrink-0"
+        style={{
+          background: "transparent",
+          border: "0.5px solid var(--color-border-secondary)",
+          color: "var(--color-text-tertiary)",
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--color-background-secondary)")}
+        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+      >
+        {theme === "dark" ? <Sun size={13} strokeWidth={1.5} /> : <Moon size={13} strokeWidth={1.5} />}
+      </button>
     </div>
   );
 }
+

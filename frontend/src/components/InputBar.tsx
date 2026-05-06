@@ -56,6 +56,12 @@ export function InputBar({
     return () => window.removeEventListener("data-chat:open-connector", handler as EventListener);
   }, []);
 
+  useEffect(() => {
+    const handler = () => ref.current?.focus();
+    window.addEventListener("data-chat:focus-input", handler as EventListener);
+    return () => window.removeEventListener("data-chat:focus-input", handler as EventListener);
+  }, []);
+
   const submit = () => {
     const trimmed = value.trim();
     if (!trimmed || disabled) return;
