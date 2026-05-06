@@ -8,6 +8,7 @@ import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
 import { InputBar } from "@/components/InputBar";
 import { StreamingBar } from "@/components/StreamingBar";
+import { SourcePreviewDrawer } from "@/components/SourcePreviewDrawer";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
@@ -603,6 +604,24 @@ export default function Home() {
     };
   }, []);
 
+  const [previewSourceId, setPreviewSourceId] = useState<string | null>(null);
+  const [previewData, setPreviewData] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const handlePreviewSource = useCallback(async (id: string) => {
+    setPreviewSourceId(id);
+    setPreviewLoading(true);
+    try {
+      const data = await api.previewSource(id);
+      setPreviewData(data);
+    } catch (err) {
+      console.error(err);
+      setPreviewData(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, []);
+
   useKeyboardShortcuts({
     onNewChat: handleNewChat,
     onStop: handleStop,
@@ -610,7 +629,7 @@ export default function Home() {
   });
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden">
+    <div className="flex h-screen w-screen overflow-hidden relative">
       <Sidebar
         chats={chats}
         currentChatId={currentChatId}
@@ -621,6 +640,7 @@ export default function Home() {
         onDeleteChat={handleDeleteChat}
         onToggleSource={handleToggleSource}
         onDeleteSource={handleDeleteSource}
+        onPreviewSource={handlePreviewSource}
         projects={projects}
         currentProjectId={currentProjectId}
         onSelectProject={handleSelectProject}
@@ -667,6 +687,15 @@ export default function Home() {
           onUpdate={() => { refreshProjects(); refreshSources(); }}
         />
       )}
+      <SourcePreviewDrawer
+        open={previewSourceId !== null}
+        onClose={() => {
+          setPreviewSourceId(null);
+          setPreviewData(null);
+        }}
+        data={previewData}
+        loading={previewLoading}
+      />
     </div>
   );
 }

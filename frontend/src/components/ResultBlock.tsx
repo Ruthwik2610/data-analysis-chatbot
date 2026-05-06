@@ -1,7 +1,8 @@
 "use client";
 
-import { Download, Table as TableIcon, BarChart3 } from "lucide-react";
+import { Download, Table as TableIcon, BarChart3, FileSpreadsheet } from "lucide-react";
 import { useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import {
   Bar,
   BarChart,
@@ -82,6 +83,7 @@ export function ResultBlock({ result }: ResultBlockProps) {
             </label>
           )}
           <IconBtn onClick={() => downloadCsv(result)} title="Download CSV" icon={<Download size={11} strokeWidth={1.4} />} label="CSV" />
+          <IconBtn onClick={() => downloadXlsx(result)} title="Download Excel" icon={<FileSpreadsheet size={11} strokeWidth={1.4} />} label="XLSX" />
           {hasChartControls && result.view_type !== "timetable" && (
             <IconBtn
               onClick={() => setShowTable((s) => !s)}
@@ -418,14 +420,39 @@ function ChartTooltip({ active, payload, label, totalForPct, labelFormatter }: a
 }
 
 function DataTable({ result }: { result: ResultPayload }) {
-  const rows = result.rows.slice(0, 50);
+  const [filter, setFilter] = useState("");
   const periodColIdx = useMemo(
     () => result.columns.map((c, i) => (isPeriodColumn(c, result.rows.map((r) => r[i])) ? i : -1)).filter((i) => i >= 0),
     [result.columns, result.rows],
   );
+  
+  const filteredRows = useMemo(() => {
+    if (!filter) return result.rows.slice(0, 50);
+    const lowFilter = filter.toLowerCase();
+    return result.rows.filter(row => 
+      row.some(cell => String(cell ?? "").toLowerCase().includes(lowFilter))
+    ).slice(0, 50);
+  }, [filter, result.rows]);
+
   const isPeriodCol = (j: number) => periodColIdx.includes(j);
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto rounded-[8px]" style={{ border: "0.5px solid var(--color-border-tertiary)", background: "var(--color-background-primary)" }}>
+      {result.rows.length > 10 && (
+        <div style={{ padding: "6px 12px", borderBottom: "0.5px solid var(--color-border-tertiary)" }} className="flex items-center justify-between">
+          <input 
+            value={filter} 
+            onChange={e => setFilter(e.target.value)}
+            placeholder="Search rows…"
+            className="w-full text-[12px] bg-transparent outline-none"
+            style={{ color: "var(--color-text-primary)" }} 
+          />
+          {filter && (
+            <span className="text-[10px] ml-2 whitespace-nowrap" style={{ color: "var(--color-text-tertiary)" }}>
+              {filteredRows.length} / {result.rows.length}
+            </span>
+          )}
+        </div>
+      )}
       <table className="w-full border-collapse text-[12px]">
         <thead>
           <tr>
@@ -444,7 +471,7 @@ function DataTable({ result }: { result: ResultPayload }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => (
+          {filteredRows.map((row, i) => (
             <tr
               key={i}
               style={{ background: i % 2 === 1 ? "var(--color-background-primary)" : "transparent" }}
@@ -455,7 +482,7 @@ function DataTable({ result }: { result: ResultPayload }) {
                   className="py-[5px] px-2 tabular-nums"
                   style={{
                     color: "var(--color-text-primary)",
-                    borderBottom: i === rows.length - 1 ? "none" : "0.5px solid var(--color-border-tertiary)",
+                    borderBottom: i === filteredRows.length - 1 ? "none" : "0.5px solid var(--color-border-tertiary)",
                   }}
                 >
                   {isPeriodCol(j) ? formatPeriod(v) : formatCell(v)}
@@ -691,4 +718,11 @@ function downloadCsv(result: ResultPayload) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+function downloadXlsx(result: ResultPayload) {
+  const ws = XLSX.utils.aoa_to_sheet([result.columns, ...result.rows]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Result");
+  XLSX.writeFile(wb, `${result.title.replace(/\s+/g, "_").toLowerCase()}.xlsx`);
 }

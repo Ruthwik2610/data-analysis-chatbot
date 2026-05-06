@@ -679,6 +679,40 @@ def list_sources(project_id: str | None = None) -> list[dict[str, Any]]:
         out.insert(0, mcp_source)
     return out
 
+@app.get("/sources/{source_id}/preview")
+async def preview_source(source_id: str) -> dict[str, Any]:
+    row = DB.get_source(source_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Source not found")
+    source = SOURCES.get(source_id)
+    if source is None:
+        source = await _rehydrate_source(row)
+        SOURCES[source_id] = source
+    if source.dataframe is not None:
+        df = source.dataframe.head(20).fillna("")
+    elif source.db_path:
+        import duckdb
+        con = _connect_duckdb(source.db_path, read_only=True)
+        df = con.execute(f'SELECT * FROM "{source.table_name}" LIMIT 20').fetchdf().fillna("")
+        con.close()
+    else:
+        raise HTTPException(status_code=400, detail="Source not previewable")
+    
+    # Format datetime columns to ISO strings
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].astype(str).replace("NaT", "")
+            
+    return {
+        "name": row["name"], 
+        "kind": row["kind"], 
+        "rows": row["rows"],
+        "columns": list(df.columns),
+        "preview_rows": df.values.tolist(),
+        "schema": json.loads(row.get("schema_json") or "[]"),
+    }
+
+
 
 @app.post("/sources/csv")
 def attach_csv(body: AttachCSVPath) -> dict[str, Any]:

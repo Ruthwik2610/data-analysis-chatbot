@@ -87,6 +87,7 @@ export const api = {
     jpost<Source>("/sources/api", { url, auth, ingest: "direct", save_connector }),
   deleteSource: (id: string) => jdelete(`/sources/${id}`),
   activateSource: (id: string) => jpost(`/sources/${id}/activate`, {}),
+  previewSource: (id: string) => jget<{name:string;kind:string;rows:number;columns:string[];preview_rows:any[][];schema:any[]}>(`/sources/${id}/preview`),
 
   listChats: (projectId?: string | null) =>
     jget<ChatSummary[]>(projectId ? `/chats?project_id=${encodeURIComponent(projectId)}` : "/chats?project_id=none"),

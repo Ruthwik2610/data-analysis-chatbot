@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Database, Folder, MessageSquare, Plus, X } from "lucide-react";
+import { Database, Folder, MessageSquare, Plus, X, Eye } from "lucide-react";
 import type { ChatSummary, Source, Project } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
 import { SkeletonChatList } from "./SkeletonLoader";
@@ -23,6 +23,7 @@ interface SidebarProps {
   onNewProject: () => void;
   onDeleteProject: (id: string) => void;
   chatLoading?: boolean;
+  onPreviewSource?: (id: string) => void;
 }
 
 const KIND_COLOR: Record<string, string> = {
@@ -148,6 +149,7 @@ export function Sidebar(p: SidebarProps) {
                   selected={p.selectedSourceIds.includes(src.id)}
                   onToggle={() => p.onToggleSource(src.id)}
                   onDelete={() => p.onDeleteSource(src.id)}
+                  onPreview={() => p.onPreviewSource?.(src.id)}
                 />
               ))}
             </div>
@@ -278,11 +280,13 @@ function KbRow({
   selected,
   onToggle,
   onDelete,
+  onPreview,
 }: {
   source: Source;
   selected: boolean;
   onToggle: () => void;
   onDelete: () => void;
+  onPreview?: () => void;
 }) {
   return (
     <div className="group flex items-center gap-1.5 py-[5px]">
@@ -318,6 +322,27 @@ function KbRow({
             {source.kind}
           </span>
         </button>
+      {source.kind !== "mcp" && onPreview && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onPreview();
+          }}
+          className="p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+          style={{ color: "var(--color-text-tertiary)" }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.color = "var(--color-text-primary)";
+            e.currentTarget.style.background = "var(--color-background-secondary)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.color = "var(--color-text-tertiary)";
+            e.currentTarget.style.background = "transparent";
+          }}
+          title="Preview Data"
+        >
+          <Eye size={13} strokeWidth={1.5} />
+        </button>
+      )}
       {source.kind !== "mcp" && (
         <button
           onClick={onDelete}
