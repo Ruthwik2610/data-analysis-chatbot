@@ -306,21 +306,6 @@ function KbRow({
           <span className="truncate" style={{ color: selected ? "var(--color-text-primary)" : undefined }}>
             {displaySourceName(source.name)}
           </span>
-          <span
-            style={{
-              fontSize: 8,
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: "0.07em",
-              padding: "1px 4px",
-              borderRadius: 3,
-              flexShrink: 0,
-              background: KIND_COLOR[source.kind] ? `${KIND_COLOR[source.kind]}20` : "var(--color-background-tertiary)",
-              color: KIND_COLOR[source.kind] || "var(--color-text-tertiary)",
-            }}
-          >
-            {source.kind}
-          </span>
         </button>
       {source.kind !== "mcp" && onPreview && (
         <button
