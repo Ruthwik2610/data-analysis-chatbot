@@ -53,6 +53,11 @@
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4);
 }
 
+.logo-light { display: block; }
+.logo-dark { display: none; }
+[data-theme="dark"] .logo-light { display: none; }
+[data-theme="dark"] .logo-dark { display: block; }
+
 
 html, body {
   height: 100%;

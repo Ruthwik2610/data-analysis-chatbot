@@ -202,7 +202,8 @@ function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => voi
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-5 py-10 gap-6 fade-in sm:px-8">
       <div className="text-center max-w-[480px] flex flex-col items-center">
-        <img src="/unipro-full-logo.svg" alt="Unipro Technologies Limited" className="h-24 max-w-[320px] object-contain mb-6 sm:h-28" />
+        <img src="/unipro-full-logo.svg" alt="Unipro Technologies Limited" className="logo-light h-24 max-w-[320px] object-contain mb-6 sm:h-28" />
+        <img src="/unipro-full-logo-dark.png" alt="Unipro Technologies Limited" className="logo-dark h-24 max-w-[320px] object-contain mb-6 sm:h-28" />
         <h2 className="text-[26px] font-medium mb-2" style={{ color: "var(--color-text-primary)" }}>
           {timeOfDayGreeting()}
         </h2>
