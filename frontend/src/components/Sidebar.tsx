@@ -80,7 +80,16 @@ export function Sidebar(p: SidebarProps) {
       <div className="flex flex-col flex-1 overflow-y-auto scrollbar-thin pb-3">
         {tab === "chats" && (
           <>
-            <SectionLabel>Recents</SectionLabel>
+            <div className="flex items-center justify-between pr-3">
+              <SectionLabel>Recents</SectionLabel>
+              <button
+                onClick={p.onNewChat}
+                className="p-1 rounded hover:bg-black/5"
+                title="New chat"
+              >
+                <Plus size={12} stroke="var(--color-text-tertiary)" />
+              </button>
+            </div>
             {p.chats.length === 0 && (
               <EmptyState>No chats yet</EmptyState>
             )}
