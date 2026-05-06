@@ -27,6 +27,13 @@ export interface ChatSummary {
   project_id?: string | null;
 }
 
+export interface SourceMeta {
+  id: string;
+  name: string;
+  kind: string;
+  rows: number;
+}
+
 export interface ProjectFile {
   id: string;
   project_id: string;
@@ -86,7 +93,8 @@ export type PendingResolver =
   | "ingest_pick"
   | "source_clarification"
   | "connect_url"
-  | "clarify_text";
+  | "clarify_text"
+  | "source_pick";
 
 export interface Pending {
   resolver: PendingResolver;

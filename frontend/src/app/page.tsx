@@ -10,7 +10,7 @@ import { InputBar } from "@/components/InputBar";
 import { api, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
 import { formatArchiveSkippedNote } from "@/lib/uploadMessages";
-import type { ChatSummary, Source, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
+import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
 
@@ -211,6 +211,17 @@ export default function Home() {
           updateMessage(messageId, { resolved: true, content: msg.content + "\n\nOK, I'll send it as a question." });
           handleSend(pending.args.original);
         }
+        return;
+      }
+
+      if (pending.resolver === "source_pick") {
+        const sourceMeta = (pending.args.sources as SourceMeta[]).find((s) => s.id === value);
+        if (sourceMeta) {
+          setSelectedSourceIds([value]);
+          await api.activateSource(value).catch(() => {});
+          refreshSources();
+        }
+        updateMessage(messageId, { resolved: true, content: `OK, using **${sourceMeta?.name ?? value}** for this conversation.`, pending: undefined });
         return;
       }
 
@@ -474,8 +485,41 @@ export default function Home() {
       setMessages(restored);
       setChatTitle(chat.title || "Chat");
       setCurrentProjectId(chat.project_id || null);
+
+      // Auto-restore sources used in this chat
+      const chatSources: SourceMeta[] = chat.sources || [];
+      const chatSourceIds: string[] = chat.source_ids || [];
+
+      if (chatSourceIds.length === 0) {
+        // No source info stored (older chat) — leave current selection unchanged
+      } else if (chatSourceIds.length === 1) {
+        // Single source — activate silently
+        setSelectedSourceIds(chatSourceIds);
+        await api.activateSource(chatSourceIds[0]).catch(() => {});
+        refreshSources();
+      } else {
+        // Multiple sources — ask the user which one to use
+        setSelectedSourceIds(chatSourceIds);
+        refreshSources();
+        const clarifyId = `local_src_pick_${Date.now()}`;
+        const nameList = chatSources.map((s) => s.name).join(", ");
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: clarifyId,
+            role: "assistant" as const,
+            content: `This chat used multiple sources: **${nameList}**. Which one would you like to query next?`,
+            pending: {
+              resolver: "source_pick" as const,
+              hint: "Pick a source",
+              options: chatSources.map((s) => ({ label: s.name, value: s.id })),
+              args: { sources: chatSources },
+            },
+          },
+        ]);
+      }
     } catch {}
-  }, [abortInFlight]);
+  }, [abortInFlight, refreshSources]);
 
   const handleDeleteChat = useCallback(async (id: string) => {
     await api.deleteChat(id);

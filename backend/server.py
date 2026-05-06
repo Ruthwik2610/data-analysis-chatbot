@@ -1114,7 +1114,26 @@ async def get_chat(chat_id: str) -> dict[str, Any]:
     
     if chat.get("project_id"):
         await ensure_project_context(chat["project_id"])
-        
+
+    # Derive the ordered, deduplicated list of source IDs used in this chat
+    # by scanning user message payloads (stored since query endpoint was updated).
+    seen_ids: list[str] = []
+    seen_set: set[str] = set()
+    for m in chat.get("messages", []):
+        if m.get("role") == "user":
+            payload = m.get("payload") or {}
+            for sid in payload.get("source_ids") or []:
+                if sid and sid not in seen_set:
+                    seen_set.add(sid)
+                    seen_ids.append(sid)
+    # Resolve source metadata so the frontend can show names without extra fetches
+    sources_meta: list[dict[str, Any]] = []
+    for sid in seen_ids:
+        row = DB.get_source(sid)
+        if row:
+            sources_meta.append({"id": row["id"], "name": row["name"], "kind": row["kind"], "rows": row.get("rows", 0)})
+    chat["source_ids"] = seen_ids
+    chat["sources"] = sources_meta
     return chat
 
 
@@ -2225,7 +2244,9 @@ async def query(body: QueryRequest):
     active_row = active_for_legacy[0] if active_for_legacy else active_row
     source: DataSource | None = active_for_legacy[1] if active_for_legacy else None
 
-    DB.add_message(chat_id, "user", question)
+    # Store source_ids in user message payload so we can restore them when loading chat history
+    user_payload: dict[str, Any] = {"source_ids": [row["id"] for row, _ in selected_sources]}
+    DB.add_message(chat_id, "user", question, payload=user_payload)
     chat = DB.get_chat(chat_id)
     if chat and (not chat.get("title") or chat["title"] == "New chat"):
         DB.update_chat_title(chat_id, question[:60])

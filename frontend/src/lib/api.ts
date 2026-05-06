@@ -90,7 +90,7 @@ export const api = {
 
   listChats: (projectId?: string | null) =>
     jget<ChatSummary[]>(projectId ? `/chats?project_id=${encodeURIComponent(projectId)}` : "/chats?project_id=none"),
-  getChat: (id: string) => jget<{ id: string; title: string; messages: any[]; project_id: string | null }>(`/chats/${id}`),
+  getChat: (id: string) => jget<{ id: string; title: string; messages: any[]; project_id: string | null; source_ids: string[]; sources: { id: string; name: string; kind: string; rows: number }[] }>(`/chats/${id}`),
   deleteChat: (id: string) => jdelete(`/chats/${id}`),
 
   listConnectors: () => jget<Connector[]>("/connectors"),
