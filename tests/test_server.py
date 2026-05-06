@@ -130,6 +130,24 @@ def test_project_can_be_renamed(isolated_server):
     assert storage.get_project(project["id"])["title"] == "Restaurant sandbox"
 
 
+def test_chats_endpoint_filters_by_project_id(isolated_server):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    project = storage.create_project("Orders")
+    project_chat = storage.create_chat("Orders total")
+    unscoped_chat = storage.create_chat("General total")
+    storage.update_chat_project(project_chat["id"], project["id"])
+
+    client = TestClient(server.app)
+
+    scoped = client.get(f"/chats?project_id={project['id']}").json()
+    unscoped = client.get("/chats?project_id=none").json()
+
+    assert [chat["id"] for chat in scoped] == [project_chat["id"]]
+    assert [chat["id"] for chat in unscoped] == [unscoped_chat["id"]]
+
+
 def test_project_notes_endpoints_create_list_and_delete(isolated_server):
     server, storage, _pool = isolated_server
     from fastapi.testclient import TestClient

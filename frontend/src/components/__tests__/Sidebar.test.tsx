@@ -48,6 +48,35 @@ describe("Sidebar", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Sources" }));
     expect(screen.getByRole("tab", { name: "Sources" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("pizza_sales.csv")).toBeInTheDocument();
+    expect(screen.getByText("pizza_sales")).toBeInTheDocument();
+    expect(screen.queryByText("pizza_sales.csv")).not.toBeInTheDocument();
+  });
+
+  it("calls clear screen without deleting the current chat", () => {
+    const onNewChat = vi.fn();
+    const onDeleteChat = vi.fn();
+    render(
+      <Sidebar
+        chats={chats}
+        currentChatId="c1"
+        sources={sources}
+        selectedSourceIds={["s1"]}
+        onNewChat={onNewChat}
+        onSelectChat={vi.fn()}
+        onDeleteChat={onDeleteChat}
+        onToggleSource={vi.fn()}
+        onDeleteSource={vi.fn()}
+        projects={projects}
+        currentProjectId={null}
+        onSelectProject={vi.fn()}
+        onNewProject={vi.fn()}
+        onDeleteProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear screen" }));
+
+    expect(onNewChat).toHaveBeenCalledTimes(1);
+    expect(onDeleteChat).not.toHaveBeenCalled();
   });
 });

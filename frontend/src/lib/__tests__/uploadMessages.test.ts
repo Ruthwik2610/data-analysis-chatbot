@@ -10,7 +10,7 @@ describe("formatArchiveSkippedNote", () => {
     expect(formatArchiveSkippedNote([
       { file_name: "scan.pdf", error: "No tables found" },
       { file_name: "huge.pdf", error: "Too large" },
-    ])).toBe(" 2 PDFs were skipped: scan.pdf: No tables found; huge.pdf: Too large.");
+    ])).toBe(" 2 PDFs were skipped: scan: No tables found; huge: Too large.");
   });
 
   it("caps long skipped lists", () => {

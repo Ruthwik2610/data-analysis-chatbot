@@ -22,6 +22,9 @@ describe("ResultBlock", () => {
 
     expect(screen.getByLabelText("Chart type")).toHaveValue("pie");
     expect(screen.getByTitle("Show table")).toBeInTheDocument();
-    expect(screen.getByTitle("Copy SQL")).toBeInTheDocument();
+    expect(screen.getByTitle("Download CSV")).toBeInTheDocument();
+    expect(screen.queryByTitle("Copy SQL")).not.toBeInTheDocument();
+    expect(screen.queryByText("How I answered")).not.toBeInTheDocument();
+    expect(screen.queryByText("select category, revenue from sales")).not.toBeInTheDocument();
   });
 });

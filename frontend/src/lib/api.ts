@@ -88,7 +88,8 @@ export const api = {
   deleteSource: (id: string) => jdelete(`/sources/${id}`),
   activateSource: (id: string) => jpost(`/sources/${id}/activate`, {}),
 
-  listChats: () => jget<ChatSummary[]>("/chats"),
+  listChats: (projectId?: string | null) =>
+    jget<ChatSummary[]>(projectId ? `/chats?project_id=${encodeURIComponent(projectId)}` : "/chats?project_id=none"),
   getChat: (id: string) => jget<{ id: string; title: string; messages: any[]; project_id: string | null }>(`/chats/${id}`),
   deleteChat: (id: string) => jdelete(`/chats/${id}`),
 

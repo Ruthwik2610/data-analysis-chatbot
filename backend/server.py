@@ -1066,8 +1066,8 @@ def apply_source_clarifications(source_id: str, body: SourceClarificationUpdate)
 
 # -- chats -----------------------------------------------------------------
 @app.get("/chats")
-def list_chats() -> list[dict[str, Any]]:
-    return DB.list_chats()
+def list_chats(project_id: str | None = None) -> list[dict[str, Any]]:
+    return DB.list_chats(project_id=project_id)
 
 
 async def ensure_project_context(project_id: str):

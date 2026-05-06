@@ -1,6 +1,7 @@
 "use client";
 
 import type { Source } from "@/lib/types";
+import { displaySourceName } from "@/lib/displayNames";
 
 interface TopbarProps {
   title: string;
@@ -47,13 +48,13 @@ export function Topbar({ title, activeSource, selectedSources, projectName }: To
             }}
           >
             <span className="w-[5px] h-[5px] rounded-full" style={{ background: "var(--color-text-info)" }} />
-            <span className="truncate">{stripExt(firstSource.name)}</span>
+            <span className="truncate">{displaySourceName(firstSource.name)}</span>
           </span>
         )}
         {overflow > 0 && (
           <span
             className="text-[11px] px-2 py-[3px] rounded-full"
-            title={sources.slice(1).map((s) => s.name).join(", ")}
+            title={sources.slice(1).map((s) => displaySourceName(s.name)).join(", ")}
             style={{
               background: "var(--color-background-secondary)",
               border: "0.5px solid var(--color-border-tertiary)",
@@ -66,8 +67,4 @@ export function Topbar({ title, activeSource, selectedSources, projectName }: To
       </div>
     </div>
   );
-}
-
-function stripExt(name: string): string {
-  return name.replace(/\.[^./\\]+$/, "") || name;
 }

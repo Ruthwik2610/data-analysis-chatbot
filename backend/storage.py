@@ -186,18 +186,27 @@ class Storage:
                 "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
                 (chat_id, title or "New chat", now, now),
             )
-        return {"id": chat_id, "title": title or "New chat", "created_at": now, "updated_at": now}
+        return {"id": chat_id, "title": title or "New chat", "project_id": None, "created_at": now, "updated_at": now}
 
-    def list_chats(self) -> list[dict[str, Any]]:
+    def list_chats(self, project_id: str | None = None) -> list[dict[str, Any]]:
+        where = ""
+        params: list[Any] = []
+        if project_id == "none":
+            where = "WHERE c.project_id IS NULL"
+        elif project_id:
+            where = "WHERE c.project_id = ?"
+            params.append(project_id)
         with self._conn() as con:
             rows = con.execute(
-                """
-                SELECT c.id, c.title, c.created_at, c.updated_at,
+                f"""
+                SELECT c.id, c.title, c.project_id, c.created_at, c.updated_at,
                        (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count
                 FROM chats c
+                {where}
                 ORDER BY c.updated_at DESC
                 LIMIT 50
-                """
+                """,
+                params,
             ).fetchall()
         return [dict(r) for r in rows]
 

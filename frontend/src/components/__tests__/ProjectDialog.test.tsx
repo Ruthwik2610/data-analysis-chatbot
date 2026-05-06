@@ -115,6 +115,13 @@ describe("ProjectDialog", () => {
     expect(screen.getByText("Revenue increased by 12%.")).toBeInTheDocument();
   });
 
+  it("shows project source names without file extensions", async () => {
+    render(<ProjectDialog projectId="proj_1" onClose={vi.fn()} onUpdate={vi.fn()} />);
+
+    expect((await screen.findAllByText("pizza_sales")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("pizza_sales.csv")).not.toBeInTheDocument();
+  });
+
   it("saves project and file instructions", async () => {
     render(<ProjectDialog projectId="proj_1" onClose={vi.fn()} onUpdate={vi.fn()} />);
 

@@ -2,6 +2,7 @@
 
 import { CheckCircle2, CircleAlert, Database, X } from "lucide-react";
 import type { Source } from "@/lib/types";
+import { displaySourceName } from "@/lib/displayNames";
 
 interface SourceContextDrawerProps {
   open: boolean;
@@ -54,7 +55,7 @@ export function SourceContextDrawer({ open, sources, onClose }: SourceContextDra
                 <Database size={14} style={{ color: "var(--color-text-info)" }} />
                 <div className="min-w-0">
                   <div className="truncate text-[12.5px]" style={{ color: "var(--color-text-primary)" }}>
-                    {source.name}
+                    {displaySourceName(source.name)}
                   </div>
                   <div className="text-[11.5px] uppercase" style={{ color: "var(--color-text-tertiary)" }}>
                     {source.kind}

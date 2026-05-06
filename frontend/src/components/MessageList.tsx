@@ -169,12 +169,12 @@ function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => voi
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-5 py-10 gap-6 fade-in sm:px-8">
       <div className="text-center max-w-[480px] flex flex-col items-center">
-        <img src="/unipro-logo.svg" alt="Unipro Technologies Limited" className="h-12 mb-6" />
+        <img src="/unipro-full-logo.svg" alt="Unipro Technologies Limited" className="h-24 max-w-[320px] object-contain mb-6 sm:h-28" />
         <h2 className="text-[26px] font-medium mb-2" style={{ color: "var(--color-text-primary)" }}>
           {timeOfDayGreeting()}
         </h2>
         <p className="text-[14px]" style={{ color: "var(--color-text-secondary)" }}>
-          Ask plain-English questions about your data — I&apos;ll write the SQL, run it, and chart the result.
+          Ask plain-English questions about your data. I&apos;ll analyze it, summarize what matters, and chart the result.
         </p>
         <div className="mt-4 flex flex-wrap justify-center gap-1.5 text-[12px]" style={{ color: "var(--color-text-secondary)" }}>
           <span className="rounded-full px-2 py-1" style={{ background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)" }}>Top 10 by revenue</span>

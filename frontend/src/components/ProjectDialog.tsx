@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { X, Plus, Trash2, FileText, Database, Server, Save, StickyNote, Wand2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { MCPConnector, Project, ProjectNote, Source } from "@/lib/types";
+import { displaySourceName } from "@/lib/displayNames";
 
 interface ProjectDialogProps {
   projectId: string;
@@ -27,6 +28,10 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   const [loading, setLoading] = useState(true);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
+  const projectFileLabel = (file: Project["files"][number]) => {
+    if (file.source_id) return displaySourceName(file.source_name || `Source: ${file.source_id}`);
+    return displaySourceName(file.file_path?.split("/").pop() || "Unknown File");
+  };
 
   const loadData = async () => {
     setLoading(true);
@@ -287,8 +292,8 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                         )}
                       </div>
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-gray-700 truncate" title={file.file_path || file.source_name || ""}>
-                          {file.source_id ? (file.source_name || `Source: ${file.source_id}`) : (file.file_path?.split("/").pop() || "Unknown File")}
+                        <p className="text-sm font-medium text-gray-700 truncate" title={projectFileLabel(file)}>
+                          {projectFileLabel(file)}
                         </p>
                         {file.sheet_name && (
                           <p className="text-[10px] text-gray-400">Sheet: {file.sheet_name}</p>
@@ -385,7 +390,7 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                 <option value="">Select a source...</option>
                 {sources.filter(s => !project?.files.some(f => f.source_id === s.id)).map(s => (
                   <option key={s.id} value={s.id}>
-                    {s.name} ({s.kind})
+                    {displaySourceName(s.name)} ({s.kind})
                   </option>
                 ))}
               </select>
@@ -414,7 +419,7 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                 <option value="">Select a linked file...</option>
                 {project?.files.filter((file) => file.source_id).map((file) => (
                   <option key={file.id} value={file.source_id || ""}>
-                    {file.source_name || file.source_id}
+                    {displaySourceName(file.source_name || file.source_id)}
                   </option>
                 ))}
               </select>

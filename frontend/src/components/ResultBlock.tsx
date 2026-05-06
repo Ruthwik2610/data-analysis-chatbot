@@ -1,6 +1,6 @@
 "use client";
 
-import { Copy, Download, Table as TableIcon, BarChart3 } from "lucide-react";
+import { Download, Table as TableIcon, BarChart3 } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
   Bar,
@@ -82,9 +82,6 @@ export function ResultBlock({ result }: ResultBlockProps) {
             </label>
           )}
           <IconBtn onClick={() => downloadCsv(result)} title="Download CSV" icon={<Download size={11} strokeWidth={1.4} />} label="CSV" />
-          {result.sql && (
-            <IconBtn onClick={() => navigator.clipboard?.writeText(result.sql)} title="Copy SQL" icon={<Copy size={11} strokeWidth={1.4} />} label="SQL" />
-          )}
           {hasChartControls && result.view_type !== "timetable" && (
             <IconBtn
               onClick={() => setShowTable((s) => !s)}
@@ -112,22 +109,6 @@ export function ResultBlock({ result }: ResultBlockProps) {
         </>
       )}
 
-      {result.how && (
-        <details className="mt-3">
-          <summary className="text-[11px] cursor-pointer" style={{ color: "var(--color-text-tertiary)" }}>
-            How I answered
-          </summary>
-          <div className="text-[11px] mt-1 space-y-1" style={{ color: "var(--color-text-secondary)" }}>
-            <div>{result.how}</div>
-            <pre
-              className="text-[10.5px] p-2 rounded overflow-x-auto"
-              style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)" }}
-            >
-              {result.sql}
-            </pre>
-          </div>
-        </details>
-      )}
     </div>
   );
 }

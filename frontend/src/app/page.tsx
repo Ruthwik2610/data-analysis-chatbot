@@ -8,6 +8,7 @@ import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
 import { InputBar } from "@/components/InputBar";
 import { api, streamQuery } from "@/lib/api";
+import { displaySourceName } from "@/lib/displayNames";
 import { formatArchiveSkippedNote } from "@/lib/uploadMessages";
 import type { ChatSummary, Source, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
 
@@ -33,25 +34,13 @@ export default function Home() {
     try { setSources(await api.listSources(currentProjectId)); } catch {}
   }, [currentProjectId]);
   const refreshChats = useCallback(async () => {
-    try { setChats(await api.listChats()); } catch {}
-  }, []);
+    try { setChats(await api.listChats(currentProjectId)); } catch {}
+  }, [currentProjectId]);
   const refreshProjects = useCallback(async () => {
     try { setProjects(await api.listProjects()); } catch {}
   }, []);
 
   useEffect(() => { refreshSources(); refreshChats(); refreshProjects(); }, [refreshSources, refreshChats, refreshProjects]);
-
-  // Auto-restore the most recent chat on first load so reload always shows your last result.
-  const didAutoRestore = useRef(false);
-  useEffect(() => {
-    if (didAutoRestore.current) return;
-    if (currentChatId) return;
-    if (messages.length > 0) return;
-    if (chats.length === 0) return;
-    didAutoRestore.current = true;
-    handleSelectChat(chats[0].id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chats]);
 
   useEffect(() => {
     setSelectedSourceIds((prev) => {
@@ -87,7 +76,7 @@ export default function Home() {
         id: placeholderId,
         role: "assistant",
         content: "",
-        thinking: `Uploading ${file.name}${sizeNote}`,
+        thinking: `Uploading ${displaySourceName(file.name)}${sizeNote}`,
         progress: 0,
       });
       uploadAbortRef.current?.abort();
@@ -100,7 +89,7 @@ export default function Home() {
             // Drop the progress bar once the bytes are sent — the server still has work to do
             // (parsing/caching), so keep the dot animation alive but stop showing 100%.
             progress: pct < 100 ? pct : null,
-            thinking: pct < 100 ? `Uploading ${file.name}` : `Reading ${file.name} on the server (this can take a minute for large files)`,
+            thinking: pct < 100 ? `Uploading ${displaySourceName(file.name)}` : `Reading ${displaySourceName(file.name)} on the server (this can take a minute for large files)`,
           }),
           uploadAbortRef.current.signal,
         );
@@ -110,7 +99,7 @@ export default function Home() {
           if (p.kind === "sheet_pick" && p.sheets) {
             updateMessage(placeholderId, {
               thinking: null,
-              content: `Got **${p.file_name}**. It has ${p.sheets.length} sheets — which one should I read?`,
+              content: `Got **${displaySourceName(p.file_name)}**. It has ${p.sheets.length} sheets — which one should I read?`,
               pending: {
                 resolver: "sheet_pick",
                 hint: "Pick a sheet",
@@ -121,7 +110,7 @@ export default function Home() {
           } else if (p.kind === "table_pick" && p.tables) {
             updateMessage(placeholderId, {
               thinking: null,
-              content: `Got **${p.file_name}**. It has ${p.tables.length} tables — which one should I open?`,
+              content: `Got **${displaySourceName(p.file_name)}**. It has ${p.tables.length} tables — which one should I open?`,
               pending: {
                 resolver: "table_pick",
                 hint: "Pick a table",
@@ -132,7 +121,7 @@ export default function Home() {
           } else if (p.kind === "ingest_pick") {
             updateMessage(placeholderId, {
               thinking: null,
-              content: `**${p.file_name}** is ${p.size_mb} MB. How should I load it?`,
+              content: `**${displaySourceName(p.file_name)}** is ${p.size_mb} MB. How should I load it?`,
               pending: {
                 resolver: "ingest_pick",
                 hint: "Pick how to load",
@@ -147,12 +136,11 @@ export default function Home() {
         } else if (res.sources?.length) {
           const ids = res.sources.map((source) => source.id);
           setSelectedSourceIds((currentIds) => Array.from(new Set([...currentIds, ...ids])));
-          const totalRows = res.sources.reduce((sum, source) => sum + (source.rows || 0), 0);
           const skippedNote = formatArchiveSkippedNote(res.skipped);
           updateMessage(placeholderId, {
             thinking: null,
             progress: null,
-            content: `Got **${res.sources.length} PDF${res.sources.length === 1 ? "" : "s"}** from **${file.name}** — ${totalRows.toLocaleString()} rows ready.${skippedNote} Ask me anything about them.`,
+            content: `Got **${res.sources.length} PDF${res.sources.length === 1 ? "" : "s"}** from **${displaySourceName(file.name)}**.${skippedNote} Ask me anything about them.`,
           });
           refreshSources();
         } else if ("id" in res && res.id) {
@@ -162,7 +150,7 @@ export default function Home() {
             updateMessage(placeholderId, {
               thinking: null,
               progress: null,
-              content: `Got **${res.name}** — ${res.rows?.toLocaleString()} rows ready.\n\n${firstClarification.question}`,
+              content: `**${displaySourceName(res.name)}** is ready.\n\n${firstClarification.question}`,
               pending: {
                 resolver: "source_clarification",
                 hint: "Set file meaning",
@@ -174,19 +162,19 @@ export default function Home() {
             updateMessage(placeholderId, {
               thinking: null,
               progress: null,
-              content: `Got **${res.name}** — ${res.rows?.toLocaleString()} rows ready. Ask me anything about it.`,
+              content: `**${displaySourceName(res.name)}** is ready. Ask me anything about it.`,
             });
           }
           refreshSources();
         }
       } catch (e: any) {
         if (e?.name === "AbortError") {
-          updateMessage(placeholderId, { thinking: null, progress: null, content: `Upload of ${file.name} was stopped.` });
+          updateMessage(placeholderId, { thinking: null, progress: null, content: `Upload of ${displaySourceName(file.name)} was stopped.` });
         } else {
           updateMessage(placeholderId, {
             thinking: null,
             progress: null,
-            content: `Couldn't load ${file.name}: ${e?.message || "unknown error"}`,
+            content: `Couldn't load ${displaySourceName(file.name)}: ${e?.message || "unknown error"}`,
             error: true,
           });
         }
@@ -213,7 +201,7 @@ export default function Home() {
             setSelectedSourceIds((ids) => Array.from(new Set([...ids, src.id])));
             updateMessage(messageId, {
               thinking: null,
-              content: `Connected to **${src.name}** — ${src.rows.toLocaleString()} rows. Ask away.`,
+              content: `Connected to **${displaySourceName(src.name)}**. Ask away.`,
             });
             refreshSources();
           } catch (e: any) {
@@ -238,7 +226,7 @@ export default function Home() {
           await api.applySourceClarifications(pending.args.source_id, { [pending.args.clarification_id]: value });
           updateMessage(messageId, {
             thinking: null,
-            content: `Got **${pending.args.source_name}** — ${Number(pending.args.rows || 0).toLocaleString()} rows ready. I saved that file meaning for more accurate answers.`,
+            content: `**${displaySourceName(pending.args.source_name)}** is ready. I saved that file meaning for more accurate answers.`,
           });
           refreshSources();
         } catch (e: any) {
@@ -257,7 +245,7 @@ export default function Home() {
           updateMessage(messageId, {
             resolved: false,
             thinking: null,
-            content: `Got **${src.name}** — ${src.rows.toLocaleString()} rows.\n\n${firstClarification.question}`,
+            content: `**${displaySourceName(src.name)}** is ready.\n\n${firstClarification.question}`,
             pending: {
               resolver: "source_clarification",
               hint: "Set file meaning",
@@ -268,7 +256,7 @@ export default function Home() {
         } else {
           updateMessage(messageId, {
             thinking: null,
-            content: `Got **${src.name}** — ${src.rows.toLocaleString()} rows. Ask me anything about it.`,
+            content: `**${displaySourceName(src.name)}** is ready. Ask me anything about it.`,
           });
         }
         refreshSources();
@@ -428,27 +416,44 @@ export default function Home() {
     try {
       const p = await api.createProject(title);
       refreshProjects();
+      abortInFlight();
       setCurrentProjectId(p.id);
+      setMessages([]);
+      setCurrentChatId(null);
+      setChatTitle("New chat");
+      setSelectedSourceIds([]);
       setProjectDialogOpen(true);
     } catch {}
-  }, [refreshProjects]);
+  }, [abortInFlight, refreshProjects]);
 
   const handleSelectProject = useCallback((id: string) => {
     if (currentProjectId === id) {
       setProjectDialogOpen(true);
     } else {
+      abortInFlight();
       setCurrentProjectId(id);
+      setMessages([]);
+      setCurrentChatId(null);
+      setChatTitle("New chat");
+      setSelectedSourceIds([]);
     }
-  }, [currentProjectId]);
+  }, [abortInFlight, currentProjectId]);
 
   const handleDeleteProject = useCallback(async (id: string) => {
     if (!confirm("Delete this project? Chats will remain but context links will be removed.")) return;
     try {
       await api.deleteProject(id);
-      if (currentProjectId === id) setCurrentProjectId(null);
+      if (currentProjectId === id) {
+        abortInFlight();
+        setCurrentProjectId(null);
+        setMessages([]);
+        setCurrentChatId(null);
+        setChatTitle("New chat");
+        setSelectedSourceIds([]);
+      }
       refreshProjects();
     } catch {}
-  }, [currentProjectId, refreshProjects]);
+  }, [abortInFlight, currentProjectId, refreshProjects]);
 
   const handleSelectChat = useCallback(async (id: string) => {
     abortInFlight();
@@ -503,7 +508,7 @@ export default function Home() {
     addMessage({
       id: `local_${Date.now()}`,
       role: "assistant",
-      content: `Connected to **${s.name}** — ${s.rows.toLocaleString()} rows. Ask away.`,
+      content: `Connected to **${displaySourceName(s.name)}**. Ask away.`,
     });
     refreshSources();
   }, [addMessage, refreshSources]);
@@ -511,10 +516,7 @@ export default function Home() {
   const handleSaveProjectNote = useCallback(async (message: Extract<Message, { role: "assistant" }>) => {
     if (!currentProjectId) return;
     const title = message.result?.title || message.content.split(/\n+/)[0]?.replace(/[#*_`]/g, "").slice(0, 60) || "Saved analysis";
-    const content = [
-      message.content,
-      message.result?.sql ? `\nSQL:\n${message.result.sql}` : "",
-    ].join("").trim();
+    const content = message.content.trim();
     try {
       await api.createProjectNote(currentProjectId, {
         title,

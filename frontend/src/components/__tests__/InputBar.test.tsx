@@ -93,7 +93,7 @@ describe("InputBar", () => {
       />,
     );
 
-    expect(screen.getByText("pizza_sales")).toBeInTheDocument();
+    expect(screen.getAllByText("pizza_sales").length).toBeGreaterThan(0);
     expect(screen.getByText("+1")).toBeInTheDocument();
   });
 
@@ -111,6 +111,8 @@ describe("InputBar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show selected sources" }));
 
     expect(screen.getByRole("dialog", { name: "Selected sources" })).toBeInTheDocument();
+    expect(screen.getAllByText("pizza_sales").length).toBeGreaterThan(0);
+    expect(screen.queryByText("pizza_sales.csv")).not.toBeInTheDocument();
     expect(screen.getByText("48,620 rows")).toBeInTheDocument();
   });
 

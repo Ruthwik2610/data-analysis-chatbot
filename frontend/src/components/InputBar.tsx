@@ -6,6 +6,7 @@ import { FilePickButton } from "./FilePickButton";
 import { ConnectorPopover } from "./ConnectorPopover";
 import { SourceContextDrawer } from "./SourceContextDrawer";
 import type { ModelMode, Source } from "@/lib/types";
+import { displaySourceName } from "@/lib/displayNames";
 
 interface InputBarProps {
   onSend: (q: string) => void;
@@ -132,7 +133,7 @@ export function InputBar({
               aria-label="Show selected sources"
               onClick={() => setSourceDrawerOpen((open) => !open)}
               className="flex min-w-0 max-w-full items-center gap-1.5 text-[11.5px] sm:max-w-[42%]"
-              title={selectedSources.map((s) => s.name).join(", ")}
+              title={selectedSources.map((s) => displaySourceName(s.name)).join(", ")}
             >
               <span
                 className="inline-flex min-w-0 items-center gap-1.5 rounded-full px-2 py-[3px]"
@@ -143,7 +144,7 @@ export function InputBar({
                 }}
               >
                 <span className="h-[5px] w-[5px] flex-shrink-0 rounded-full" style={{ background: "var(--color-text-info)" }} />
-                <span className="truncate">{stripExt(firstSource.name)}</span>
+                <span className="truncate">{displaySourceName(firstSource.name)}</span>
               </span>
               {sourceOverflow > 0 && (
                 <span
@@ -215,8 +216,4 @@ export function InputBar({
       </div>
     </div>
   );
-}
-
-function stripExt(name: string): string {
-  return name.replace(/\.[^./\\]+$/, "") || name;
 }

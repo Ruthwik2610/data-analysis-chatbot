@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Circle, Database, Folder, MessageSquare, Plus, X } from "lucide-react";
+import { Database, Folder, MessageSquare, Plus, X } from "lucide-react";
 import type { ChatSummary, Source, Project } from "@/lib/types";
+import { displaySourceName } from "@/lib/displayNames";
 import clsx from "clsx";
 
 interface SidebarProps {
@@ -49,7 +50,7 @@ export function Sidebar(p: SidebarProps) {
         className="flex items-center gap-2 px-4 pb-3 pt-4 text-[13px] font-medium"
         style={{ borderBottom: "0.5px solid var(--color-border-tertiary)", color: "var(--color-text-primary)" }}
       >
-        <img src="/unipro-icon.svg" alt="Unipro" className="w-5 h-5" />
+        <img src="/unipro-icon.svg" alt="Unipro" className="w-6 h-6" />
         Unipro Chat
       </div>
 
@@ -66,7 +67,7 @@ export function Sidebar(p: SidebarProps) {
           onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
         >
           <Plus size={12} strokeWidth={1.5} />
-          New chat
+          Clear screen
         </button>
       </div>
 
@@ -284,7 +285,7 @@ function KbRow({
           }}
         />
         <span className="truncate" style={{ color: selected ? "var(--color-text-primary)" : undefined }}>
-          {source.name}
+          {displaySourceName(source.name)}
         </span>
       </button>
       {source.kind !== "mcp" && (
