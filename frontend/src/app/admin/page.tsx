@@ -37,8 +37,24 @@ export default function AdminPage() {
           <ChevronLeft size={16} />
           Back to Chat
         </Link>
-        <div className="text-[11px] uppercase tracking-widest font-semibold" style={{ color: "var(--color-text-tertiary)" }}>
-          Admin Console
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
+            <img src="/unipro-icon.svg" alt="Unipro" className="w-5 h-5" />
+            <div className="flex items-center gap-6">
+                <Link 
+                    href="/admin" 
+                    className="text-[11px] uppercase tracking-widest font-bold border-b-2 border-blue-500 pb-1"
+                    style={{ color: "var(--color-text-primary)" }}
+                >
+                    Insights
+                </Link>
+                <Link 
+                    href="/admin/testing" 
+                    className="text-[11px] uppercase tracking-widest font-bold border-b-2 border-transparent pb-1 hover:border-blue-500/30 transition-all"
+                    style={{ color: "var(--color-text-tertiary)" }}
+                >
+                    Testing Gateway
+                </Link>
+            </div>
         </div>
         <button 
           onClick={() => {

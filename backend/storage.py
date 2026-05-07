@@ -115,6 +115,47 @@ CREATE TABLE IF NOT EXISTS project_mcp_connectors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_project_mcp_project ON project_mcp_connectors(project_id);
+
+CREATE TABLE IF NOT EXISTS test_suites (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS test_queries (
+  id TEXT PRIMARY KEY,
+  suite_id TEXT NOT NULL REFERENCES test_suites(id) ON DELETE CASCADE,
+  question TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'Uncategorized',
+  created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS test_runs (
+  id TEXT PRIMARY KEY,
+  suite_id TEXT NOT NULL REFERENCES test_suites(id) ON DELETE CASCADE,
+  snapshot_json TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS test_evaluations (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
+  query_id TEXT NOT NULL REFERENCES test_queries(id) ON DELETE CASCADE,
+  answer TEXT,
+  latency_ms REAL,
+  grade TEXT, -- 'Pass', 'Fail', 'Partial', 'Error'
+  reason TEXT,
+  created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_feedback (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+  message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
+  rating INTEGER, -- e.g. 1-5 or simple boolean
+  comment TEXT,
+  created_at REAL NOT NULL
+);
 """
 
 
@@ -763,3 +804,134 @@ class Storage:
     def update_chat_project(self, chat_id: str, project_id: str | None) -> None:
         with self._conn() as con:
             con.execute("UPDATE chats SET project_id = ? WHERE id = ?", (project_id, chat_id))
+
+    # -- testing -------------------------------------------------------------
+    def create_test_suite(self, name: str) -> dict[str, Any]:
+        suite_id = f"ts_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                "INSERT INTO test_suites (id, name, created_at) VALUES (?, ?, ?)",
+                (suite_id, name, now),
+            )
+        return {"id": suite_id, "name": name, "created_at": now}
+
+    def list_test_suites(self) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT ts.*, 
+                       (SELECT COUNT(*) FROM test_queries tq WHERE tq.suite_id = ts.id) as query_count,
+                       (SELECT MAX(created_at) FROM test_runs tr WHERE tr.suite_id = ts.id) as last_run_at
+                FROM test_suites ts
+                ORDER BY ts.created_at DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_test_queries(self, suite_id: str, queries: list[dict[str, Any]]) -> None:
+        now = time.time()
+        entries = [
+            (
+                f"tq_{uuid.uuid4().hex[:10]}",
+                suite_id,
+                q["question"],
+                q.get("category", "Uncategorized"),
+                now,
+            )
+            for q in queries
+        ]
+        with self._conn() as con:
+            con.executemany(
+                "INSERT INTO test_queries (id, suite_id, question, category, created_at) VALUES (?, ?, ?, ?, ?)",
+                entries,
+            )
+
+    def list_test_queries(self, suite_id: str) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT * FROM test_queries WHERE suite_id = ? ORDER BY created_at ASC",
+                (suite_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_test_run(self, suite_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+        run_id = f"tr_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                "INSERT INTO test_runs (id, suite_id, snapshot_json, created_at) VALUES (?, ?, ?, ?)",
+                (run_id, suite_id, json.dumps(snapshot), now),
+            )
+        return {"id": run_id, "suite_id": suite_id, "snapshot": snapshot, "created_at": now}
+
+    def list_test_runs(self, suite_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM test_runs"
+        params = []
+        if suite_id:
+            query += " WHERE suite_id = ?"
+            params.append(suite_id)
+        query += " ORDER BY created_at DESC"
+        with self._conn() as con:
+            rows = con.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_test_evaluation(
+        self,
+        run_id: str,
+        query_id: str,
+        answer: str | None,
+        latency_ms: float | None,
+        grade: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        eval_id = f"ev_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO test_evaluations (id, run_id, query_id, answer, latency_ms, grade, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (eval_id, run_id, query_id, answer, latency_ms, grade, reason, now),
+            )
+
+    def list_test_evaluations(self, run_id: str) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT te.*, tq.question, tq.category
+                FROM test_evaluations te
+                JOIN test_queries tq ON te.query_id = tq.id
+                WHERE te.run_id = ?
+                ORDER BY te.created_at ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_user_feedback(
+        self,
+        chat_id: str | None,
+        message_id: str | None,
+        rating: int,
+        comment: str | None = None,
+    ) -> dict[str, Any]:
+        feedback_id = f"fb_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO user_feedback (id, chat_id, message_id, rating, comment, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (feedback_id, chat_id, message_id, rating, comment, now),
+            )
+        return {"id": feedback_id, "chat_id": chat_id, "rating": rating, "created_at": now}
+
+    def update_test_evaluation(self, evaluation_id: str, grade: str, reason: str | None = None) -> None:
+        with self._conn() as con:
+            con.execute(
+                "UPDATE test_evaluations SET grade = ?, reason = ? WHERE id = ?",
+                (grade, reason, evaluation_id),
+            )

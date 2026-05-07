@@ -1,11 +1,34 @@
 import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ProjectNote, ModelMode, InstructionsResponse } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY || "";
+const TOKEN_KEY = "datachat_user_token";
+
+export function getAuthToken(): string {
+  if (typeof window === "undefined" || typeof localStorage?.getItem !== "function") return "";
+  return localStorage.getItem(TOKEN_KEY) || "";
+}
+
+export function setAuthToken(token: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearAuthToken(): void {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(TOKEN_KEY);
+}
 
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...(extra || {}) };
-  if (API_KEY) h["Authorization"] = `Bearer ${API_KEY}`;
+  const token = getAuthToken();
+  if (token) h["Authorization"] = `Bearer ${token}`;
+
+  // Add admin token if present in localStorage
+  if (typeof window !== "undefined" && typeof localStorage?.getItem === "function") {
+    const adminToken = localStorage.getItem("datachat_admin_token");
+    if (adminToken) h["x-admin-token"] = adminToken;
+  }
+
   return h;
 }
 
@@ -32,6 +55,11 @@ async function jdelete(path: string): Promise<void> {
 
 export const api = {
   health: () => jget<{ status: string }>("/health"),
+  login: (email: string, password: string) => jpost<{ access_token: string; user: { id: string; email: string } }>("/auth/login", { email, password }),
+  register: (email: string, password: string) => jpost<{ access_token: string; user: { id: string; email: string } }>("/auth/register", { email, password }),
+  me: () => jget<{ user: { id: string; email: string } }>("/auth/me"),
+  adminLogin: (password: string) => jpost<{ token: string }>("/admin/login", { password }),
+  getAdminStats: () => jget<any>("/admin/stats"),
 
   listSources: (projectId?: string | null) =>
     jget<Source[]>(projectId ? `/sources?project_id=${encodeURIComponent(projectId)}` : "/sources"),
@@ -44,7 +72,8 @@ export const api = {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${BASE}/sources/upload`);
       xhr.responseType = "json";
-      if (API_KEY) xhr.setRequestHeader("Authorization", `Bearer ${API_KEY}`);
+      const token = getAuthToken();
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) {
           onProgress(Math.round((e.loaded / e.total) * 100));
@@ -163,6 +192,8 @@ export const api = {
       if (!r.ok) throw new Error(`${r.status}`);
       return r.json();
     }),
+  postFeedback: (body: { chat_id?: string | null; message_id?: string | null; rating: number; comment?: string }) =>
+    jpost<{ ok: boolean }>("/feedback", body),
 };
 
 export async function* streamQuery(

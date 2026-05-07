@@ -19,7 +19,7 @@ from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -537,6 +537,240 @@ def _serialize_mcp_connector(state: Any) -> dict[str, Any]:
     }
 
 
+def _verify_admin(request: Request):
+    token = request.headers.get("x-admin-token")
+    if not CONFIG.admin_password:
+        raise HTTPException(status_code=501, detail="Admin password not configured")
+
+    expected = hashlib.sha256(CONFIG.admin_password.encode()).hexdigest()
+    if token != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post("/admin/login")
+async def admin_login(body: AdminLogin) -> dict[str, str]:
+    if not CONFIG.admin_password:
+        raise HTTPException(status_code=501, detail="Admin password not configured on server")
+    if body.password == CONFIG.admin_password:
+        # In a real app, we'd use a JWT. For this internal tool, we'll return a simple token
+        # derived from the password to keep it stateless and simple.
+        return {"token": hashlib.sha256(CONFIG.admin_password.encode()).hexdigest()}
+    raise HTTPException(status_code=401, detail="Invalid admin password")
+
+
+@app.get("/admin/stats")
+async def admin_stats(request: Request) -> dict[str, Any]:
+    _verify_admin(request)
+
+    stats = {        "top_projects": [],
+        "top_sources": [],
+        "system_metrics": {
+            "total_chats": 0,
+            "total_messages": 0,
+            "avg_query_latency_ms": 0,
+            "avg_llm_latency_ms": 0,
+        },
+        "openrouter": {
+            "limit": None,
+            "usage": None,
+            "label": "Unknown",
+        }
+    }
+
+    with DB._conn() as con:
+        row = con.execute("SELECT COUNT(*) as c FROM chats").fetchone()
+        if row: stats["system_metrics"]["total_chats"] = row["c"]
+
+        row = con.execute("SELECT COUNT(*) as c FROM messages").fetchone()
+        if row: stats["system_metrics"]["total_messages"] = row["c"]
+
+        proj_rows = con.execute('''
+            SELECT p.title, COUNT(m.id) as msg_count
+            FROM projects p
+            JOIN chats c ON c.project_id = p.id
+            JOIN messages m ON m.chat_id = c.id
+            GROUP BY p.id
+            ORDER BY msg_count DESC
+            LIMIT 5
+        ''').fetchall()
+        stats["top_projects"] = [{"name": r["title"], "value": r["msg_count"]} for r in proj_rows]
+
+        src_rows = con.execute('''
+            SELECT s.name, COUNT(pf.id) as link_count
+            FROM sources s
+            JOIN project_files pf ON pf.source_id = s.id
+            GROUP BY s.id
+            ORDER BY link_count DESC
+            LIMIT 5
+        ''').fetchall()
+        stats["top_sources"] = [{"name": r["name"] or "Unnamed", "value": r["link_count"]} for r in src_rows]
+
+    if CONFIG.openrouter_api_key:
+        def fetch_or():
+            import urllib.request
+            req = urllib.request.Request(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {CONFIG.openrouter_api_key}"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read())
+        try:
+            data = await asyncio.to_thread(fetch_or)
+            d = data.get("data", {})
+            stats["openrouter"]["limit"] = d.get("limit")
+            stats["openrouter"]["usage"] = d.get("usage")
+            stats["openrouter"]["label"] = d.get("label", "Key")
+        except Exception as e:
+            logging.error(f"Failed to fetch OpenRouter stats: {e}")
+
+    try:
+        import collections
+        query_log_path = REPO_ROOT / "logs" / "query.log"
+        if query_log_path.exists():
+            with open(query_log_path, "r", encoding="utf-8") as f:
+                tail = collections.deque(f, maxlen=1000)
+            latencies = []
+            for line in tail:
+                try:
+                    parts = line.split(" query_executed ", 1)
+                    if len(parts) > 1:
+                        data = json.loads(parts[1])
+                        if "elapsed_ms" in data:
+                            latencies.append(data["elapsed_ms"])
+                except Exception:
+                    pass
+            if latencies:
+                stats["system_metrics"]["avg_query_latency_ms"] = round(sum(latencies) / len(latencies), 2)
+    except Exception:
+        pass
+
+    try:
+        import collections
+        llm_log_path = REPO_ROOT / "logs" / "llm.log"
+        if llm_log_path.exists():
+            with open(llm_log_path, "r", encoding="utf-8") as f:
+                tail = collections.deque(f, maxlen=1000)
+            latencies = []
+            for line in tail:
+                try:
+                    parts = line.split(" llm_generate_completed ", 1)
+                    if len(parts) > 1:
+                        data = json.loads(parts[1])
+                        if "elapsed_ms" in data:
+                            latencies.append(data["elapsed_ms"])
+                except Exception:
+                    pass
+            if latencies:
+                stats["system_metrics"]["avg_llm_latency_ms"] = round(sum(latencies) / len(latencies), 2)
+    except Exception:
+        pass
+
+    return stats
+
+
+@app.post("/admin/testing/suites")
+async def create_test_suite(body: TestSuiteCreate, request: Request):
+    _verify_admin(request)
+    return DB.create_test_suite(body.name)
+
+
+@app.get("/admin/testing/suites")
+async def list_test_suites(request: Request):
+    _verify_admin(request)
+    return DB.list_test_suites()
+
+
+@app.get("/admin/testing/suites/{suite_id}/queries")
+async def list_test_queries(suite_id: str, request: Request):
+    _verify_admin(request)
+    return DB.list_test_queries(suite_id)
+
+
+@app.post("/admin/testing/queries/bulk")
+async def add_test_queries_bulk(body: TestQueriesBulk, request: Request):
+    _verify_admin(request)
+    queries = []
+    if body.queries:
+        queries = body.queries
+    elif body.queries_text:
+        lines = [line.strip() for line in body.queries_text.split("\n") if line.strip()]
+        for line in lines:
+            if ":" in line and len(line.split(":", 1)[0]) < 30:
+                cat, q = line.split(":", 1)
+                queries.append({"question": q.strip(), "category": cat.strip()})
+            else:
+                queries.append({"question": line, "category": "Uncategorized"})
+    
+    if queries:
+        DB.add_test_queries(body.suite_id, queries)
+    return {"count": len(queries)}
+
+
+@app.post("/feedback")
+async def post_feedback(body: FeedbackRequest):
+    return DB.add_user_feedback(
+        chat_id=body.chat_id,
+        message_id=body.message_id,
+        rating=body.rating,
+        comment=body.comment
+    )
+
+
+@app.patch("/admin/testing/evaluations/{evaluation_id}")
+async def grade_evaluation(evaluation_id: str, body: TestEvaluationGrade, request: Request):
+    _verify_admin(request)
+    DB.update_test_evaluation(evaluation_id, body.grade, body.reason)
+    return {"ok": True}
+
+
+@app.post("/admin/testing/runs")
+async def start_test_run(body: dict, request: Request, background_tasks: BackgroundTasks):
+    _verify_admin(request)
+    suite_id = body.get("suite_id")
+    if not suite_id:
+        raise HTTPException(status_code=400, detail="suite_id required")
+    
+    active_row = DB.get_active_source()
+    snapshot = {
+        "model": CONFIG.model,
+        "agent_model": CONFIG.agent_model,
+        "active_source": active_row["name"] if active_row else None,
+        "active_source_id": active_row["id"] if active_row else None,
+    }
+    run = DB.create_test_run(suite_id, snapshot)
+    background_tasks.add_task(run_test_suite_background, run["id"], suite_id, snapshot)
+    return run
+
+
+@app.get("/admin/testing/runs")
+async def list_test_runs(request: Request, suite_id: str | None = None):
+    _verify_admin(request)
+    return DB.list_test_runs(suite_id)
+
+
+@app.get("/admin/testing/runs/{run_id}/evaluations")
+async def list_test_evaluations(run_id: str, request: Request):
+    _verify_admin(request)
+    return DB.list_test_evaluations(run_id)
+
+
+async def run_test_suite_background(run_id: str, suite_id: str, snapshot: dict):
+    queries = DB.list_test_queries(suite_id)
+    for q in queries:
+        start_time = time.time()
+        try:
+            # For now, we use a simple text generation to simulate the test
+            # In Phase 5+, we should integrate the full query_engine pipeline.
+            prompt = f"Answer this data question: {q['question']}"
+            answer = await asyncio.to_thread(ROUTER._generate_text, prompt, f"test_{run_id}_{q['id']}")
+            latency = (time.time() - start_time) * 1000
+            DB.add_test_evaluation(run_id, q["id"], answer, latency)
+        except Exception as e:
+            logging.error(f"Test run evaluation failed for query {q['id']}: {e}")
+            DB.add_test_evaluation(run_id, q["id"], f"Error: {str(e)}", (time.time() - start_time) * 1000, grade="Error")
+
+
+
 def _allowed_mcp_connector_ids_for_project(project_id: str | None) -> set[str]:
     return DB.allowed_mcp_connector_ids(project_id)
 
@@ -646,6 +880,32 @@ class ChatUpdateProject(BaseModel):
     project_id: str | None
 
 
+class AdminLogin(BaseModel):
+    password: str
+
+
+class TestSuiteCreate(BaseModel):
+    name: str
+
+
+class TestQueriesBulk(BaseModel):
+    suite_id: str
+    queries_text: str | None = None
+    queries: list[dict[str, Any]] | None = None
+
+
+class FeedbackRequest(BaseModel):
+    chat_id: str | None = None
+    message_id: str | None = None
+    rating: int
+    comment: str | None = None
+
+
+class TestEvaluationGrade(BaseModel):
+    grade: str # 'Pass', 'Fail', 'Partial', 'Error'
+    reason: str | None = None
+
+
 class QueryRequest(BaseModel):
     chat_id: str | None = None
     question: str
@@ -697,15 +957,15 @@ async def preview_source(source_id: str) -> dict[str, Any]:
         con.close()
     else:
         raise HTTPException(status_code=400, detail="Source not previewable")
-    
+
     # Format datetime columns to ISO strings
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             df[col] = df[col].astype(str).replace("NaT", "")
-            
+
     return {
-        "name": row["name"], 
-        "kind": row["kind"], 
+        "name": row["name"],
+        "kind": row["kind"],
         "rows": row["rows"],
         "columns": list(df.columns),
         "preview_rows": df.values.tolist(),
@@ -1108,7 +1368,7 @@ async def ensure_project_context(project_id: str):
     project = DB.get_project(project_id)
     if not project:
         return
-    
+
     pool = get_pool()
     for file_rec in project["files"]:
         path = None
@@ -1116,21 +1376,21 @@ async def ensure_project_context(project_id: str):
             path = UPLOAD_DIR / file_rec["source_id"]
         elif file_rec.get("file_path"):
             path = Path(file_rec["file_path"]).expanduser()
-        
+
         if not path or not path.exists():
             logging.warning(f"Project file not found: {path}")
             continue
-        
+
         # dedup_key matches the logic in attach_excel_mcp
         dedup_key = f"excel-mcp::{path.resolve()}::{path.stat().st_mtime_ns}::{file_rec['sheet_name'] or 0}"
-        
+
         # Check if already in pool
         exists = False
         for cid, s in pool.connectors.items():
             if getattr(s, "_dedup_key", None) == dedup_key:
                 exists = True
                 break
-        
+
         if not exists:
             try:
                 source = await asyncio.to_thread(prepare_excel_source, path, file_rec['sheet_name'], LOGGERS["cache"])
@@ -1145,7 +1405,7 @@ async def get_chat(chat_id: str) -> dict[str, Any]:
     chat = DB.get_chat(chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
     if chat.get("project_id"):
         await ensure_project_context(chat["project_id"])
 
@@ -1276,12 +1536,12 @@ def add_project_file(project_id: str, body: ProjectAddFile) -> dict[str, Any]:
     else:
         if not body.file_path:
             raise HTTPException(status_code=400, detail="file_path or source_id required")
-            
+
         path = Path(body.file_path).expanduser()
         if not path.exists():
             raise HTTPException(status_code=400, detail="File not found")
         res = DB.add_file_to_project(project_id, str(path), sheet_name=body.sheet)
-    
+
     # Auto-profile after adding a file
     try:
         project = DB.get_project(project_id)
@@ -1449,7 +1709,7 @@ async def attach_excel_mcp(body: AttachExcelMCP) -> dict[str, Any]:
         df = source.dataframe
         if df is None or df.empty:
             raise ValueError("Sheet has no data")
-        
+
         cid = await pool.connect_excel(df=df, display_name=path.name, dedup_key=dedup_key)
         state = pool.connectors[cid]
         _persist_mcp_state(state, scope="global")
@@ -1482,7 +1742,7 @@ async def use_connector(connector_id: str) -> dict[str, Any]:
 # -- query (SSE) -----------------------------------------------------------
 def _clean_column_name(name: str) -> str:
     name = str(name).strip()
-    
+
     # 1. If it has an explicit 'AS alias' or 'AS "alias"' or 'as alias', extract it.
     match = re.search(r'\b[aA][sS]\s+["\']?([^"\']+)["\']?$', name)
     if match:
@@ -1501,7 +1761,7 @@ def _clean_column_name(name: str) -> str:
         cleaned = re.sub(r'[\s_]+', ' ', cleaned).strip().title()
         if cleaned:
             return cleaned
-            
+
     return name
 
 
@@ -1555,15 +1815,15 @@ def _sanitize_assistant_text(text: str) -> str:
         first_bullet_idx = bullet_indices[0]
         # Keep first 5 bullets
         last_allowed_bullet_idx = bullet_indices[4]
-        
+
         new_lines = lines[:last_allowed_bullet_idx + 1]
         new_lines.append(f" (showing first 5 items out of {len(bullet_indices)})")
-        
+
         # Keep text after the last bullet
         last_bullet_idx = bullet_indices[-1]
         new_lines.extend(lines[last_bullet_idx + 1:])
         text = "\n".join(new_lines)
-    
+
     return text.strip()
 
 
@@ -1826,7 +2086,7 @@ async def _run_mcp_agent(
     agent = _get_domain_agent(chat_id)
     domain_prompt = agent.get_system_prompt() if agent else ""
     domain_tools = agent.get_tools() if agent else []
-    
+
     # Merge domain tools into the specs if any
     final_specs = specs + domain_tools
 
