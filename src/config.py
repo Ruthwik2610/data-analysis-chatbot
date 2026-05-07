@@ -41,6 +41,7 @@ class AppConfig:
     model: str
     agent_model: str
     prompt_char_budget: int
+    admin_password: str | None
     max_preview_rows: int = 100
 
     @classmethod
@@ -62,4 +63,5 @@ class AppConfig:
             model=os.getenv("MODEL", "openrouter/deepseek/deepseek-v4-pro"),
             agent_model=os.getenv("AGENT_MODEL", "openrouter/deepseek/deepseek-v4-pro"),
             prompt_char_budget=int(os.getenv("PROMPT_CHAR_BUDGET", "24000")),
+            admin_password=os.getenv("ADMIN_PASSWORD") or None,
         )
