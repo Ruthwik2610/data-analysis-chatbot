@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Database, Folder, MessageSquare, Plus, X, Eye, ChevronLeft, UserRound } from "lucide-react";
 import type { ChatSummary, Source, Project } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
@@ -24,6 +25,7 @@ interface SidebarProps {
   onDeleteProject: (id: string) => void;
   chatLoading?: boolean;
   onPreviewSource?: (id: string) => void;
+  userEmail?: string;
 }
 
 const KIND_COLOR: Record<string, string> = {
@@ -38,6 +40,7 @@ const KIND_COLOR: Record<string, string> = {
 };
 
 export function Sidebar(p: SidebarProps) {
+  const [clearConfirm, setClearConfirm] = useState(false);
   return (
     <aside
       className="flex flex-col flex-shrink-0"
@@ -51,20 +54,10 @@ export function Sidebar(p: SidebarProps) {
         className="flex items-center justify-between px-5 py-5"
         style={{ borderBottom: "1px solid var(--color-border-tertiary)" }}
       >
-        <div className="min-w-0">
-          <img
-            src="/unipro-full-logo.svg"
-            alt="Unipro"
-            className="logo-light"
-            style={{ width: 126, height: "auto", objectFit: "contain" }}
-          />
-          <img
-            src="/unipro-full-logo-dark.svg"
-            alt="Unipro"
-            className="logo-dark"
-            style={{ width: 126, height: "auto", objectFit: "contain" }}
-          />
-        </div>
+        <Link href="/" className="min-w-0" aria-label="Go to start">
+          <img src="/unipro-full-logo.svg" alt="Unipro" className="logo-light" style={{ width: 126, height: "auto", objectFit: "contain" }} />
+          <img src="/unipro-full-logo-dark.svg" alt="Unipro" className="logo-dark" style={{ width: 126, height: "auto", objectFit: "contain" }} />
+        </Link>
         <button
           className="h-8 w-8 rounded-full flex items-center justify-center transition-colors"
           title="Collapse sidebar"
@@ -77,9 +70,9 @@ export function Sidebar(p: SidebarProps) {
         </button>
       </div>
 
-      <div className="px-3 pt-4 pb-3">
+      <div className="relative px-3 pt-4 pb-3">
         <button
-          onClick={p.onNewChat}
+          onClick={() => setClearConfirm(true)}
           className="w-full flex items-center justify-center gap-2 px-3 py-3 text-[15px] font-semibold rounded-[12px] transition-colors"
           style={{
             border: "1px solid #1d4ed8",
@@ -93,6 +86,17 @@ export function Sidebar(p: SidebarProps) {
           <Plus size={18} strokeWidth={1.9} />
           <span>Clear screen</span>
         </button>
+        {clearConfirm && (
+          <ConfirmPopover
+            title="Clear this screen?"
+            body="Your saved chat history stays available."
+            onCancel={() => setClearConfirm(false)}
+            onConfirm={() => {
+              setClearConfirm(false);
+              p.onNewChat();
+            }}
+          />
+        )}
       </div>
 
       <div className="flex flex-col flex-1 overflow-y-auto scrollbar-thin pb-3">
@@ -170,7 +174,7 @@ export function Sidebar(p: SidebarProps) {
             <UserRound size={16} strokeWidth={1.7} />
           </div>
           <div className="min-w-0">
-            <div className="truncate text-[13px] font-semibold" style={{ color: "var(--color-text-primary)" }}>User Account</div>
+            <div className="truncate text-[13px] font-semibold" style={{ color: "var(--color-text-primary)" }}>{p.userEmail || "User Account"}</div>
             <div className="text-[11.5px]" style={{ color: "var(--color-text-tertiary)" }}>Private workspace</div>
           </div>
         </div>
@@ -194,6 +198,32 @@ export function Sidebar(p: SidebarProps) {
         </Link>
       </div>
     </aside>
+  );
+}
+
+function ConfirmPopover({
+  title,
+  body,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      className="absolute left-3 right-3 top-[76px] z-20 rounded-[12px] p-3 text-[12px]"
+      style={{ background: "var(--color-background-elevated)", border: "1px solid var(--color-border-secondary)", boxShadow: "var(--shadow-lg)" }}
+    >
+      <div className="font-semibold" style={{ color: "var(--color-text-primary)" }}>{title}</div>
+      <div className="mt-1" style={{ color: "var(--color-text-tertiary)" }}>{body}</div>
+      <div className="mt-3 flex justify-end gap-2">
+        <button type="button" onClick={onCancel} className="rounded-[8px] px-2.5 py-1.5" style={{ color: "var(--color-text-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Cancel</button>
+        <button type="button" onClick={onConfirm} className="rounded-[8px] px-2.5 py-1.5 font-medium" style={{ background: "#2563eb", color: "#ffffff" }}>Clear</button>
+      </div>
+    </div>
   );
 }
 
@@ -317,8 +347,9 @@ function KbRow({
   onDelete: () => void;
   onPreview?: () => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
   return (
-    <div className="group flex items-center gap-1.5 py-1.5">
+    <div className="group relative flex items-center gap-1.5 py-1.5">
         <button
           onClick={onToggle}
           className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-[12px]"
@@ -359,12 +390,22 @@ function KbRow({
       )}
       {source.kind !== "mcp" && (
         <button
-          onClick={onDelete}
+          onClick={() => setConfirming(true)}
           className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/5"
           title="Remove"
         >
           <X size={11} stroke="var(--color-text-tertiary)" />
         </button>
+      )}
+      {confirming && (
+        <div className="absolute right-0 top-7 z-20 w-[220px] rounded-[10px] p-3 text-[12px]" style={{ background: "var(--color-background-elevated)", border: "1px solid var(--color-border-secondary)", boxShadow: "var(--shadow-lg)" }}>
+          <div className="font-semibold" style={{ color: "var(--color-text-primary)" }}>Delete this file?</div>
+          <div className="mt-1" style={{ color: "var(--color-text-tertiary)" }}>This removes it from your workspace.</div>
+          <div className="mt-3 flex justify-end gap-2">
+            <button type="button" onClick={() => setConfirming(false)} className="rounded-[8px] px-2.5 py-1.5" style={{ color: "var(--color-text-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Cancel</button>
+            <button type="button" onClick={() => { setConfirming(false); onDelete(); }} className="rounded-[8px] px-2.5 py-1.5 font-medium" style={{ background: "#dc2626", color: "#ffffff" }}>Delete</button>
+          </div>
+        </div>
       )}
     </div>
   );

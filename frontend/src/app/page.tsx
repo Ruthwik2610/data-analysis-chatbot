@@ -4,13 +4,15 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { flushSync } from "react-dom";
 import { Sidebar } from "@/components/Sidebar";
 import { Topbar } from "@/components/Topbar";
+import { AuthScreen } from "@/components/AuthScreen";
 import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
 import { InputBar } from "@/components/InputBar";
 import { StreamingBar } from "@/components/StreamingBar";
 import { SourcePreviewDrawer } from "@/components/SourcePreviewDrawer";
+import ChatFeedback from "@/components/ChatFeedback";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
-import { api, streamQuery } from "@/lib/api";
+import { api, clearAuthToken, getAuthToken, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
 import { formatArchiveSkippedNote } from "@/lib/uploadMessages";
 import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
@@ -30,19 +32,39 @@ export default function Home() {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [modelMode, setModelMode] = useState<ModelMode>("flash");
   const [chatsReady, setChatsReady] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
+  const [user, setUser] = useState<{ id: string; email: string } | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [interactionCount, setInteractionCount] = useState(0);
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
 
   const refreshSources = useCallback(async () => {
+    if (!user) return;
     try { setSources(await api.listSources(currentProjectId)); } catch {}
-  }, [currentProjectId]);
+  }, [currentProjectId, user]);
   const refreshChats = useCallback(async () => {
+    if (!user) return;
     try { setChats(await api.listChats(currentProjectId)); } catch {}
     finally { setChatsReady(true); }
-  }, [currentProjectId]);
+  }, [currentProjectId, user]);
   const refreshProjects = useCallback(async () => {
+    if (!user) return;
     try { setProjects(await api.listProjects()); } catch {}
+  }, [user]);
+
+  useEffect(() => {
+    const token = getAuthToken();
+    if (!token) {
+      setAuthReady(true);
+      return;
+    }
+    api.me()
+      .then(({ user }) => setUser(user))
+      .catch(() => clearAuthToken())
+      .finally(() => setAuthReady(true));
   }, []);
 
   useEffect(() => { refreshSources(); refreshChats(); refreshProjects(); }, [refreshSources, refreshChats, refreshProjects]);
@@ -384,6 +406,15 @@ export default function Home() {
             } else if (ev.event === "done") {
               updateMessage(assistantId, { streaming: false, thinking: null });
               if (ev.data.chat_id) setCurrentChatId(ev.data.chat_id);
+              
+              setInteractionCount(prev => {
+                const next = prev + 1;
+                // Trigger every 5 interactions
+                if (next > 0 && next % 5 === 0) {
+                  setShowFeedback(true);
+                }
+                return next;
+              });
             }
           });
           if (ev.event === "done") refreshChats();
@@ -416,6 +447,20 @@ export default function Home() {
     uploadAbortRef.current?.abort();
     setLoading(false);
   }, []);
+
+  const handleLogout = useCallback(() => {
+    abortInFlight();
+    clearAuthToken();
+    setUser(null);
+    setChats([]);
+    setSources([]);
+    setProjects([]);
+    setMessages([]);
+    setCurrentChatId(null);
+    setCurrentProjectId(null);
+    setSelectedSourceIds([]);
+    setSidebarOpen(false);
+  }, [abortInFlight]);
 
   const handleNewChat = useCallback(() => {
     abortInFlight();
@@ -628,26 +673,38 @@ export default function Home() {
     loading,
   });
 
+  if (!authReady) {
+    return <div className="flex min-h-[100dvh] items-center justify-center text-[13px]" style={{ color: "var(--color-text-tertiary)" }}>Loading workspace...</div>;
+  }
+
+  if (!user) {
+    return <AuthScreen onAuthenticated={(nextUser) => setUser(nextUser)} />;
+  }
+
   return (
-    <div className="flex h-screen w-screen overflow-hidden relative">
-      <Sidebar
-        chats={chats}
-        currentChatId={currentChatId}
-        sources={sources}
-        selectedSourceIds={selectedSourceIds}
-        onNewChat={handleNewChat}
-        onSelectChat={handleSelectChat}
-        onDeleteChat={handleDeleteChat}
-        onToggleSource={handleToggleSource}
-        onDeleteSource={handleDeleteSource}
-        onPreviewSource={handlePreviewSource}
-        projects={projects}
-        currentProjectId={currentProjectId}
-        onSelectProject={handleSelectProject}
-        onNewProject={handleNewProject}
-        onDeleteProject={handleDeleteProject}
-        chatLoading={!chatsReady}
-      />
+    <div className="flex h-[100dvh] w-screen overflow-hidden relative">
+      {sidebarOpen && <button className="fixed inset-0 z-30 bg-black/20 lg:hidden" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)} />}
+      <div className={`fixed inset-y-0 left-0 z-40 transition-transform duration-200 lg:static lg:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
+        <Sidebar
+          chats={chats}
+          currentChatId={currentChatId}
+          sources={sources}
+          selectedSourceIds={selectedSourceIds}
+          onNewChat={() => { handleNewChat(); setSidebarOpen(false); }}
+          onSelectChat={(id) => { handleSelectChat(id); setSidebarOpen(false); }}
+          onDeleteChat={handleDeleteChat}
+          onToggleSource={handleToggleSource}
+          onDeleteSource={handleDeleteSource}
+          onPreviewSource={handlePreviewSource}
+          projects={projects}
+          currentProjectId={currentProjectId}
+          onSelectProject={(id) => { handleSelectProject(id); setSidebarOpen(false); }}
+          onNewProject={handleNewProject}
+          onDeleteProject={handleDeleteProject}
+          chatLoading={!chatsReady}
+          userEmail={user.email}
+        />
+      </div>
       <main className="flex flex-col flex-1 min-w-0 relative" style={{ background: "var(--color-background-primary)" }}>
         <StreamingBar visible={loading} />
         <Topbar  
@@ -655,6 +712,9 @@ export default function Home() {
           activeSource={activeSource} 
           selectedSources={selectedSources}
           projectName={projects.find(p => p.id === currentProjectId)?.title}
+          userEmail={user.email}
+          onLogout={handleLogout}
+          onOpenSidebar={() => setSidebarOpen(true)}
         />
         <MessageList
           messages={messages}
@@ -696,6 +756,13 @@ export default function Home() {
         data={previewData}
         loading={previewLoading}
       />
+      {showFeedback && (
+        <ChatFeedback 
+          chatId={currentChatId} 
+          messageId={messages.filter(m => m.role === "assistant").slice(-1)[0]?.id || null} 
+          onClose={() => setShowFeedback(false)} 
+        />
+      )}
     </div>
   );
 }

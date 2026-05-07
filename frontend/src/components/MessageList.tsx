@@ -196,7 +196,7 @@ function FallbackNotice({ notice }: { notice: ModelFallbackNotice }) {
 
 function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => void; onConnectClick: () => void }) {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center px-5 py-10 fade-in sm:px-8">
+    <div className="hero-stage flex-1 flex flex-col items-center justify-center px-4 py-8 fade-in sm:px-8">
       <div className="w-full max-w-[880px] text-center">
         <div
           className="mx-auto mb-7 inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[12px] font-medium"
@@ -209,17 +209,17 @@ function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => voi
           <Sparkles size={13} strokeWidth={1.7} />
           Unipro AI Workspace
         </div>
-        <h1 className="mx-auto max-w-[820px] text-[42px] font-bold leading-[1.08] sm:text-[58px]" style={{ color: "var(--color-text-primary)", letterSpacing: 0 }}>
+        <h1 className="mx-auto max-w-[820px] text-[34px] font-bold leading-[1.08] sm:text-[58px]" style={{ color: "var(--color-text-primary)", letterSpacing: 0 }}>
           Analyze your business data with AI.
         </h1>
-        <p className="mx-auto mt-7 max-w-[680px] text-[18px] leading-[1.65]" style={{ color: "var(--color-text-secondary)" }}>
+        <p className="mx-auto mt-5 max-w-[680px] text-[15px] leading-[1.65] sm:mt-7 sm:text-[18px]" style={{ color: "var(--color-text-secondary)" }}>
           Upload files, connect APIs, and generate intelligent insights instantly.
         </p>
       </div>
 
       <div
         data-testid="empty-action-grid"
-        className="mt-14 flex w-full max-w-[864px] flex-col gap-0 overflow-hidden rounded-[22px] sm:flex-row"
+        className="hero-console mt-10 flex w-full max-w-[864px] flex-col gap-0 overflow-hidden rounded-[18px] sm:mt-14 sm:flex-row sm:rounded-[22px]"
         style={{
           background: "var(--color-background-elevated)",
           border: "1px solid var(--color-border-secondary)",
