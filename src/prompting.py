@@ -98,11 +98,13 @@ def build_intent_prompt(
       - If the user phrases the question as a sort ("sort by payment method by highest revenue"), metric_column is the thing being sorted (e.g. revenue), the dimension is the grouping (e.g. payment_mode), sort is desc.
       - Filters must use real column names from the schema. Date filters use the date column from the schema (often named order_datetime/order_date/created_at/...) with ISO values like "2025-10-01". For "October 2025" → between "2025-10-01" and "2025-10-31"; for "in 2025" → between "2025-01-01" and "2025-12-31".
       - IDENTIFIER FILTERS: when the user writes an identifier value (email, "PREFIX-1234", long alphanumeric token, or "<column> <number>"), emit it as an equality filter on the schema column whose name + role matches the value's shape. Use the EXACT value the user typed; never reformat or invent IDs. If no schema column aligns, drop the filter rather than guessing. Bare numbers ("12345") need an explicit column word in the question ("customer 12345" → cust_key=12345); never filter on a lone number. Set intent_type="lookup" only when the question is essentially "show the record matching this identifier" with no aggregation; otherwise keep the aggregate intent and add the identifier to filters.
-      - MULTI-STEP: pick intent_type="multi_step" ONLY when the question chains two sequential questions where the second depends on the first's result. Examples:
+      - MULTI-STEP: pick intent_type="multi_step" for chained questions, advanced statistical analysis (variance, coefficient of variation), relationship/basket analysis (items purchased together), and business insight generation. Examples:
         - "which month had the highest sales AND in that month which product contributed most"
-        - "find the top customer, then show their order history"
-        - "for the peak day, what were the top 5 categories"
-        Single questions with one aggregation are NOT multi_step. Pure top-N is NOT multi_step. Pure trend is NOT multi_step. When unsure, prefer the more specific intent_type (aggregate/trend/lookup).
+        - "show products where the selling rate variation exceeds 20% coefficient of variation"
+        - "which products are frequently purchased together in the same invoice"
+        - "give 5 business insights and recommendations from this data"
+        - "give me a timetable by professor" or "pivot the table to show class schedule"
+        Single questions with one basic aggregation are NOT multi_step.
     </rule>
     <rule>Prefer the lightest representation. A top 3 answer should be a compact table/card unless the user explicitly asks for a chart.</rule>
     <rule>PII can be included only when the user explicitly asks for a row-level lookup or personal field.</rule>
@@ -198,14 +200,19 @@ Columns:
 - Monthly grouping: date_trunc('month', "date_col").
 - Always include a LIMIT (default 100).
 
-## Multi-step strategy
+## Multi-step & Analytics strategy
 For compound questions like "which month had the most X AND in that month which Y":
 1. First call run_sql to find the anchor (e.g. peak month).
-2. Read the result, then call run_sql again parameterized by that anchor (substitute the literal value into the WHERE clause).
+2. Read the result, then call run_sql again parameterized by that anchor.
 3. Stop after the data you need is fetched. Don't make redundant calls.
 
+- Business Insights: If asked for insights or recommendations, write exploratory queries to find top performers, anomalies, or correlations, and then synthesize them. DO NOT refuse to generate insights.
+- Basket Analysis: If asked what items are purchased together, perform a self-join on the invoice/order ID column to find top pairs.
+- Statistical Analysis: If asked about variation or significance, use DuckDB's statistical functions like STDDEV(col)/AVG(col) for Coefficient of Variation.
+- Pivoting / Timetables: If asked for a timetable or to pivot the data, reshape the data using DuckDB's PIVOT. Example: PIVOT table_name ON column_to_become_columns USING first(value) GROUP BY column_to_become_rows. Ensure the query outputs the full cross-tabulated table.
+
 ## How to respond
-- BREVITY: one short sentence weaving BOTH findings together (e.g. "July 2015 led with $X — within that month, Pepperoni Pizza topped at $Y.").
+- BREVITY: one short sentence weaving BOTH findings together (e.g. "July 2015 led with $X — within that month, Pepperoni Pizza topped at $Y."). Exception: if the user explicitly asks for multiple insights or a list, you may use a brief bulleted list.
 - The user already sees the final table beneath your reply — do NOT echo rows or write a markdown table.
 - Empty result → "No matching rows."
 - Never mention "tool", "SQL", "run_sql", "query", or other infrastructure names — speak naturally about the data.

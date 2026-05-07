@@ -36,18 +36,12 @@ function renderSidebar() {
 }
 
 describe("Sidebar", () => {
-  it("uses tabs to switch between chats, projects, and sources", () => {
+  it("places chats, projects, and sources in one premium sidebar", () => {
     renderSidebar();
 
-    expect(screen.getByRole("tab", { name: "Chats" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("tab", { name: "Chats" })).not.toBeInTheDocument();
     expect(screen.getByText("Pizza margin review")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("tab", { name: "Projects" }));
-    expect(screen.getByRole("tab", { name: "Projects" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("Restaurant ops")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("tab", { name: "Sources" }));
-    expect(screen.getByRole("tab", { name: "Sources" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("pizza_sales")).toBeInTheDocument();
     expect(screen.queryByText("pizza_sales.csv")).not.toBeInTheDocument();
   });

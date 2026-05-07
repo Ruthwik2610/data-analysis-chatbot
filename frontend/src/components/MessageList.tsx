@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { AlertTriangle, Paperclip, Plug } from "lucide-react";
+import { AlertTriangle, ArrowRight, Paperclip, Plug, Sparkles } from "lucide-react";
 import type { Message, ModelFallbackNotice } from "@/lib/types";
 import { ResultBlock } from "./ResultBlock";
 import { InlineQuestion } from "./InlineQuestion";
@@ -56,22 +56,27 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
   }
 
   return (
-    <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-5 flex flex-col gap-4">
-      {messages.map((msg, idx) => (
-        <>
-          <Bubble
-            key={msg.id}
-            message={msg}
-            onChoose={(v) => onPendingChoice(msg.id, v)}
-            currentProjectId={currentProjectId}
-            onSaveProjectNote={onSaveProjectNote}
-            onAskFollowUp={onAskFollowUp}
-          />
-          {idx === lastResultIdx && onAskFollowUp && (
-            <FollowUpChips key={`chips-${msg.id}`} onSelect={onAskFollowUp} />
-          )}
-        </>
-      ))}
+    <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-5 flex flex-col">
+      {messages.map((msg, idx) => {
+        const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
+        const isFirst = idx === 0;
+        return (
+          <div key={msg.id} className={`flex flex-col w-full ${isFirst ? "" : isConsecutive ? "mt-1.5" : "mt-6"}`}>
+            <Bubble
+              message={msg}
+              onChoose={(v) => onPendingChoice(msg.id, v)}
+              currentProjectId={currentProjectId}
+              onSaveProjectNote={onSaveProjectNote}
+              onAskFollowUp={onAskFollowUp}
+            />
+            {idx === lastResultIdx && onAskFollowUp && (
+              <div className="mt-4">
+                <FollowUpChips key={`chips-${msg.id}`} onSelect={onAskFollowUp} />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -189,86 +194,98 @@ function FallbackNotice({ notice }: { notice: ModelFallbackNotice }) {
   );
 }
 
-function timeOfDayGreeting(): string {
-  const h = new Date().getHours();
-  if (h < 5) return "Working late?";
-  if (h < 12) return "Good morning.";
-  if (h < 17) return "Good afternoon.";
-  if (h < 21) return "Good evening.";
-  return "Hi there.";
-}
-
 function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => void; onConnectClick: () => void }) {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center px-5 py-10 gap-6 fade-in sm:px-8">
-      <div className="text-center max-w-[480px] flex flex-col items-center">
-        <img src="/unipro-full-logo.svg" alt="Unipro Technologies Limited" className="logo-light h-24 max-w-[320px] object-contain mb-6 sm:h-28" />
-        <img src="/unipro-full-logo-dark.svg" alt="Unipro Technologies Limited" className="logo-dark h-24 max-w-[320px] object-contain mb-6 sm:h-28" />
-        <h2 className="text-[26px] font-medium mb-2" style={{ color: "var(--color-text-primary)" }}>
-          {timeOfDayGreeting()}
-        </h2>
-        <p className="text-[14px]" style={{ color: "var(--color-text-secondary)" }}>
-          Ask plain-English questions about your data. I&apos;ll analyze it, summarize what matters, and chart the result.
+    <div className="flex-1 flex flex-col items-center justify-center px-5 py-10 fade-in sm:px-8">
+      <div className="w-full max-w-[880px] text-center">
+        <div
+          className="mx-auto mb-7 inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[12px] font-medium"
+          style={{
+            background: "var(--color-background-secondary)",
+            border: "1px solid var(--color-border-secondary)",
+            color: "var(--color-text-secondary)",
+          }}
+        >
+          <Sparkles size={13} strokeWidth={1.7} />
+          Unipro AI Workspace
+        </div>
+        <h1 className="mx-auto max-w-[820px] text-[42px] font-bold leading-[1.08] sm:text-[58px]" style={{ color: "var(--color-text-primary)", letterSpacing: 0 }}>
+          Analyze your business data with AI.
+        </h1>
+        <p className="mx-auto mt-7 max-w-[680px] text-[18px] leading-[1.65]" style={{ color: "var(--color-text-secondary)" }}>
+          Upload files, connect APIs, and generate intelligent insights instantly.
         </p>
-        <div className="mt-4 flex flex-wrap justify-center gap-1.5 text-[12px]" style={{ color: "var(--color-text-secondary)" }}>
-          <span className="rounded-full px-2 py-1" style={{ background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)" }}>Top 10 by revenue</span>
-          <span className="rounded-full px-2 py-1" style={{ background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)" }}>Find anomalies</span>
-          <span className="rounded-full px-2 py-1" style={{ background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)" }}>Compare periods</span>
+      </div>
+
+      <div
+        data-testid="empty-action-grid"
+        className="mt-14 flex w-full max-w-[864px] flex-col gap-0 overflow-hidden rounded-[22px] sm:flex-row"
+        style={{
+          background: "var(--color-background-elevated)",
+          border: "1px solid var(--color-border-secondary)",
+          boxShadow: "var(--shadow-xl)",
+        }}
+      >
+        <div className="flex flex-1 flex-col">
+          <div className="flex flex-wrap items-center gap-2 px-6 py-4" style={{ borderBottom: "1px solid var(--color-border-tertiary)" }}>
+            <FilePickButton
+              onPick={onPickFile}
+              variant="card"
+              title="Attach a file"
+              className="inline-flex items-center gap-2 rounded-[12px] px-3 py-2 text-[13px] font-medium transition-colors"
+            >
+              <Paperclip size={15} strokeWidth={1.7} />
+              Upload
+            </FilePickButton>
+            <button
+              onClick={onConnectClick}
+              className="inline-flex items-center gap-2 rounded-[12px] px-3 py-2 text-[13px] font-medium transition-colors"
+              style={{
+                border: "1px solid var(--color-border-secondary)",
+                background: "var(--color-background-secondary)",
+                color: "var(--color-text-secondary)",
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--color-border-primary)")}
+              onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--color-border-secondary)")}
+            >
+              <Plug size={15} strokeWidth={1.7} />
+              Connect API
+            </button>
+            <span
+              className="ml-auto hidden rounded-[12px] px-3 py-2 text-[13px] font-medium sm:inline-flex"
+              style={{
+                background: "#eff6ff",
+                border: "1px solid rgba(37, 99, 235, 0.18)",
+                color: "#1d4ed8",
+              }}
+            >
+              Flash / Pro ready
+            </span>
+          </div>
+          <div className="flex items-center gap-3 px-6 py-6 text-left">
+            <div className="min-w-0 flex-1 text-[18px]" style={{ color: "var(--color-text-tertiary)" }}>
+              Ask anything about your data...
+            </div>
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent("data-chat:focus-input"))}
+              className="h-10 w-10 flex-shrink-0 rounded-[12px] flex items-center justify-center transition-colors"
+              title="Focus composer"
+              style={{ background: "#2563eb", color: "#ffffff", boxShadow: "0 14px 26px -18px rgba(37, 99, 235, 0.9)" }}
+            >
+              <ArrowRight size={18} strokeWidth={2} />
+            </button>
+          </div>
         </div>
       </div>
 
-      <div data-testid="empty-action-grid" className="flex flex-col gap-3 w-full max-w-[480px] sm:flex-row">
-        <FilePickButton
-          onPick={onPickFile}
-          variant="card"
-          title="Attach a file"
-          className="flex-1 flex flex-col items-center gap-2 px-4 py-5 rounded-[14px] transition-all"
-        >
-          <CardInner icon={<Paperclip size={18} strokeWidth={1.4} />} label="Attach a file" sub="CSV, Excel, PDF, ZIP/7z, database, JSON" />
-        </FilePickButton>
-        <button
-          onClick={onConnectClick}
-          className="flex-1 flex flex-col items-center gap-2 px-4 py-5 rounded-[14px] transition-all"
-          style={{
-            border: "0.5px solid var(--color-border-secondary)",
-            background: "var(--color-background-primary)",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--color-border-primary)")}
-          onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--color-border-secondary)")}
-        >
-          <CardInner icon={<Plug size={18} strokeWidth={1.4} />} label="Connect an API" sub="URL, with optional bearer" />
-        </button>
+      <div className="mt-5 text-[13px]" style={{ color: "var(--color-text-tertiary)" }}>
+        Powered by advanced AI • Secure • Private
       </div>
 
-      <div className="text-[11.5px] text-center" style={{ color: "var(--color-text-tertiary)" }}>
-        Paste a URL in chat to connect to an API on the fly.
-      </div>
-    </div>
-  );
-}
-
-function CardInner({ icon, label, sub }: { icon: React.ReactNode; label: string; sub: string }) {
-  return (
-    <div
-      className="w-full flex flex-col items-center gap-2"
-      style={{ color: "var(--color-text-primary)" }}
-    >
-      <div
-        style={{
-          width: 32,
-          height: 32,
-          borderRadius: 10,
-          background: "var(--color-background-secondary)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        {icon}
-      </div>
-      <div className="text-[13.5px] font-medium">{label}</div>
-      <div className="max-w-full text-center text-[11.5px]" style={{ color: "var(--color-text-secondary)" }}>
-        {sub}
+      <div className="mt-6 flex flex-wrap justify-center gap-2 text-[12px]" style={{ color: "var(--color-text-secondary)" }}>
+        <span className="rounded-full px-3 py-1.5" style={{ background: "var(--color-background-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Top 10 by revenue</span>
+        <span className="rounded-full px-3 py-1.5" style={{ background: "var(--color-background-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Find anomalies</span>
+        <span className="rounded-full px-3 py-1.5" style={{ background: "var(--color-background-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Compare periods</span>
       </div>
     </div>
   );

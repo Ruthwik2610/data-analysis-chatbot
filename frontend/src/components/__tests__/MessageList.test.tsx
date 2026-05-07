@@ -98,6 +98,22 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByTestId("empty-action-grid")).toHaveClass("flex-col", "sm:flex-row");
   });
 
+  it("renders the premium Unipro empty-state hero", () => {
+    render(
+      <MessageList
+        messages={[]}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: /Analyze your business data with AI/i })).toBeInTheDocument();
+    expect(screen.getByText("Upload files, connect APIs, and generate intelligent insights instantly.")).toBeInTheDocument();
+    expect(screen.getByText("Powered by advanced AI • Secure • Private")).toBeInTheDocument();
+  });
+
   it("shows answer actions for assistant text and project saves", () => {
     render(
       <MessageList

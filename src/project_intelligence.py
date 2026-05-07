@@ -220,7 +220,10 @@ def build_instruction_context(
     project_raw = dict(project_instructions or {})
     project_clean = normalize_instructions(project_raw, allowed_columns)
     if project_raw.get("category"):
-        project_clean["category"] = str(project_raw.get("category"))[:80]
+        category = str(project_raw.get("category"))[:80]
+        project_clean["category"] = category
+        if category == "education":
+            project_clean["education_context"] = "This is an education dataset. If asked for a timetable or schedule by an entity (like professor or class), generate a PIVOT query to draw a whole table with days/hours as columns and the entity as rows."
     if project_raw.get("notes"):
         project_clean["notes"] = str(project_raw.get("notes"))[:800]
     payload = {

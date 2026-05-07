@@ -70,13 +70,14 @@ export function InputBar({
   };
 
   return (
-    <div className="px-4 py-3 relative" style={{ borderTop: "0.5px solid var(--color-border-tertiary)" }}>
+    <div className="px-6 py-4 relative" style={{ background: "var(--color-background-primary)", borderTop: "1px solid var(--color-border-tertiary)" }}>
       <div
-        className="flex flex-col gap-2 px-3 py-2 relative"
+        className="mx-auto flex max-w-[920px] flex-col gap-2 px-4 py-3 relative"
         style={{
-          background: "var(--color-background-secondary)",
-          border: "0.5px solid var(--color-border-secondary)",
-          borderRadius: 14,
+          background: "var(--color-background-elevated)",
+          border: "1px solid var(--color-border-secondary)",
+          borderRadius: 18,
+          boxShadow: "var(--shadow-lg)",
         }}
       >
         <div role="toolbar" aria-label="Composer actions" className="flex flex-wrap items-center gap-1.5">
@@ -99,7 +100,7 @@ export function InputBar({
             className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[8px] text-[11.5px] transition-colors flex-shrink-0"
             style={{
               color: popOpen ? "var(--color-text-primary)" : "var(--color-text-secondary)",
-              background: popOpen ? "var(--color-background-primary)" : "transparent",
+              background: popOpen ? "var(--color-background-secondary)" : "transparent",
             }}
           >
             <Plug size={13} strokeWidth={1.5} />
@@ -116,7 +117,7 @@ export function InputBar({
             className="ml-auto inline-flex items-center gap-1.5 rounded-[8px] px-1.5 py-1 text-[11.5px]"
             style={{
               color: "var(--color-text-secondary)",
-              background: "var(--color-background-primary)",
+              background: "var(--color-background-secondary)",
               border: "0.5px solid var(--color-border-tertiary)",
             }}
           >
@@ -186,13 +187,13 @@ export function InputBar({
             rows={1}
             placeholder={placeholder || "Ask about your data, drop a file, or paste a URL…"}
             disabled={disabled}
-            className="flex-1 resize-none bg-transparent outline-none text-[13px] leading-[1.5] py-1"
+            className="flex-1 resize-none bg-transparent outline-none text-[15px] leading-[1.5] py-2 focus:ring-2 focus:ring-[var(--color-border-info)] focus:rounded-sm transition-shadow"
             style={{ color: "var(--color-text-primary)" }}
           />
           {loading && onStop ? (
             <button
               onClick={onStop}
-              className="w-7 h-7 rounded-[8px] flex items-center justify-center flex-shrink-0 transition-colors"
+              className="w-9 h-9 rounded-[12px] flex items-center justify-center flex-shrink-0 transition-colors"
               style={{
                 background: "var(--color-text-primary)",
                 color: "var(--color-background-primary)",
@@ -206,10 +207,10 @@ export function InputBar({
             <button
               onClick={submit}
               disabled={disabled || !value.trim()}
-              className="w-7 h-7 rounded-[8px] flex items-center justify-center flex-shrink-0 transition-opacity"
+              className="w-9 h-9 rounded-[12px] flex items-center justify-center flex-shrink-0 transition-all duration-200 ease-in-out hover:scale-105 active:scale-95"
               style={{
-                background: "var(--color-text-primary)",
-                color: "var(--color-background-primary)",
+                background: "#2563eb",
+                color: "#ffffff",
                 opacity: !value.trim() || disabled ? 0.3 : 1,
                 cursor: !value.trim() || disabled ? "default" : "pointer",
               }}

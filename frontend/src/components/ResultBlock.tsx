@@ -46,11 +46,11 @@ export function ResultBlock({ result }: ResultBlockProps) {
     <div
       className="mt-2 fade-in"
       style={{
-        background: "var(--color-background-secondary)",
-        border: "0.5px solid var(--color-border-tertiary)",
-        borderRadius: 14,
-        padding: 14,
-        boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+        background: "var(--color-background-elevated)",
+        border: "1px solid var(--color-border-secondary)",
+        borderRadius: 18,
+        padding: 16,
+        boxShadow: "var(--shadow-md)",
       }}
     >
       <div className="flex items-center justify-between mb-2.5">

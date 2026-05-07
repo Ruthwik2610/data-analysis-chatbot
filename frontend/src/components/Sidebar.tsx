@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
-import { Database, Folder, MessageSquare, Plus, X, Eye } from "lucide-react";
+import { Database, Folder, MessageSquare, Plus, X, Eye, ChevronLeft, UserRound } from "lucide-react";
 import type { ChatSummary, Source, Project } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
 import { SkeletonChatList } from "./SkeletonLoader";
+import Link from "next/link";
 import clsx from "clsx";
 
 interface SidebarProps {
@@ -38,144 +38,162 @@ const KIND_COLOR: Record<string, string> = {
 };
 
 export function Sidebar(p: SidebarProps) {
-  const [tab, setTab] = useState<"chats" | "projects" | "sources">("chats");
-
   return (
     <aside
       className="flex flex-col flex-shrink-0"
       style={{
-        width: 240,
+        width: 280,
         background: "var(--color-background-secondary)",
-        borderRight: "0.5px solid var(--color-border-tertiary)",
+        borderRight: "1px solid var(--color-border-secondary)",
       }}
     >
       <div
-        className="flex items-center gap-2 px-4 pb-3 pt-4 text-[13px] font-medium"
-        style={{ borderBottom: "0.5px solid var(--color-border-tertiary)", color: "var(--color-text-primary)" }}
+        className="flex items-center justify-between px-5 py-5"
+        style={{ borderBottom: "1px solid var(--color-border-tertiary)" }}
       >
-        <img src="/unipro-icon.svg" alt="Unipro" className="w-6 h-6" />
-        Unipro Chat
-      </div>
-
-      <div className="px-3 pt-3 pb-2">
+        <div className="min-w-0">
+          <img
+            src="/unipro-full-logo.svg"
+            alt="Unipro"
+            className="logo-light"
+            style={{ width: 126, height: "auto", objectFit: "contain" }}
+          />
+          <img
+            src="/unipro-full-logo-dark.svg"
+            alt="Unipro"
+            className="logo-dark"
+            style={{ width: 126, height: "auto", objectFit: "contain" }}
+          />
+        </div>
         <button
-          onClick={p.onNewChat}
-          className="w-full flex items-center gap-2 px-3 py-[7px] text-[13px] rounded-[10px] transition-colors"
-          style={{
-            border: "0.5px solid var(--color-border-secondary)",
-            color: "var(--color-text-secondary)",
-            background: "transparent",
-          }}
+          className="h-8 w-8 rounded-full flex items-center justify-center transition-colors"
+          title="Collapse sidebar"
+          aria-label="Collapse sidebar"
+          style={{ color: "var(--color-text-tertiary)", background: "transparent" }}
           onMouseEnter={(e) => (e.currentTarget.style.background = "var(--color-background-primary)")}
           onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
         >
-          <Plus size={12} strokeWidth={1.5} />
-          Clear screen
+          <ChevronLeft size={16} strokeWidth={1.7} />
         </button>
       </div>
 
-      <div role="tablist" aria-label="Sidebar sections" className="grid grid-cols-3 gap-1 px-3 py-2">
-        <SidebarTab label="Chats" icon={<MessageSquare size={12} />} selected={tab === "chats"} onClick={() => setTab("chats")} />
-        <SidebarTab label="Projects" icon={<Folder size={12} />} selected={tab === "projects"} onClick={() => setTab("projects")} />
-        <SidebarTab label="Sources" icon={<Database size={12} />} selected={tab === "sources"} onClick={() => setTab("sources")} />
+      <div className="px-3 pt-4 pb-3">
+        <button
+          onClick={p.onNewChat}
+          className="w-full flex items-center justify-center gap-2 px-3 py-3 text-[15px] font-semibold rounded-[12px] transition-colors"
+          style={{
+            border: "1px solid #1d4ed8",
+            color: "#ffffff",
+            background: "#2563eb",
+            boxShadow: "0 16px 30px -22px rgba(37, 99, 235, 0.9)",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "#1d4ed8")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "#2563eb")}
+        >
+          <Plus size={18} strokeWidth={1.9} />
+          <span>Clear screen</span>
+        </button>
       </div>
 
       <div className="flex flex-col flex-1 overflow-y-auto scrollbar-thin pb-3">
-        {tab === "chats" && (
+        <div className="flex items-center justify-between pr-3">
+          <SectionLabel>Today</SectionLabel>
+          <button
+            onClick={p.onNewChat}
+            className="p-1.5 rounded-full transition-colors"
+            title="New chat"
+            style={{ color: "var(--color-text-tertiary)" }}
+          >
+            <Plus size={13} />
+          </button>
+        </div>
+        {p.chatLoading ? (
+          <SkeletonChatList />
+        ) : (
           <>
-            <div className="flex items-center justify-between pr-3">
-              <SectionLabel>Recents</SectionLabel>
-              <button
-                onClick={p.onNewChat}
-                className="p-1 rounded hover:bg-black/5"
-                title="New chat"
-              >
-                <Plus size={12} stroke="var(--color-text-tertiary)" />
-              </button>
-            </div>
-            {p.chatLoading ? (
-              <SkeletonChatList />
-            ) : (
-              <>
-                {p.chats.length === 0 && <EmptyState>No chats yet</EmptyState>}
-                {p.chats.map((chat) => (
-                  <ChatRow
-                    key={chat.id}
-                    chat={chat}
-                    isActive={chat.id === p.currentChatId}
-                    onSelect={() => p.onSelectChat(chat.id)}
-                    onDelete={() => p.onDeleteChat(chat.id)}
-                  />
-                ))}
-              </>
-            )}
-          </>
-        )}
-
-        {tab === "projects" && (
-          <>
-            <div className="flex items-center justify-between pr-3">
-              <SectionLabel>Projects</SectionLabel>
-              <button onClick={p.onNewProject} className="p-1 rounded hover:bg-black/5" title="New Project">
-                <Plus size={12} stroke="var(--color-text-tertiary)" />
-              </button>
-            </div>
-            {p.projects.length === 0 && (
-              <EmptyState>No projects</EmptyState>
-            )}
-            {p.projects.map((project) => (
-              <ProjectRow
-                key={project.id}
-                project={project}
-                isActive={project.id === p.currentProjectId}
-                onSelect={() => p.onSelectProject(project.id)}
-                onDelete={() => p.onDeleteProject(project.id)}
+            {p.chats.length === 0 && <EmptyState>No chats yet</EmptyState>}
+            {p.chats.map((chat) => (
+              <ChatRow
+                key={chat.id}
+                chat={chat}
+                isActive={chat.id === p.currentChatId}
+                onSelect={() => p.onSelectChat(chat.id)}
+                onDelete={() => p.onDeleteChat(chat.id)}
               />
             ))}
           </>
         )}
 
-        {tab === "sources" && (
-          <>
-            <SectionLabel>Sources</SectionLabel>
-            {p.sources.length === 0 && (
-              <EmptyState>No sources attached</EmptyState>
-            )}
-            <div className="px-3">
-              {p.sources.map((src) => (
-                <KbRow
-                  key={src.id}
-                  source={src}
-                  selected={p.selectedSourceIds.includes(src.id)}
-                  onToggle={() => p.onToggleSource(src.id)}
-                  onDelete={() => p.onDeleteSource(src.id)}
-                  onPreview={() => p.onPreviewSource?.(src.id)}
-                />
-              ))}
-            </div>
-          </>
+        <div className="mt-4 flex items-center justify-between pr-3">
+          <SectionLabel>Projects</SectionLabel>
+          <button onClick={p.onNewProject} className="p-1.5 rounded-full transition-colors" title="New Project" style={{ color: "var(--color-text-tertiary)" }}>
+            <Plus size={13} />
+          </button>
+        </div>
+        {p.projects.length === 0 && (
+          <EmptyState>No projects</EmptyState>
         )}
+        {p.projects.slice(0, 5).map((project) => (
+          <ProjectRow
+            key={project.id}
+            project={project}
+            isActive={project.id === p.currentProjectId}
+            onSelect={() => p.onSelectProject(project.id)}
+            onDelete={() => p.onDeleteProject(project.id)}
+          />
+        ))}
+
+        <div className="mt-4">
+          <SectionLabel>Sources</SectionLabel>
+        </div>
+        {p.sources.length === 0 && (
+          <EmptyState>No sources attached</EmptyState>
+        )}
+        <div className="px-3">
+          {p.sources.slice(0, 7).map((src) => (
+            <KbRow
+              key={src.id}
+              source={src}
+              selected={p.selectedSourceIds.includes(src.id)}
+              onToggle={() => p.onToggleSource(src.id)}
+              onDelete={() => p.onDeleteSource(src.id)}
+              onPreview={() => p.onPreviewSource?.(src.id)}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Footer / Admin */}
+      <div className="px-4 pt-3 pb-4" style={{ borderTop: "1px solid var(--color-border-tertiary)" }}>
+        <div className="mb-3 flex items-center gap-3">
+          <div className="h-9 w-9 rounded-full flex items-center justify-center" style={{ background: "#4f46e5", color: "#ffffff" }}>
+            <UserRound size={16} strokeWidth={1.7} />
+          </div>
+          <div className="min-w-0">
+            <div className="truncate text-[13px] font-semibold" style={{ color: "var(--color-text-primary)" }}>User Account</div>
+            <div className="text-[11.5px]" style={{ color: "var(--color-text-tertiary)" }}>Private workspace</div>
+          </div>
+        </div>
+        <Link
+          href="/admin"
+          className="flex items-center gap-2 w-full px-3 py-2 rounded-[10px] text-[13px] transition-colors"
+          style={{
+            color: "var(--color-text-secondary)",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--color-background-primary)";
+            e.currentTarget.style.color = "var(--color-text-primary)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "var(--color-text-secondary)";
+          }}
+        >
+          <Database size={13} strokeWidth={1.5} />
+          Insights & Usage
+        </Link>
       </div>
     </aside>
-  );
-}
-
-function SidebarTab({ label, icon, selected, onClick }: { label: string; icon: React.ReactNode; selected: boolean; onClick: () => void }) {
-  return (
-    <button
-      role="tab"
-      aria-selected={selected}
-      onClick={onClick}
-      className="flex items-center justify-center gap-1 rounded-[8px] px-1.5 py-1.5 text-[11.5px] transition-colors"
-      style={{
-        background: selected ? "var(--color-background-primary)" : "transparent",
-        border: selected ? "0.5px solid var(--color-border-tertiary)" : "0.5px solid transparent",
-        color: selected ? "var(--color-text-primary)" : "var(--color-text-tertiary)",
-      }}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }
 
@@ -200,12 +218,17 @@ function ProjectRow({
 }) {
   return (
     <div
-      className={clsx("group flex items-center pr-1 transition-colors", isActive && "bg-active")}
-      style={{ background: isActive ? "var(--color-background-primary)" : "transparent" }}
+      className={clsx("group mx-3 mb-1 flex items-center pr-1 transition-colors")}
+      style={{
+        background: isActive ? "#eef4ff" : "transparent",
+        border: `1px solid ${isActive ? "rgba(37, 99, 235, 0.18)" : "transparent"}`,
+        borderRadius: 12,
+        boxShadow: isActive ? "var(--shadow-sm)" : "none",
+      }}
     >
       <button
         onClick={onSelect}
-        className="flex-1 truncate text-left px-4 py-[7px] text-[13px] flex items-center gap-2"
+        className="flex-1 truncate text-left px-3 py-2.5 text-[13px] flex items-center gap-2"
         style={{ color: isActive ? "var(--color-text-primary)" : "var(--color-text-secondary)" }}
         title={project.title}
       >
@@ -250,16 +273,22 @@ function ChatRow({
 }) {
   return (
     <div
-      className={clsx("group flex items-center pr-1 transition-colors", isActive && "bg-active")}
-      style={{ background: isActive ? "var(--color-background-primary)" : "transparent" }}
+      className={clsx("group mx-3 mb-1 flex items-center pr-1 transition-colors")}
+      style={{
+        background: isActive ? "#eef4ff" : "transparent",
+        border: `1px solid ${isActive ? "rgba(37, 99, 235, 0.18)" : "transparent"}`,
+        borderRadius: 12,
+        boxShadow: isActive ? "var(--shadow-sm)" : "none",
+      }}
     >
       <button
         onClick={onSelect}
-        className="flex-1 truncate text-left px-4 py-[7px] text-[13px]"
+        className="flex-1 truncate text-left px-3 py-2.5 text-[13px] flex items-center gap-2"
         style={{ color: isActive ? "var(--color-text-primary)" : "var(--color-text-secondary)" }}
         title={chat.title}
       >
-        {chat.title || "New chat"}
+        <MessageSquare size={13} strokeWidth={1.6} />
+        <span className="truncate">{chat.title || "New chat"}</span>
       </button>
       <button
         onClick={(e) => {
@@ -289,7 +318,7 @@ function KbRow({
   onPreview?: () => void;
 }) {
   return (
-    <div className="group flex items-center gap-1.5 py-[5px]">
+    <div className="group flex items-center gap-1.5 py-1.5">
         <button
           onClick={onToggle}
           className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-[12px]"

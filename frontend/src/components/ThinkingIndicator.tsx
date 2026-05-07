@@ -10,7 +10,7 @@ export function ThinkingIndicator({ step, progress }: ThinkingIndicatorProps) {
   const showProgress = typeof progress === "number" && progress >= 0 && progress <= 100;
   return (
     <div
-      className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-[10px] fade-in"
+      className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-[10px] fade-in soft-pulse"
       style={{
         background: "var(--color-background-secondary)",
         border: "0.5px solid var(--color-border-tertiary)",

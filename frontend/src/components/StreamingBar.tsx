@@ -17,7 +17,8 @@ export function StreamingBar({ visible }: { visible: boolean }) {
         style={{
           height: "100%",
           width: "30%",
-          background: "linear-gradient(90deg, transparent, #6366f1, #8b5cf6, #a78bfa, transparent)",
+          background: "#2563eb",
+          borderRadius: 999,
           animation: "streamSlide 1.2s ease-in-out infinite",
         }}
       />
