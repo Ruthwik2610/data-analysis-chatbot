@@ -37,6 +37,7 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
   const [interactionCount, setInteractionCount] = useState(0);
+
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);

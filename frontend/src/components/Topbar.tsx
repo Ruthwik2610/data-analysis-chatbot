@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Bell, LogOut, Menu, Moon, Search, Settings, Sun, UserRound } from "lucide-react";
+import { Bell, LogOut, Menu, Moon, Search, Settings, Sun, UserRound, Zap } from "lucide-react";
 import type { Source } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
 import { getTheme, toggleTheme, type Theme } from "@/lib/theme";
@@ -139,6 +139,11 @@ export function Topbar({ title, activeSource, selectedSources, projectName, user
         </button>
         <div className="pointer-events-none absolute right-0 top-10 z-20 w-[220px] rounded-[12px] p-2 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100" style={{ background: "var(--color-background-elevated)", border: "1px solid var(--color-border-secondary)", boxShadow: "var(--shadow-lg)" }}>
           <div className="truncate px-2 py-2 text-[12px]" style={{ color: "var(--color-text-secondary)" }}>{userEmail}</div>
+          {typeof window !== "undefined" && typeof localStorage !== "undefined" && localStorage.getItem?.("datachat_admin_token") && (
+            <a href="/admin" className="flex w-full items-center gap-2 rounded-[8px] px-2 py-2 text-left text-[12px] font-medium" style={{ color: "var(--color-text-primary)" }}>
+              <Zap size={13} className="text-amber-500" /> Admin Dashboard
+            </a>
+          )}
           <button type="button" onClick={onLogout} className="flex w-full items-center gap-2 rounded-[8px] px-2 py-2 text-left text-[12px] font-medium" style={{ color: "var(--color-text-primary)" }}>
             <LogOut size={13} /> Logout
           </button>

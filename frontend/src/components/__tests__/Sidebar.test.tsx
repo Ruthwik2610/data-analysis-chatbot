@@ -69,6 +69,7 @@ describe("Sidebar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Clear screen" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
 
     expect(onNewChat).toHaveBeenCalledTimes(1);
     expect(onDeleteChat).not.toHaveBeenCalled();

@@ -58,8 +58,9 @@ export const api = {
   login: (email: string, password: string) => jpost<{ access_token: string; user: { id: string; email: string } }>("/auth/login", { email, password }),
   register: (email: string, password: string) => jpost<{ access_token: string; user: { id: string; email: string } }>("/auth/register", { email, password }),
   me: () => jget<{ user: { id: string; email: string } }>("/auth/me"),
-  adminLogin: (password: string) => jpost<{ token: string }>("/admin/login", { password }),
+  adminLogin: (password: string) => jpost<{ token: string; user_token: string; user: { id: string; email: string } }>("/admin/login", { password }),
   getAdminStats: () => jget<any>("/admin/stats"),
+  getHallucinations: () => jget<any[]>("/admin/hallucinations"),
 
   listSources: (projectId?: string | null) =>
     jget<Source[]>(projectId ? `/sources?project_id=${encodeURIComponent(projectId)}` : "/sources"),
@@ -194,6 +195,22 @@ export const api = {
     }),
   postFeedback: (body: { chat_id?: string | null; message_id?: string | null; rating: number; comment?: string }) =>
     jpost<{ ok: boolean }>("/feedback", body),
+
+  // Testing Gateway
+  listTestSuites: () => jget<any[]>("/admin/testing/suites"),
+  createTestSuite: (name: string) => jpost<any>("/admin/testing/suites", { name }),
+  listTestQueries: (suiteId: string) => jget<any[]>(`/admin/testing/suites/${suiteId}/queries`),
+  addTestQueriesBulk: (suiteId: string, queries: any[], queriesText?: string) => 
+    jpost<any>("/admin/testing/queries/bulk", { suite_id: suiteId, queries, queries_text: queriesText }),
+  startTestRun: (suiteId: string) => jpost<any>("/admin/testing/runs", { suite_id: suiteId }),
+  listTestRuns: (suiteId?: string) => jget<any[]>(suiteId ? `/admin/testing/runs?suite_id=${suiteId}` : "/admin/testing/runs"),
+  listTestEvaluations: (runId: string) => jget<any[]>(`/admin/testing/runs/${runId}/evaluations`),
+  gradeEvaluation: (evaluationId: string, grade: string, reason?: string) =>
+    fetch(`${BASE}/admin/testing/evaluations/${evaluationId}`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ grade, reason }),
+    }).then(r => r.json()),
 };
 
 export async function* streamQuery(

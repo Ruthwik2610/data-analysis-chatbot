@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
-import { CheckCircle2, XCircle, AlertCircle, HelpCircle, ChevronRight, ChevronLeft, Save, MessageSquare, Clock } from "lucide-react";
+import { CheckCircle2, XCircle, AlertCircle, HelpCircle, ChevronRight, ChevronLeft, Save, MessageSquare, Clock, FileText } from "lucide-react";
 
 interface Evaluation {
   id: string;
@@ -56,7 +56,7 @@ export default function GradingInterface({ runId, onClose }: GradingInterfacePro
     const finalReason = overrideReason !== undefined ? overrideReason : (["partial", "fail", "error"].includes(grade) ? reason : null);
     
     try {
-      await api.gradeEvaluation(currentEval.id, grade, finalReason);
+      await api.gradeEvaluation(currentEval.id, grade, finalReason || undefined);
       
       // Update local state
       const updated = [...evaluations];

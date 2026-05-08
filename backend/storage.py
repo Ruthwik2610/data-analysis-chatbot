@@ -10,8 +10,30 @@ from typing import Any, Iterator
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_jti TEXT NOT NULL UNIQUE,
+  ip_address TEXT,
+  user_agent TEXT,
+  expires_at REAL NOT NULL,
+  revoked_at REAL,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_sessions_jti ON user_sessions(token_jti);
+
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
   title TEXT NOT NULL,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
@@ -41,6 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_project_notes_project ON project_notes(project_id
 
 CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
   title TEXT,
   project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
   created_at REAL,
@@ -60,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at);
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
   name TEXT,
   kind TEXT,
   rows INTEGER,
@@ -71,6 +95,7 @@ CREATE TABLE IF NOT EXISTS sources (
 
 CREATE TABLE IF NOT EXISTS connectors (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
   kind TEXT,
   label TEXT,
   config TEXT,
@@ -91,6 +116,7 @@ CREATE TABLE IF NOT EXISTS project_instructions (
 
 CREATE TABLE IF NOT EXISTS mcp_connectors (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
   name TEXT NOT NULL,
   description TEXT,
   generated_description TEXT,
@@ -156,6 +182,25 @@ CREATE TABLE IF NOT EXISTS user_feedback (
   comment TEXT,
   created_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS token_usage (
+  id TEXT PRIMARY KEY,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hallucination_logs (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+  message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
+  score REAL NOT NULL, -- 1.0 = faithful, < 1.0 = hallucination
+  reason TEXT,
+  created_at REAL NOT NULL
+);
 """
 
 
@@ -164,25 +209,14 @@ class Storage:
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as con:
-            # Check if project_id column exists in chats (migration)
-            try:
-                con.execute("ALTER TABLE chats ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL")
-            except sqlite3.OperationalError:
-                pass # Column already exists or table doesn't exist yet
-
-            try:
-                con.execute("ALTER TABLE project_files ADD COLUMN source_id TEXT REFERENCES sources(id) ON DELETE SET NULL")
-            except sqlite3.OperationalError:
-                pass
-
-            try:
-                con.execute("ALTER TABLE project_files ALTER COLUMN file_path DROP NOT NULL") # SQLite doesn't support this
-            except sqlite3.OperationalError:
-                # In SQLite, we can't easily drop NOT NULL. 
-                # But since we'll always provide at least an empty string or the path, it's fine.
-                pass
-
             con.executescript(SCHEMA)
+            self._ensure_column(con, "projects", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
+            self._ensure_column(con, "chats", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
+            self._ensure_column(con, "chats", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL")
+            self._ensure_column(con, "sources", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
+            self._ensure_column(con, "connectors", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
+            self._ensure_column(con, "mcp_connectors", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
+            self._ensure_column(con, "project_files", "source_id", "TEXT REFERENCES sources(id) ON DELETE SET NULL")
             self._ensure_project_memory_table(con)
             con.execute("PRAGMA journal_mode=WAL")
 
@@ -218,76 +252,137 @@ class Storage:
                 """
             )
 
+    def _ensure_column(self, con: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    # -- users ---------------------------------------------------------------
+    def create_user(self, email: str, password_hash: str) -> dict[str, Any]:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                "INSERT INTO users (id, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, email, password_hash, now, now),
+            )
+        return {"id": user_id, "email": email, "created_at": now, "updated_at": now}
+
+    def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        return dict(row) if row else None
+
+    def create_session(self, user_id: str, jti: str, ip: str | None, ua: str | None, expires_at: float) -> dict[str, Any]:
+        session_id = f"sess_{uuid.uuid4().hex[:12]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO user_sessions (id, user_id, token_jti, ip_address, user_agent, expires_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, user_id, jti, ip, ua, expires_at, now),
+            )
+        return {"id": session_id, "user_id": user_id, "token_jti": jti, "expires_at": expires_at}
+
+    def get_active_session(self, jti: str) -> dict[str, Any] | None:
+        now = time.time()
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT * FROM user_sessions WHERE token_jti = ? AND expires_at > ? AND revoked_at IS NULL",
+                (jti, now),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def revoke_session(self, jti: str) -> None:
+        with self._conn() as con:
+            con.execute("UPDATE user_sessions SET revoked_at = ? WHERE token_jti = ?", (time.time(), jti))
+
     # -- chats ---------------------------------------------------------------
-    def create_chat(self, title: str | None = None) -> dict[str, Any]:
+    def create_chat(self, title: str | None = None, project_id: str | None = None, owner_id: str = "legacy") -> str:
         chat_id = f"chat_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
             con.execute(
-                "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (chat_id, title or "New chat", now, now),
+                "INSERT INTO chats (id, owner_id, title, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (chat_id, owner_id, title, project_id, now, now),
             )
-        return {"id": chat_id, "title": title or "New chat", "project_id": None, "created_at": now, "updated_at": now}
+        return chat_id
 
-    def list_chats(self, project_id: str | None = None) -> list[dict[str, Any]]:
-        where = ""
-        params: list[Any] = []
-        if project_id == "none":
-            where = "WHERE c.project_id IS NULL"
-        elif project_id:
-            where = "WHERE c.project_id = ?"
-            params.append(project_id)
+    def list_chats(self, project_id: str | None = None, owner_id: str = "legacy") -> list[dict[str, Any]]:
         with self._conn() as con:
-            rows = con.execute(
-                f"""
-                SELECT c.id, c.title, c.project_id, c.created_at, c.updated_at,
-                       (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count
-                FROM chats c
-                {where}
-                ORDER BY c.updated_at DESC
-                LIMIT 50
-                """,
-                params,
-            ).fetchall()
+            if project_id:
+                rows = con.execute(
+                    "SELECT * FROM chats WHERE owner_id = ? AND project_id = ? ORDER BY updated_at DESC",
+                    (owner_id, project_id),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT * FROM chats WHERE owner_id = ? AND project_id IS NULL ORDER BY updated_at DESC",
+                    (owner_id,),
+                ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_chat(self, chat_id: str) -> dict[str, Any] | None:
+    def get_chat(self, chat_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
         with self._conn() as con:
-            chat_row = con.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
-            if not chat_row:
+            if owner_id is None:
+                row = con.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+            else:
+                row = con.execute("SELECT * FROM chats WHERE id = ? AND owner_id = ?", (chat_id, owner_id)).fetchone()
+            if not row:
                 return None
-            messages = con.execute(
-                "SELECT id, role, content, payload, created_at FROM messages WHERE chat_id = ? ORDER BY created_at ASC",
+            msg_rows = con.execute(
+                "SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC",
                 (chat_id,),
             ).fetchall()
+            
+            # Fetch source metadata used in this chat
+            # We look for result payloads that contain source info
+            source_ids = set()
+            for m in msg_rows:
+                if m["payload"]:
+                    try:
+                        p = json.loads(m["payload"])
+                        if p.get("source", {}).get("id"):
+                            source_ids.add(p["source"]["id"])
+                    except: pass
+            
+            sources = []
+            if source_ids:
+                placeholders = ",".join(["?"] * len(source_ids))
+                s_rows = con.execute(f"SELECT id, name, kind FROM sources WHERE id IN ({placeholders})", list(source_ids)).fetchall()
+                sources = [dict(s) for s in s_rows]
+
         return {
-            **dict(chat_row),
+            **dict(row),
             "messages": [
-                {
-                    "id": m["id"],
-                    "role": m["role"],
-                    "content": m["content"],
-                    "payload": json.loads(m["payload"]) if m["payload"] else None,
-                    "created_at": m["created_at"],
-                }
-                for m in messages
+                {**dict(m), "payload": json.loads(m["payload"]) if m["payload"] else None}
+                for m in msg_rows
             ],
+            "sources": sources,
+            "source_ids": list(source_ids),
         }
 
-    def update_chat_title(self, chat_id: str, title: str) -> None:
+    def update_chat_title(self, chat_id: str, title: str, owner_id: str | None = None) -> None:
         with self._conn() as con:
+            owner_clause = " AND owner_id = ?" if owner_id is not None else ""
+            params: tuple[Any, ...] = (title, time.time(), chat_id, owner_id) if owner_id is not None else (title, time.time(), chat_id)
             con.execute(
-                "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?",
-                (title, time.time(), chat_id),
+                f"UPDATE chats SET title = ?, updated_at = ? WHERE id = ?{owner_clause}",
+                params,
             )
 
     def touch_chat(self, chat_id: str) -> None:
         with self._conn() as con:
             con.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (time.time(), chat_id))
 
-    def delete_chat(self, chat_id: str) -> None:
+    def delete_chat(self, chat_id: str, owner_id: str | None = None) -> None:
         with self._conn() as con:
-            con.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+            if owner_id is None:
+                con.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+            else:
+                con.execute("DELETE FROM chats WHERE id = ? AND owner_id = ?", (chat_id, owner_id))
 
     def add_message(self, chat_id: str, role: str, content: str, payload: dict | None = None) -> dict[str, Any]:
         msg_id = f"msg_{uuid.uuid4().hex[:10]}"
@@ -310,18 +405,21 @@ class Storage:
         rows: int,
         schema_json: str,
         origin: dict[str, Any] | None,
+        owner_id: str = "legacy",
     ) -> None:
         with self._conn() as con:
             con.execute(
                 """
-                INSERT INTO sources (id, name, kind, rows, schema_json, origin, active, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                INSERT INTO sources (id, owner_id, name, kind, rows, schema_json, origin, active, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                  owner_id=excluded.owner_id,
                   name=excluded.name, kind=excluded.kind, rows=excluded.rows,
                   schema_json=excluded.schema_json, origin=excluded.origin
                 """,
                 (
                     source_id,
+                    owner_id,
                     name,
                     kind,
                     rows,
@@ -331,17 +429,29 @@ class Storage:
                 ),
             )
 
-    def list_sources(self) -> list[dict[str, Any]]:
+    def list_sources(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
         with self._conn() as con:
             rows = con.execute(
-                "SELECT id, name, kind, rows, active, created_at FROM sources ORDER BY created_at DESC"
+                "SELECT id, name, kind, rows, active, created_at FROM sources WHERE owner_id = ? ORDER BY created_at DESC",
+                (owner_id,),
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_source(self, source_id: str) -> dict[str, Any] | None:
+    def get_source(self, source_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
         with self._conn() as con:
-            row = con.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+            if owner_id is None:
+                row = con.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+            else:
+                row = con.execute("SELECT * FROM sources WHERE id = ? AND owner_id = ?", (source_id, owner_id)).fetchone()
         return dict(row) if row else None
+
+    def source_name_exists(self, name: str, owner_id: str = "legacy") -> bool:
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT 1 FROM sources WHERE owner_id = ? AND LOWER(name) = LOWER(?) LIMIT 1",
+                (owner_id, name),
+            ).fetchone()
+        return row is not None
 
     def get_source_instructions(self, source_id: str) -> dict[str, Any] | None:
         with self._conn() as con:
@@ -365,43 +475,52 @@ class Storage:
             )
         return {"source_id": source_id, "instructions": instructions, "updated_at": now}
 
-    def delete_source(self, source_id: str) -> None:
+    def delete_source(self, source_id: str, owner_id: str | None = None) -> None:
         with self._conn() as con:
-            con.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+            if owner_id is None:
+                con.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+            else:
+                con.execute("DELETE FROM sources WHERE id = ? AND owner_id = ?", (source_id, owner_id))
 
-    def set_active_source(self, source_id: str | None) -> None:
+    def set_active_source(self, source_id: str | None, owner_id: str = "legacy") -> None:
         with self._conn() as con:
-            con.execute("UPDATE sources SET active = 0")
+            con.execute("UPDATE sources SET active = 0 WHERE owner_id = ?", (owner_id,))
             if source_id:
-                con.execute("UPDATE sources SET active = 1 WHERE id = ?", (source_id,))
+                con.execute("UPDATE sources SET active = 1 WHERE id = ? AND owner_id = ?", (source_id, owner_id))
 
-    def get_active_source(self) -> dict[str, Any] | None:
+    def get_active_source(self, owner_id: str = "legacy") -> dict[str, Any] | None:
         with self._conn() as con:
-            row = con.execute("SELECT * FROM sources WHERE active = 1").fetchone()
+            row = con.execute("SELECT * FROM sources WHERE owner_id = ? AND active = 1", (owner_id,)).fetchone()
         return dict(row) if row else None
 
     # -- connectors ----------------------------------------------------------
-    def add_connector(self, *, kind: str, label: str, config: dict[str, Any]) -> dict[str, Any]:
+    def add_connector(self, *, kind: str, label: str, config: dict[str, Any], owner_id: str = "legacy") -> dict[str, Any]:
         conn_id = f"conn_{uuid.uuid4().hex[:10]}"
         with self._conn() as con:
             con.execute(
-                "INSERT INTO connectors (id, kind, label, config, created_at) VALUES (?, ?, ?, ?, ?)",
-                (conn_id, kind, label, json.dumps(config), time.time()),
+                "INSERT INTO connectors (id, owner_id, kind, label, config, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (conn_id, owner_id, kind, label, json.dumps(config), time.time()),
             )
-        return {"id": conn_id, "kind": kind, "label": label, "config": config}
+        return {"id": conn_id, "owner_id": owner_id, "kind": kind, "label": label, "config": config}
 
-    def list_connectors(self) -> list[dict[str, Any]]:
+    def list_connectors(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
         with self._conn() as con:
-            rows = con.execute("SELECT * FROM connectors ORDER BY created_at DESC").fetchall()
+            rows = con.execute("SELECT * FROM connectors WHERE owner_id = ? ORDER BY created_at DESC", (owner_id,)).fetchall()
         return [{**dict(r), "config": json.loads(r["config"]) if r["config"] else {}} for r in rows]
 
-    def delete_connector(self, connector_id: str) -> None:
+    def delete_connector(self, connector_id: str, owner_id: str | None = None) -> None:
         with self._conn() as con:
-            con.execute("DELETE FROM connectors WHERE id = ?", (connector_id,))
+            if owner_id is None:
+                con.execute("DELETE FROM connectors WHERE id = ?", (connector_id,))
+            else:
+                con.execute("DELETE FROM connectors WHERE id = ? AND owner_id = ?", (connector_id, owner_id))
 
-    def get_connector(self, connector_id: str) -> dict[str, Any] | None:
+    def get_connector(self, connector_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
         with self._conn() as con:
-            row = con.execute("SELECT * FROM connectors WHERE id = ?", (connector_id,)).fetchone()
+            if owner_id is None:
+                row = con.execute("SELECT * FROM connectors WHERE id = ?", (connector_id,)).fetchone()
+            else:
+                row = con.execute("SELECT * FROM connectors WHERE id = ? AND owner_id = ?", (connector_id, owner_id)).fetchone()
         if not row:
             return None
         return {**dict(row), "config": json.loads(row["config"]) if row["config"] else {}}
@@ -446,18 +565,20 @@ class Storage:
         description: str | None,
         generated_description: str | None,
         description_status: str,
+        owner_id: str = "legacy",
     ) -> dict[str, Any]:
         now = time.time()
         with self._conn() as con:
             con.execute(
                 """
                 INSERT INTO mcp_connectors (
-                  id, name, description, generated_description, description_status,
+                  id, owner_id, name, description, generated_description, description_status,
                   scope, transport, url, command, args_json, tools_json, status,
                   last_error, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                  owner_id=excluded.owner_id,
                   name=excluded.name,
                   description=excluded.description,
                   generated_description=excluded.generated_description,
@@ -474,6 +595,7 @@ class Storage:
                 """,
                 (
                     connector_id,
+                    owner_id,
                     name,
                     description,
                     generated_description,
@@ -493,14 +615,17 @@ class Storage:
             row = con.execute("SELECT * FROM mcp_connectors WHERE id = ?", (connector_id,)).fetchone()
         return self._mcp_row_to_dict(row)
 
-    def get_mcp_connector(self, connector_id: str) -> dict[str, Any] | None:
+    def get_mcp_connector(self, connector_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
         with self._conn() as con:
-            row = con.execute("SELECT * FROM mcp_connectors WHERE id = ?", (connector_id,)).fetchone()
+            if owner_id is None:
+                row = con.execute("SELECT * FROM mcp_connectors WHERE id = ?", (connector_id,)).fetchone()
+            else:
+                row = con.execute("SELECT * FROM mcp_connectors WHERE id = ? AND owner_id = ?", (connector_id, owner_id)).fetchone()
         return self._mcp_row_to_dict(row) if row else None
 
-    def list_mcp_connectors(self) -> list[dict[str, Any]]:
+    def list_mcp_connectors(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
         with self._conn() as con:
-            rows = con.execute("SELECT * FROM mcp_connectors ORDER BY updated_at DESC").fetchall()
+            rows = con.execute("SELECT * FROM mcp_connectors WHERE owner_id = ? ORDER BY updated_at DESC", (owner_id,)).fetchall()
         return [self._mcp_row_to_dict(r) for r in rows]
 
     def update_mcp_generated_description(
@@ -558,9 +683,9 @@ class Storage:
             ).fetchall()
         return [r["project_id"] for r in rows]
 
-    def allowed_mcp_connector_ids(self, project_id: str | None) -> set[str]:
+    def allowed_mcp_connector_ids(self, project_id: str | None, owner_id: str = "legacy") -> set[str]:
         with self._conn() as con:
-            rows = con.execute("SELECT id FROM mcp_connectors WHERE scope = 'global'").fetchall()
+            rows = con.execute("SELECT id FROM mcp_connectors WHERE owner_id = ? AND scope = 'global'", (owner_id,)).fetchall()
             allowed = {r["id"] for r in rows}
             if project_id:
                 project_rows = con.execute(
@@ -571,24 +696,41 @@ class Storage:
         return allowed
 
     # -- projects ------------------------------------------------------------
-    def create_project(self, title: str) -> dict[str, Any]:
+    def create_project(self, title: str, owner_id: str = "legacy") -> dict[str, Any]:
+        clean_title = title.strip()
+        if self.project_title_exists(clean_title, owner_id=owner_id):
+            raise ValueError("A project with this name already exists")
         project_id = f"proj_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
             con.execute(
-                "INSERT INTO projects (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (project_id, title, now, now),
+                "INSERT INTO projects (id, owner_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (project_id, owner_id, clean_title, now, now),
             )
-        return {"id": project_id, "title": title, "created_at": now, "updated_at": now}
+        return {"id": project_id, "owner_id": owner_id, "title": clean_title, "created_at": now, "updated_at": now}
 
-    def list_projects(self) -> list[dict[str, Any]]:
+    def project_title_exists(self, title: str, owner_id: str = "legacy", exclude_project_id: str | None = None) -> bool:
+        sql = "SELECT 1 FROM projects WHERE owner_id = ? AND LOWER(title) = LOWER(?)"
+        params: list[Any] = [owner_id, title.strip()]
+        if exclude_project_id:
+            sql += " AND id != ?"
+            params.append(exclude_project_id)
+        sql += " LIMIT 1"
         with self._conn() as con:
-            rows = con.execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
+            row = con.execute(sql, params).fetchone()
+        return row is not None
+
+    def list_projects(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute("SELECT * FROM projects WHERE owner_id = ? ORDER BY updated_at DESC", (owner_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def get_project(self, project_id: str) -> dict[str, Any] | None:
+    def get_project(self, project_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
         with self._conn() as con:
-            row = con.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if owner_id is None:
+                row = con.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            else:
+                row = con.execute("SELECT * FROM projects WHERE id = ? AND owner_id = ?", (project_id, owner_id)).fetchone()
             if not row:
                 return None
             
@@ -608,20 +750,26 @@ class Storage:
         project["files"] = [dict(f) for f in files]
         return project
 
-    def update_project(self, project_id: str, title: str) -> dict[str, Any] | None:
+    def update_project(self, project_id: str, title: str, owner_id: str = "legacy") -> dict[str, Any] | None:
+        clean_title = title.strip()
+        if self.project_title_exists(clean_title, owner_id=owner_id, exclude_project_id=project_id):
+            raise ValueError("A project with this name already exists")
         now = time.time()
         with self._conn() as con:
             cur = con.execute(
-                "UPDATE projects SET title = ?, updated_at = ? WHERE id = ?",
-                (title, now, project_id),
+                "UPDATE projects SET title = ?, updated_at = ? WHERE id = ? AND owner_id = ?",
+                (clean_title, now, project_id, owner_id),
             )
             if cur.rowcount == 0:
                 return None
-        return self.get_project(project_id)
+        return self.get_project(project_id, owner_id=owner_id)
 
-    def delete_project(self, project_id: str) -> None:
+    def delete_project(self, project_id: str, owner_id: str | None = None) -> None:
         with self._conn() as con:
-            con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            if owner_id is None:
+                con.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            else:
+                con.execute("DELETE FROM projects WHERE id = ? AND owner_id = ?", (project_id, owner_id))
 
     def get_project_instructions(self, project_id: str) -> dict[str, Any] | None:
         with self._conn() as con:
@@ -746,6 +894,24 @@ class Storage:
         # Handle SQLite NOT NULL constraint by defaulting to empty string
         safe_file_path = file_path if file_path is not None else ""
         with self._conn() as con:
+            if source_id:
+                existing = con.execute(
+                    "SELECT 1 FROM project_files WHERE project_id = ? AND source_id = ? LIMIT 1",
+                    (project_id, source_id),
+                ).fetchone()
+                if existing:
+                    raise ValueError("This source is already linked to the project")
+            elif safe_file_path:
+                existing = con.execute(
+                    """
+                    SELECT 1 FROM project_files
+                    WHERE project_id = ? AND file_path = ? AND COALESCE(sheet_name, '') = COALESCE(?, '')
+                    LIMIT 1
+                    """,
+                    (project_id, safe_file_path, sheet_name),
+                ).fetchone()
+                if existing:
+                    raise ValueError("This file is already linked to the project")
             con.execute(
                 "INSERT INTO project_files (id, project_id, file_path, source_id, sheet_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (file_id, project_id, safe_file_path, source_id, sheet_name, now),
@@ -801,9 +967,12 @@ class Storage:
             con.execute("DELETE FROM project_notes WHERE id = ? AND project_id = ?", (note_id, project_id))
             con.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
 
-    def update_chat_project(self, chat_id: str, project_id: str | None) -> None:
+    def update_chat_project(self, chat_id: str, project_id: str | None, owner_id: str | None = None) -> None:
         with self._conn() as con:
-            con.execute("UPDATE chats SET project_id = ? WHERE id = ?", (project_id, chat_id))
+            if owner_id is None:
+                con.execute("UPDATE chats SET project_id = ? WHERE id = ?", (project_id, chat_id))
+            else:
+                con.execute("UPDATE chats SET project_id = ? WHERE id = ? AND owner_id = ?", (project_id, chat_id, owner_id))
 
     # -- testing -------------------------------------------------------------
     def create_test_suite(self, name: str) -> dict[str, Any]:
@@ -935,3 +1104,74 @@ class Storage:
                 "UPDATE test_evaluations SET grade = ?, reason = ? WHERE id = ?",
                 (grade, reason, evaluation_id),
             )
+
+    # -- insights & logging --------------------------------------------------
+    def add_token_usage(
+        self,
+        project_id: str | None,
+        user_id: str | None,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        usage_id = f"tok_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO token_usage (id, project_id, user_id, model, prompt_tokens, completion_tokens, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (usage_id, project_id, user_id, model, prompt_tokens, completion_tokens, now),
+            )
+
+    def list_token_usage_by_project(self) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT 
+                  p.title as project_name,
+                  p.id as project_id,
+                  SUM(tu.prompt_tokens) as prompt_tokens,
+                  SUM(tu.completion_tokens) as completion_tokens,
+                  SUM(tu.prompt_tokens + tu.completion_tokens) as total_tokens
+                FROM projects p
+                JOIN token_usage tu ON tu.project_id = p.id
+                GROUP BY p.id
+                ORDER BY total_tokens DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_hallucination_log(
+        self,
+        chat_id: str,
+        message_id: str,
+        score: float,
+        reason: str | None = None,
+    ) -> None:
+        log_id = f"hal_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO hallucination_logs (id, chat_id, message_id, score, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (log_id, chat_id, message_id, score, reason, now),
+            )
+
+    def list_hallucination_logs(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT hl.*, m.content as message_content, c.title as chat_title
+                FROM hallucination_logs hl
+                JOIN messages m ON hl.message_id = m.id
+                JOIN chats c ON hl.chat_id = c.id
+                ORDER BY hl.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]

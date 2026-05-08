@@ -60,12 +60,13 @@ class LLMRouter:
             return {}
         return {"provider": {"order": order, "allow_fallbacks": False}}
 
-    def _generate_json(self, prompt: str, request_id: str) -> dict[str, Any]:
+    def _generate_json(self, prompt: str, request_id: str) -> tuple[dict[str, Any], dict[str, int]]:
         if not self.openrouter_api_key:
             raise LLMUnavailable("OpenRouter API key is not configured.")
         import httpx
         start = time.perf_counter()
-        log_event(self.logger, "llm_request", request_id=request_id, model=self.model, prompt_tokens=estimate_tokens(prompt))
+        prompt_tokens = estimate_tokens(prompt)
+        log_event(self.logger, "llm_request", request_id=request_id, model=self.model, prompt_tokens=prompt_tokens)
         body = {
             "model": strip_openrouter_prefix(self.model),
             "messages": [{"role": "user", "content": prompt}],
@@ -81,17 +82,20 @@ class LLMRouter:
         )
         response.raise_for_status()
         elapsed_ms = int((time.perf_counter() - start) * 1000)
-        text = response.json()["choices"][0]["message"]["content"] or ""
+        resp_json = response.json()
+        text = resp_json["choices"][0]["message"]["content"] or ""
+        usage = resp_json.get("usage", {"prompt_tokens": prompt_tokens, "completion_tokens": estimate_tokens(text)})
         parsed = extract_json(text)
         log_event(self.logger, "llm_response", request_id=request_id, model=self.model, elapsed_ms=elapsed_ms)
-        return parsed
+        return parsed, usage
 
-    def _generate_text(self, prompt: str, request_id: str) -> str:
+    def _generate_text(self, prompt: str, request_id: str) -> tuple[str, dict[str, int]]:
         if not self.openrouter_api_key:
             raise LLMUnavailable("OpenRouter API key is not configured.")
         import httpx
         start = time.perf_counter()
-        log_event(self.logger, "llm_summary_request", request_id=request_id, model=self.model, prompt_tokens=estimate_tokens(prompt))
+        prompt_tokens = estimate_tokens(prompt)
+        log_event(self.logger, "llm_summary_request", request_id=request_id, model=self.model, prompt_tokens=prompt_tokens)
         body = {
             "model": strip_openrouter_prefix(self.model),
             "messages": [{"role": "user", "content": prompt}],
@@ -106,9 +110,11 @@ class LLMRouter:
         )
         response.raise_for_status()
         elapsed_ms = int((time.perf_counter() - start) * 1000)
-        text = (response.json()["choices"][0]["message"]["content"] or "").strip()
+        resp_json = response.json()
+        text = (resp_json["choices"][0]["message"]["content"] or "").strip()
+        usage = resp_json.get("usage", {"prompt_tokens": prompt_tokens, "completion_tokens": estimate_tokens(text)})
         log_event(self.logger, "llm_summary_response", request_id=request_id, model=self.model, elapsed_ms=elapsed_ms)
-        return text
+        return text, usage
 
     def _generate_text_stream(self, prompt: str, request_id: str):
         if not self.openrouter_api_key:
@@ -157,7 +163,7 @@ class LLMRouter:
         mcp_summary: str = "",
         local_source_name: str = "the loaded dataset",
         instruction_context: str = "",
-    ) -> tuple[dict[str, Any], str]:
+    ) -> tuple[dict[str, Any], str, dict[str, int]]:
         prompt = build_intent_prompt(
             schema_context=schema_context,
             conversation_summary=conversation_summary,
@@ -168,8 +174,8 @@ class LLMRouter:
             instruction_context=instruction_context,
         )
         try:
-            intent = self._generate_json(prompt, request_id)
-            return intent, self.model
+            intent, usage = self._generate_json(prompt, request_id)
+            return intent, self.model, usage
         except Exception as exc:  # pragma: no cover - network/API dependent
             log_event(self.logger, "llm_failure", request_id=request_id, model=self.model, error=str(exc))
             raise LLMUnavailable(str(exc)) from exc
@@ -183,7 +189,7 @@ class LLMRouter:
         result_sample: list[dict[str, Any]],
         row_count: int,
         sql: str | None = None,
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         prompt = build_answer_prompt(
             user_question=user_question,
             intent=intent,

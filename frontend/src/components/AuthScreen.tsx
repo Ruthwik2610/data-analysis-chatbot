@@ -35,10 +35,6 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   return (
     <main className="auth-shell min-h-[100dvh] px-4 py-8">
       <section className="auth-panel w-full max-w-[420px]">
-        <div className="mb-8 flex items-center justify-center">
-          <img src="/unipro-full-logo.svg" alt="Unipro" className="logo-light h-auto w-[146px]" />
-          <img src="/unipro-full-logo-dark.svg" alt="Unipro" className="logo-dark h-auto w-[146px]" />
-        </div>
         <div className="mb-6 flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-[10px]" style={{ background: "var(--color-background-info)", color: "var(--color-text-info)" }}>
             <Lock size={18} strokeWidth={1.8} />

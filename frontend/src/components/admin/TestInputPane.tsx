@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useState, useMemo } from "react";
-import { Upload, X, Check, AlertCircle, FileText, Send } from "lucide-react";
+import { Upload, Send } from "lucide-react";
+
 interface ParsedQuery {
   category: string;
   question: string;
@@ -34,10 +35,9 @@ export default function TestInputPane({ onSave, onCancel, isSaving }: TestInputP
         return { category: "Uncategorized", question: line };
       });
   }, [rawText]);
-...
-                        <span className="text-xs truncate opacity-70" style={{ color: "var(--color-text-primary)" }}>{q.question}</span>
-                    </div>
-                ))}
+
+  return (
+    <div className="flex flex-col gap-6 p-1 animate-in fade-in duration-500">
       <div className="flex flex-col gap-2">
         <label className="text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: "var(--color-text-tertiary)" }}>
           Suite Identity
@@ -88,7 +88,7 @@ export default function TestInputPane({ onSave, onCancel, isSaving }: TestInputP
                         <span className="px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-400 text-[9px] font-bold uppercase tracking-wider whitespace-nowrap">
                             {q.category}
                         </span>
-                        <span className="text-xs truncate opacity-70" style={{ color: "var(--color-text-primary)" }}>{q.query}</span>
+                        <span className="text-xs truncate opacity-70" style={{ color: "var(--color-text-primary)" }}>{q.question}</span>
                     </div>
                 ))}
             </div>

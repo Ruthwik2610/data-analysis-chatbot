@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import shutil
 import socket
 import sys
@@ -19,18 +23,141 @@ from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, BackgroundTasks
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, BackgroundTasks, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 
+# -- models ----------------------------------------------------------------
+class AttachCSVPath(BaseModel):
+    path: str
+    sql_cache: bool = False
+
+
+class AttachExcelPath(BaseModel):
+    path: str
+    sheet: str | None = None
+    ingest: str = "direct"
+
+
+class AttachDuckDB(BaseModel):
+    path: str
+    table: str = "orders"
+
+
+class AttachAPI(BaseModel):
+    url: str
+    auth: str | None = None
+    ingest: str = "direct"
+    save_connector: bool = False
+
+
+class CreateConnector(BaseModel):
+    kind: str
+    label: str
+    config: dict[str, Any]
+
+
+class MCPConnect(BaseModel):
+    name: str | None = None
+    url: str
+    scope: str = "global"
+    project_id: str | None = None
+
+
+class MCPUpdate(BaseModel):
+    name: str | None = None
+    url: str | None = None
+
+
+class AttachExcelMCP(BaseModel):
+    path: str
+    sheet: str | None = None
+
+
+class ProjectCreate(BaseModel):
+    title: str
+
+
+class ProjectUpdate(BaseModel):
+    title: str
+
+
+class InstructionsUpdate(BaseModel):
+    instructions: dict[str, Any]
+
+
+class SourceClarificationUpdate(BaseModel):
+    answers: dict[str, Any]
+
+
+class ProjectAddFile(BaseModel):
+    file_path: str | None = None
+    source_id: str | None = None
+    sheet: str | None = None
+
+
+class ProjectNoteCreate(BaseModel):
+    title: str | None = None
+    content: str
+    source_message_id: str | None = None
+
+
+class ChatUpdateProject(BaseModel):
+    project_id: str | None
+
+
+class AdminLogin(BaseModel):
+    password: str
+
+
+class TestSuiteCreate(BaseModel):
+    name: str
+
+
+class TestQueriesBulk(BaseModel):
+    suite_id: str
+    queries_text: str | None = None
+    queries: list[dict[str, Any]] | None = None
+
+
+class FeedbackRequest(BaseModel):
+    chat_id: str | None = None
+    message_id: str | None = None
+    rating: int
+    comment: str | None = None
+
+
+class TestEvaluationGrade(BaseModel):
+    grade: str # 'Pass', 'Fail', 'Partial', 'Error'
+    reason: str | None = None
+
+
+class UserAuth(BaseModel):
+    email: str
+    password: str
+
+
+class QueryRequest(BaseModel):
+    chat_id: str | None = None
+    question: str
+    source_ids: list[str] | None = None
+    project_id: str | None = None
+    model_mode: str | None = None
+
+
+class ResolvePending(BaseModel):
+    upload_id: str
+    value: str  # sheet name, table name, or "direct" / "sql"
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.agents import get_agent_for_domain
+from src.agents import DomainAgent, get_agent_for_domain
 from src.config import AppConfig
 from src.data_sources import (
     DataSource,
@@ -101,6 +228,9 @@ def _cleanup_pending(max_age_seconds: int = PENDING_TTL_SECONDS) -> None:
             pass
 
 API_KEY = os.getenv("API_KEY", "").strip()
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip() or API_KEY
+USER_AUTH_REQUIRED = os.getenv("USER_AUTH_REQUIRED", "1").strip() != "0" and bool(JWT_SECRET)
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", str(60 * 60 * 24 * 7)))
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000",
@@ -157,7 +287,7 @@ def _router_for_model_mode(mode: str | None) -> LLMRouter:
     return _ROUTER_CACHE[key]
 
 
-PUBLIC_PATHS = {"/health"}
+PUBLIC_PATHS = {"/health", "/auth/login", "/auth/register", "/admin/login"}
 
 
 @contextlib.asynccontextmanager
@@ -189,13 +319,98 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def api_key_middleware(request: Request, call_next):
+async def auth_middleware(request: Request, call_next):
     # CORS preflight is handled by CORSMiddleware before this runs.
-    if request.method == "OPTIONS" or not API_KEY or request.url.path in PUBLIC_PATHS:
+    request.state.user_id = "legacy"
+    path = request.url.path
+    if request.method == "OPTIONS" or path in PUBLIC_PATHS or path.startswith("/admin/"):
         return await call_next(request)
-    if request.headers.get("authorization") != f"Bearer {API_KEY}":
-        return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    if not USER_AUTH_REQUIRED or not API_KEY:
+        return await call_next(request)
+    token = _bearer_token(request)
+    if not token:
+        return JSONResponse(status_code=401, content={"detail": "Login required"})
+    try:
+        payload = _decode_access_token(token)
+    except ValueError:
+        return JSONResponse(status_code=401, content={"detail": "Invalid or expired login"})
+    session = DB.get_active_session(str(payload.get("jti") or ""))
+    if not session or session["user_id"] != payload.get("sub"):
+        return JSONResponse(status_code=401, content={"detail": "Session expired"})
+    if session.get("ip_address") and session["ip_address"] != _client_ip(request):
+        return JSONResponse(status_code=401, content={"detail": "Session changed networks. Please log in again."})
+    request.state.user_id = session["user_id"]
     return await call_next(request)
+
+
+def _bearer_token(request: Request) -> str | None:
+    header = request.headers.get("authorization") or ""
+    if not header.lower().startswith("bearer "):
+        return None
+    return header.split(" ", 1)[1].strip() or None
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _sign_access_token(payload: dict[str, Any]) -> str:
+    if not JWT_SECRET:
+        raise HTTPException(status_code=500, detail="JWT secret is not configured")
+    header = {"alg": "HS256", "typ": "JWT"}
+    head = _b64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    body = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    sig = hmac.new(JWT_SECRET.encode("utf-8"), f"{head}.{body}".encode("ascii"), hashlib.sha256).digest()
+    return f"{head}.{body}.{_b64url(sig)}"
+
+
+def _decode_access_token(token: str) -> dict[str, Any]:
+    try:
+        head, body, sig = token.split(".", 2)
+        expected = hmac.new(JWT_SECRET.encode("utf-8"), f"{head}.{body}".encode("ascii"), hashlib.sha256).digest()
+        if not hmac.compare_digest(_b64url(expected), sig):
+            raise ValueError("bad signature")
+        payload = json.loads(_b64url_decode(body))
+        if float(payload.get("exp", 0)) < time.time():
+            raise ValueError("expired")
+        if not payload.get("sub") or not payload.get("jti"):
+            raise ValueError("missing subject")
+        return payload
+    except Exception as exc:
+        raise ValueError("invalid token") from exc
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    iterations = 120_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${_b64url(salt)}${_b64url(digest)}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        algorithm, iterations, salt, digest = stored.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), _b64url_decode(salt), int(iterations))
+        return hmac.compare_digest(_b64url(candidate), digest)
+    except Exception:
+        return False
+
+
+def _client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client else None
+
+
+def _current_user_id(request: Request) -> str:
+    return str(getattr(request.state, "user_id", "legacy") or "legacy")
 
 
 def _make_id(prefix: str = "src") -> str:
@@ -318,7 +533,7 @@ async def _assert_public_url(url: str) -> None:
             raise HTTPException(status_code=400, detail="Refusing to fetch cloud metadata endpoint")
 
 
-def _persist_source(source_id: str, source: DataSource, kind: str, origin: dict[str, Any] | None) -> dict[str, Any]:
+def _persist_source(source_id: str, source: DataSource, kind: str, origin: dict[str, Any] | None, owner_id: str = "legacy") -> dict[str, Any]:
     SOURCES[source_id] = source
     DB.upsert_source(
         source_id=source_id,
@@ -327,10 +542,11 @@ def _persist_source(source_id: str, source: DataSource, kind: str, origin: dict[
         rows=source.row_count,
         schema_json=json.dumps(source.schema, default=str),
         origin=origin,
+        owner_id=owner_id,
     )
     if DB.get_source_instructions(source_id) is None:
         DB.upsert_source_instructions(source_id, default_source_instructions(source.schema, source.display_name))
-    DB.set_active_source(source_id)
+    DB.set_active_source(source_id, owner_id=owner_id)
     return _serialize_source(source_id, source, kind, active=True)
 
 
@@ -548,13 +764,27 @@ def _verify_admin(request: Request):
 
 
 @app.post("/admin/login")
-async def admin_login(body: AdminLogin) -> dict[str, str]:
+async def admin_login(payload: AdminLogin, request: Request) -> dict[str, Any]:
     if not CONFIG.admin_password:
         raise HTTPException(status_code=501, detail="Admin password not configured on server")
-    if body.password == CONFIG.admin_password:
+    if payload.password == CONFIG.admin_password:
         # In a real app, we'd use a JWT. For this internal tool, we'll return a simple token
         # derived from the password to keep it stateless and simple.
-        return {"token": hashlib.sha256(CONFIG.admin_password.encode()).hexdigest()}
+        admin_token = hashlib.sha256(CONFIG.admin_password.encode()).hexdigest()
+        
+        # Ensure a system 'Admin' user exists for the regular app part
+        admin_email = "admin@unipro.ai"
+        user = DB.get_user_by_email(admin_email)
+        if not user:
+            user = DB.create_user(admin_email, _hash_password(secrets.token_urlsafe(32)))
+        
+        user_session = _issue_user_token(user, request)
+        
+        return {
+            "token": admin_token,
+            "user_token": user_session["access_token"],
+            "user": user_session["user"]
+        }
     raise HTTPException(status_code=401, detail="Invalid admin password")
 
 
@@ -562,7 +792,8 @@ async def admin_login(body: AdminLogin) -> dict[str, str]:
 async def admin_stats(request: Request) -> dict[str, Any]:
     _verify_admin(request)
 
-    stats = {        "top_projects": [],
+    stats = {
+        "top_projects": [],
         "top_sources": [],
         "system_metrics": {
             "total_chats": 0,
@@ -604,6 +835,8 @@ async def admin_stats(request: Request) -> dict[str, Any]:
             LIMIT 5
         ''').fetchall()
         stats["top_sources"] = [{"name": r["name"] or "Unnamed", "value": r["link_count"]} for r in src_rows]
+
+    stats["token_usage_by_project"] = DB.list_token_usage_by_project()
 
     if CONFIG.openrouter_api_key:
         def fetch_or():
@@ -668,10 +901,16 @@ async def admin_stats(request: Request) -> dict[str, Any]:
     return stats
 
 
-@app.post("/admin/testing/suites")
-async def create_test_suite(body: TestSuiteCreate, request: Request):
+@app.get("/admin/hallucinations")
+async def list_hallucinations(request: Request, limit: int = 50):
     _verify_admin(request)
-    return DB.create_test_suite(body.name)
+    return DB.list_hallucination_logs(limit=limit)
+
+
+@app.post("/admin/testing/suites")
+async def create_test_suite(payload: TestSuiteCreate, request: Request):
+    _verify_admin(request)
+    return DB.create_test_suite(payload.name)
 
 
 @app.get("/admin/testing/suites")
@@ -687,13 +926,13 @@ async def list_test_queries(suite_id: str, request: Request):
 
 
 @app.post("/admin/testing/queries/bulk")
-async def add_test_queries_bulk(body: TestQueriesBulk, request: Request):
+async def add_test_queries_bulk(payload: TestQueriesBulk, request: Request):
     _verify_admin(request)
     queries = []
-    if body.queries:
-        queries = body.queries
-    elif body.queries_text:
-        lines = [line.strip() for line in body.queries_text.split("\n") if line.strip()]
+    if payload.queries:
+        queries = payload.queries
+    elif payload.queries_text:
+        lines = [line.strip() for line in payload.queries_text.split("\n") if line.strip()]
         for line in lines:
             if ":" in line and len(line.split(":", 1)[0]) < 30:
                 cat, q = line.split(":", 1)
@@ -702,31 +941,39 @@ async def add_test_queries_bulk(body: TestQueriesBulk, request: Request):
                 queries.append({"question": line, "category": "Uncategorized"})
     
     if queries:
-        DB.add_test_queries(body.suite_id, queries)
+        DB.add_test_queries(payload.suite_id, queries)
     return {"count": len(queries)}
 
 
 @app.post("/feedback")
-async def post_feedback(body: FeedbackRequest):
+async def post_feedback(payload: FeedbackRequest):
     return DB.add_user_feedback(
-        chat_id=body.chat_id,
-        message_id=body.message_id,
-        rating=body.rating,
-        comment=body.comment
+        chat_id=payload.chat_id,
+        message_id=payload.message_id,
+        rating=payload.rating,
+        comment=payload.comment
     )
 
 
 @app.patch("/admin/testing/evaluations/{evaluation_id}")
-async def grade_evaluation(evaluation_id: str, body: TestEvaluationGrade, request: Request):
+async def grade_evaluation(evaluation_id: str, payload: TestEvaluationGrade, request: Request):
     _verify_admin(request)
-    DB.update_test_evaluation(evaluation_id, body.grade, body.reason)
+    DB.update_test_evaluation(evaluation_id, payload.grade, payload.reason)
+    
+    # If it's a Fail or Error, log it as a hallucination/issue
+    if payload.grade in ("Fail", "Error"):
+        # We need the chat_id and message_id, but test evaluations might not have them
+        # However, we can at least log the failure if it's from a live run.
+        # For now, this is a placeholder as test_evaluations link to test_runs, not live chats.
+        pass
+        
     return {"ok": True}
 
 
 @app.post("/admin/testing/runs")
-async def start_test_run(body: dict, request: Request, background_tasks: BackgroundTasks):
+async def start_test_run(request: Request, background_tasks: BackgroundTasks, payload: dict = Body(...)):
     _verify_admin(request)
-    suite_id = body.get("suite_id")
+    suite_id = payload.get("suite_id")
     if not suite_id:
         raise HTTPException(status_code=400, detail="suite_id required")
     
@@ -770,6 +1017,34 @@ async def run_test_suite_background(run_id: str, suite_id: str, snapshot: dict):
             DB.add_test_evaluation(run_id, q["id"], f"Error: {str(e)}", (time.time() - start_time) * 1000, grade="Error")
 
 
+async def evaluate_hallucination_background(chat_id: str, message_id: str, question: str, answer: str, context: str):
+    """LLM-as-a-judge to detect hallucinations (faithfulness)."""
+    if not ROUTER.available:
+        return
+    
+    prompt = f"""
+Evaluate if the following Answer is faithful to the provided Context.
+A faithful answer only contains information present in or logically inferrable from the context.
+An unfaithful answer (hallucination) contains information NOT in the context.
+
+Question: {question}
+Context: {context}
+Answer: {answer}
+
+Respond ONLY in JSON format:
+{{
+  "score": float, // 1.0 for fully faithful, 0.0 for pure hallucination
+  "reason": "short explanation"
+}}
+"""
+    try:
+        result = await asyncio.to_thread(ROUTER._generate_json, prompt, f"hal_{message_id}")
+        score = float(result.get("score", 1.0))
+        reason = result.get("reason", "")
+        DB.add_hallucination_log(chat_id, message_id, score, reason)
+    except Exception as e:
+        logging.error(f"Hallucination evaluation failed for message {message_id}: {e}")
+
 
 def _allowed_mcp_connector_ids_for_project(project_id: str | None) -> set[str]:
     return DB.allowed_mcp_connector_ids(project_id)
@@ -801,129 +1076,72 @@ def _serialize_mcp_source(allowed_connector_ids: set[str] | None = None) -> dict
     }
 
 
-# -- models ----------------------------------------------------------------
-class AttachCSVPath(BaseModel):
-    path: str
-    sql_cache: bool = False
-
-
-class AttachExcelPath(BaseModel):
-    path: str
-    sheet: str | None = None
-    ingest: str = "direct"
-
-
-class AttachDuckDB(BaseModel):
-    path: str
-    table: str = "orders"
-
-
-class AttachAPI(BaseModel):
-    url: str
-    auth: str | None = None
-    ingest: str = "direct"
-    save_connector: bool = False
-
-
-class CreateConnector(BaseModel):
-    kind: str
-    label: str
-    config: dict[str, Any]
-
-
-class MCPConnect(BaseModel):
-    name: str | None = None
-    url: str
-    scope: str = "global"
-    project_id: str | None = None
-
-
-class MCPUpdate(BaseModel):
-    name: str | None = None
-    url: str | None = None
-
-
-class AttachExcelMCP(BaseModel):
-    path: str
-    sheet: str | None = None
-
-
-class ProjectCreate(BaseModel):
-    title: str
-
-
-class ProjectUpdate(BaseModel):
-    title: str
-
-
-class InstructionsUpdate(BaseModel):
-    instructions: dict[str, Any]
-
-
-class SourceClarificationUpdate(BaseModel):
-    answers: dict[str, Any]
-
-
-class ProjectAddFile(BaseModel):
-    file_path: str | None = None
-    source_id: str | None = None
-    sheet: str | None = None
-
-
-class ProjectNoteCreate(BaseModel):
-    title: str | None = None
-    content: str
-    source_message_id: str | None = None
-
-
-class ChatUpdateProject(BaseModel):
-    project_id: str | None
-
-
-class AdminLogin(BaseModel):
-    password: str
-
-
-class TestSuiteCreate(BaseModel):
-    name: str
-
-
-class TestQueriesBulk(BaseModel):
-    suite_id: str
-    queries_text: str | None = None
-    queries: list[dict[str, Any]] | None = None
-
-
-class FeedbackRequest(BaseModel):
-    chat_id: str | None = None
-    message_id: str | None = None
-    rating: int
-    comment: str | None = None
-
-
-class TestEvaluationGrade(BaseModel):
-    grade: str # 'Pass', 'Fail', 'Partial', 'Error'
-    reason: str | None = None
-
-
-class QueryRequest(BaseModel):
-    chat_id: str | None = None
-    question: str
-    source_ids: list[str] | None = None
-    project_id: str | None = None
-    model_mode: str | None = None
-
-
 # -- health ----------------------------------------------------------------
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _issue_user_token(user: dict[str, Any], request: Request) -> dict[str, Any]:
+    now = time.time()
+    expires_at = now + SESSION_TTL_SECONDS
+    jti = secrets.token_urlsafe(24)
+    DB.create_session(
+        user_id=user["id"],
+        jti=jti,
+        ip=_client_ip(request),
+        ua=request.headers.get("user-agent"),
+        expires_at=expires_at,
+    )
+    token = _sign_access_token({"sub": user["id"], "email": user["email"], "jti": jti, "iat": now, "exp": expires_at})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_at": expires_at,
+        "user": {"id": user["id"], "email": user["email"]},
+    }
+
+
+def _clean_email(email: str) -> str:
+    clean = email.strip().lower()
+    if not clean or "@" not in clean:
+        raise HTTPException(status_code=400, detail="A valid email is required")
+    return clean
+
+
+@app.post("/auth/register")
+def register_user(body: UserAuth, request: Request) -> dict[str, Any]:
+    email = _clean_email(body.email)
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if DB.get_user_by_email(email):
+        raise HTTPException(status_code=409, detail="An account already exists for this email")
+    user = DB.create_user(email, _hash_password(body.password))
+    return _issue_user_token(user, request)
+
+
+@app.post("/auth/login")
+def login_user(body: UserAuth, request: Request) -> dict[str, Any]:
+    email = _clean_email(body.email)
+    user = DB.get_user_by_email(email)
+    if not user or not _verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    return _issue_user_token(user, request)
+
+
+@app.get("/auth/me")
+def auth_me(request: Request) -> dict[str, Any]:
+    user = DB.get_user(_current_user_id(request))
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+    return {"user": {"id": user["id"], "email": user["email"]}}
+
+
 # -- sources ---------------------------------------------------------------
 @app.get("/sources")
-def list_sources(project_id: str | None = None) -> list[dict[str, Any]]:
-    rows = DB.list_sources()
+def list_sources(request: Request, project_id: str | None = None) -> list[dict[str, Any]]:
+    owner_id = _current_user_id(request)
+    rows = DB.list_sources(owner_id=owner_id)
     out = []
     for row in rows:
         out.append({
@@ -940,8 +1158,8 @@ def list_sources(project_id: str | None = None) -> list[dict[str, Any]]:
     return out
 
 @app.get("/sources/{source_id}/preview")
-async def preview_source(source_id: str) -> dict[str, Any]:
-    row = DB.get_source(source_id)
+async def preview_source(source_id: str, request: Request) -> dict[str, Any]:
+    row = DB.get_source(source_id, owner_id=_current_user_id(request))
     if not row:
         raise HTTPException(status_code=404, detail="Source not found")
     source = SOURCES.get(source_id)
@@ -975,7 +1193,7 @@ async def preview_source(source_id: str) -> dict[str, Any]:
 
 
 @app.post("/sources/csv")
-def attach_csv(body: AttachCSVPath) -> dict[str, Any]:
+def attach_csv(body: AttachCSVPath, request: Request) -> dict[str, Any]:
     try:
         path = Path(body.path).expanduser()
         if body.sql_cache:
@@ -985,13 +1203,13 @@ def attach_csv(body: AttachCSVPath) -> dict[str, Any]:
             source = prepare_csv_memory_source(path, logger=LOGGERS["cache"])
             origin = {"type": "csv_memory", "path": str(path)}
         source_id = _make_id()
-        return _persist_source(source_id, source, "csv", origin)
+        return _persist_source(source_id, source, "csv", origin, owner_id=_current_user_id(request))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/sources/excel")
-def attach_excel(body: AttachExcelPath) -> dict[str, Any]:
+def attach_excel(body: AttachExcelPath, request: Request) -> dict[str, Any]:
     try:
         path = Path(body.path).expanduser()
         source = prepare_excel_source(path, body.sheet, LOGGERS["cache"])
@@ -999,25 +1217,25 @@ def attach_excel(body: AttachExcelPath) -> dict[str, Any]:
             source = dataframe_to_duckdb_source(source.dataframe, CONFIG.cache_dir, LOGGERS["cache"], path.name, "Excel SQL cache")
         origin = {"type": "excel", "path": str(path), "sheet": body.sheet, "ingest": body.ingest}
         source_id = _make_id()
-        return _persist_source(source_id, source, "xlsx", origin)
+        return _persist_source(source_id, source, "xlsx", origin, owner_id=_current_user_id(request))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/sources/duckdb")
-def attach_duckdb(body: AttachDuckDB) -> dict[str, Any]:
+def attach_duckdb(body: AttachDuckDB, request: Request) -> dict[str, Any]:
     try:
         path = Path(body.path).expanduser()
         source = prepare_duckdb_source(path, body.table, logger=LOGGERS["cache"])
         origin = {"type": "duckdb", "path": str(path), "table": body.table}
         source_id = _make_id()
-        return _persist_source(source_id, source, "duckdb", origin)
+        return _persist_source(source_id, source, "duckdb", origin, owner_id=_current_user_id(request))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/sources/api")
-async def attach_api(body: AttachAPI) -> dict[str, Any]:
+async def attach_api(body: AttachAPI, request: Request) -> dict[str, Any]:
     await _assert_public_url(body.url)
     try:
         source = await asyncio.to_thread(prepare_api_source, body.url, LOGGERS["cache"], auth_header=body.auth)
@@ -1025,7 +1243,7 @@ async def attach_api(body: AttachAPI) -> dict[str, Any]:
             source = await asyncio.to_thread(dataframe_to_duckdb_source, source.dataframe, CONFIG.cache_dir, LOGGERS["cache"], body.url, "API SQL cache")
         origin = {"type": "api", "url": body.url, "auth": body.auth, "ingest": body.ingest}
         source_id = _make_id()
-        result = _persist_source(source_id, source, "api", origin)
+        result = _persist_source(source_id, source, "api", origin, owner_id=_current_user_id(request))
         if body.save_connector:
             DB.add_connector(kind="api", label=body.url, config={"url": body.url, "auth": body.auth})
         return result
@@ -1155,7 +1373,7 @@ def _archive_label(archive_path: Path) -> str:
     return "7z" if archive_path.suffix.lower() == ".7z" else "ZIP"
 
 
-def _prepare_archive_pdf_sources(archive_path: Path, extraction_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+def _prepare_archive_pdf_sources(archive_path: Path, extraction_dir: Path, owner_id: str = "legacy") -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     pdf_paths = _extract_pdf_members_from_archive(archive_path, extraction_dir)
     if not pdf_paths:
         raise ValueError(f"No PDF files found in this {_archive_label(archive_path)}.")
@@ -1172,7 +1390,9 @@ def _prepare_archive_pdf_sources(archive_path: Path, extraction_dir: Path) -> tu
                 )
             source = prepare_pdf_source(pdf_path, LOGGERS["cache"])
             origin = {"type": "pdf", "path": str(pdf_path), "archive": str(archive_path)}
-            attached.append(_persist_source(_make_id(), source, "pdf", origin))
+            if DB.source_name_exists(source.display_name, owner_id=owner_id):
+                raise ValueError(f"{source.display_name} is already attached")
+            attached.append(_persist_source(_make_id(), source, "pdf", origin, owner_id=owner_id))
         except Exception as exc:
             skipped.append({"file_name": pdf_path.name, "error": str(exc)})
     if not attached:
@@ -1181,19 +1401,22 @@ def _prepare_archive_pdf_sources(archive_path: Path, extraction_dir: Path) -> tu
     return attached, skipped
 
 
-def _prepare_zip_pdf_sources(zip_path: Path, extraction_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    return _prepare_archive_pdf_sources(zip_path, extraction_dir)
+def _prepare_zip_pdf_sources(zip_path: Path, extraction_dir: Path, owner_id: str = "legacy") -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    return _prepare_archive_pdf_sources(zip_path, extraction_dir, owner_id=owner_id)
 
 
 @app.post("/sources/upload")
-async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_source(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
     _cleanup_pending()
+    owner_id = _current_user_id(request)
     if not file.filename:
         raise HTTPException(status_code=400, detail="File is required")
     try:
         safe_name = _safe_upload_filename(file.filename)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if DB.source_name_exists(safe_name, owner_id=owner_id):
+        raise HTTPException(status_code=409, detail="A file with this name is already attached")
     upload_id = uuid.uuid4().hex[:10]
     upload_dir = UPLOAD_DIR / upload_id
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -1209,7 +1432,7 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
         if suffix in {".xlsx", ".xls"}:
             sheets = await asyncio.to_thread(_list_excel_sheets, dest)
             if len(sheets) > 1:
-                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "sheets": sheets, "kind": "xlsx", "created_at": time.time()}
+                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "sheets": sheets, "kind": "xlsx", "owner_id": owner_id, "created_at": time.time()}
                 return {"pending": {
                     "kind": "sheet_pick",
                     "upload_id": upload_id,
@@ -1219,12 +1442,12 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
             sheet = sheets[0] if sheets else None
             source = await asyncio.to_thread(prepare_excel_source, dest, sheet, LOGGERS["cache"])
             origin = {"type": "excel", "path": str(dest), "sheet": sheet, "ingest": "direct"}
-            return _source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin), source)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin, owner_id=owner_id), source)
 
         if suffix in {".duckdb", ".db"}:
             tables = await asyncio.to_thread(_list_duckdb_tables, dest)
             if len(tables) > 1:
-                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "tables": tables, "kind": "duckdb", "created_at": time.time()}
+                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "tables": tables, "kind": "duckdb", "owner_id": owner_id, "created_at": time.time()}
                 return {"pending": {
                     "kind": "table_pick",
                     "upload_id": upload_id,
@@ -1234,11 +1457,11 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
             table = tables[0] if tables else "orders"
             source = await asyncio.to_thread(prepare_duckdb_source, dest, table, LOGGERS["cache"])
             origin = {"type": "duckdb", "path": str(dest), "table": table}
-            return _source_with_clarifications(_persist_source(_make_id(), source, "duckdb", origin), source)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "duckdb", origin, owner_id=owner_id), source)
 
         if suffix == ".csv":
             if size_mb > 100:
-                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "size_mb": size_mb, "kind": "csv", "created_at": time.time()}
+                PENDING[upload_id] = {"path": str(dest), "file_name": file_name, "size_mb": size_mb, "kind": "csv", "owner_id": owner_id, "created_at": time.time()}
                 return {"pending": {
                     "kind": "ingest_pick",
                     "upload_id": upload_id,
@@ -1247,7 +1470,7 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
                 }}
             source = await asyncio.to_thread(prepare_csv_memory_source, dest, LOGGERS["cache"])
             origin = {"type": "csv_memory", "path": str(dest)}
-            return _source_with_clarifications(_persist_source(_make_id(), source, "csv", origin), source)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "csv", origin, owner_id=owner_id), source)
 
         if suffix == ".json":
             from src.data_sources import prepare_local_file_source
@@ -1257,15 +1480,15 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
                 dest, CONFIG.cache_dir, LOGGERS["cache"], "orders", None, False, "direct",
             )
             origin = {"type": "json", "path": str(dest)}
-            return _source_with_clarifications(_persist_source(_make_id(), source, "json", origin), source)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "json", origin, owner_id=owner_id), source)
 
         if suffix == ".pdf":
             source = await asyncio.to_thread(prepare_pdf_source, dest, LOGGERS["cache"])
             origin = {"type": "pdf", "path": str(dest)}
-            return _source_with_clarifications(_persist_source(_make_id(), source, "pdf", origin), source)
+            return _source_with_clarifications(_persist_source(_make_id(), source, "pdf", origin, owner_id=owner_id), source)
 
         if suffix in {".zip", ".7z"}:
-            sources, skipped = await asyncio.to_thread(_prepare_archive_pdf_sources, dest, upload_dir / "unpacked")
+            sources, skipped = await asyncio.to_thread(_prepare_archive_pdf_sources, dest, upload_dir / "unpacked", owner_id)
             return {"sources": sources, "skipped": skipped}
 
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
@@ -1275,26 +1498,24 @@ async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-class ResolvePending(BaseModel):
-    upload_id: str
-    value: str  # sheet name, table name, or "direct" / "sql"
-
-
 @app.post("/sources/resolve_pending")
-def resolve_pending(body: ResolvePending) -> dict[str, Any]:
+def resolve_pending(body: ResolvePending, request: Request) -> dict[str, Any]:
     record = PENDING.get(body.upload_id)
     if not record:
+        raise HTTPException(status_code=404, detail="Pending upload not found or already resolved")
+    owner_id = _current_user_id(request)
+    if record.get("owner_id") and record["owner_id"] != owner_id:
         raise HTTPException(status_code=404, detail="Pending upload not found or already resolved")
     path = Path(record["path"])
     try:
         if record["kind"] == "xlsx":
             source = prepare_excel_source(path, body.value, LOGGERS["cache"])
             origin = {"type": "excel", "path": str(path), "sheet": body.value, "ingest": "direct"}
-            result = _source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin), source)
+            result = _source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin, owner_id=owner_id), source)
         elif record["kind"] == "duckdb":
             source = prepare_duckdb_source(path, body.value, logger=LOGGERS["cache"])
             origin = {"type": "duckdb", "path": str(path), "table": body.value}
-            result = _source_with_clarifications(_persist_source(_make_id(), source, "duckdb", origin), source)
+            result = _source_with_clarifications(_persist_source(_make_id(), source, "duckdb", origin, owner_id=owner_id), source)
         elif record["kind"] == "csv":
             ingest = body.value if body.value in ("direct", "sql") else "direct"
             if ingest == "sql":
@@ -1302,7 +1523,7 @@ def resolve_pending(body: ResolvePending) -> dict[str, Any]:
             else:
                 source = prepare_csv_memory_source(path, logger=LOGGERS["cache"])
             origin = {"type": f"csv_{ingest}", "path": str(path)}
-            result = _source_with_clarifications(_persist_source(_make_id(), source, "csv", origin), source)
+            result = _source_with_clarifications(_persist_source(_make_id(), source, "csv", origin, owner_id=owner_id), source)
         else:
             raise HTTPException(status_code=400, detail=f"Unknown pending kind: {record['kind']}")
     except HTTPException:
@@ -1314,21 +1535,23 @@ def resolve_pending(body: ResolvePending) -> dict[str, Any]:
 
 
 @app.delete("/sources/{source_id}")
-def delete_source(source_id: str) -> dict[str, Any]:
-    DB.delete_source(source_id)
+def delete_source(source_id: str, request: Request) -> dict[str, Any]:
+    DB.delete_source(source_id, owner_id=_current_user_id(request))
     SOURCES.pop(source_id, None)
     return {"ok": True}
 
 
 @app.post("/sources/{source_id}/activate")
-def activate_source(source_id: str) -> dict[str, Any]:
-    DB.set_active_source(source_id)
+def activate_source(source_id: str, request: Request) -> dict[str, Any]:
+    if not DB.get_source(source_id, owner_id=_current_user_id(request)):
+        raise HTTPException(status_code=404, detail="Source not found")
+    DB.set_active_source(source_id, owner_id=_current_user_id(request))
     return {"ok": True}
 
 
 @app.get("/sources/{source_id}/instructions")
-def get_source_instructions(source_id: str) -> dict[str, Any]:
-    row = DB.get_source(source_id)
+def get_source_instructions(source_id: str, request: Request) -> dict[str, Any]:
+    row = DB.get_source(source_id, owner_id=_current_user_id(request))
     if not row:
         raise HTTPException(status_code=404, detail="Source not found")
     instructions = _get_or_create_source_instructions(source_id)
@@ -1336,8 +1559,8 @@ def get_source_instructions(source_id: str) -> dict[str, Any]:
 
 
 @app.patch("/sources/{source_id}/instructions")
-def update_source_instructions(source_id: str, body: InstructionsUpdate) -> dict[str, Any]:
-    row = DB.get_source(source_id)
+def update_source_instructions(source_id: str, body: InstructionsUpdate, request: Request) -> dict[str, Any]:
+    row = DB.get_source(source_id, owner_id=_current_user_id(request))
     if not row:
         raise HTTPException(status_code=404, detail="Source not found")
     normalized = normalize_instructions(body.instructions, _source_allowed_columns_from_row(row))
@@ -1345,8 +1568,8 @@ def update_source_instructions(source_id: str, body: InstructionsUpdate) -> dict
 
 
 @app.post("/sources/{source_id}/clarifications")
-def apply_source_clarifications(source_id: str, body: SourceClarificationUpdate) -> dict[str, Any]:
-    row = DB.get_source(source_id)
+def apply_source_clarifications(source_id: str, body: SourceClarificationUpdate, request: Request) -> dict[str, Any]:
+    row = DB.get_source(source_id, owner_id=_current_user_id(request))
     if not row:
         raise HTTPException(status_code=404, detail="Source not found")
     allowed = _source_allowed_columns_from_row(row)
@@ -1360,8 +1583,8 @@ def apply_source_clarifications(source_id: str, body: SourceClarificationUpdate)
 
 # -- chats -----------------------------------------------------------------
 @app.get("/chats")
-def list_chats(project_id: str | None = None) -> list[dict[str, Any]]:
-    return DB.list_chats(project_id=project_id)
+def list_chats(request: Request, project_id: str | None = None) -> list[dict[str, Any]]:
+    return DB.list_chats(project_id=project_id, owner_id=_current_user_id(request))
 
 
 async def ensure_project_context(project_id: str):
@@ -1401,8 +1624,9 @@ async def ensure_project_context(project_id: str):
 
 
 @app.get("/chats/{chat_id}")
-async def get_chat(chat_id: str) -> dict[str, Any]:
-    chat = DB.get_chat(chat_id)
+async def get_chat(chat_id: str, request: Request) -> dict[str, Any]:
+    owner_id = _current_user_id(request)
+    chat = DB.get_chat(chat_id, owner_id=owner_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -1432,74 +1656,86 @@ async def get_chat(chat_id: str) -> dict[str, Any]:
 
 
 @app.post("/chats")
-def create_chat() -> dict[str, Any]:
-    return DB.create_chat()
+def create_chat(request: Request) -> dict[str, Any]:
+    return DB.create_chat(owner_id=_current_user_id(request))
 
 
 @app.delete("/chats/{chat_id}")
-def delete_chat(chat_id: str) -> dict[str, Any]:
-    DB.delete_chat(chat_id)
+def delete_chat(chat_id: str, request: Request) -> dict[str, Any]:
+    DB.delete_chat(chat_id, owner_id=_current_user_id(request))
     return {"ok": True}
 
 
 @app.patch("/chats/{chat_id}/project")
-def update_chat_project(chat_id: str, body: ChatUpdateProject) -> dict[str, Any]:
-    DB.update_chat_project(chat_id, body.project_id)
+def update_chat_project(chat_id: str, body: ChatUpdateProject, request: Request) -> dict[str, Any]:
+    owner_id = _current_user_id(request)
+    if not DB.get_chat(chat_id, owner_id=owner_id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if body.project_id and not DB.get_project(body.project_id, owner_id=owner_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    DB.update_chat_project(chat_id, body.project_id, owner_id=owner_id)
     return {"ok": True}
 
 
 # -- projects --------------------------------------------------------------
 @app.get("/projects")
-def list_projects() -> list[dict[str, Any]]:
-    return DB.list_projects()
+def list_projects(request: Request) -> list[dict[str, Any]]:
+    return DB.list_projects(owner_id=_current_user_id(request))
 
 
 @app.post("/projects")
-def create_project(body: ProjectCreate) -> dict[str, Any]:
-    return DB.create_project(body.title)
+def create_project(body: ProjectCreate, request: Request) -> dict[str, Any]:
+    try:
+        return DB.create_project(body.title, owner_id=_current_user_id(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/projects/{project_id}")
-def get_project(project_id: str) -> dict[str, Any]:
-    p = DB.get_project(project_id)
+def get_project(project_id: str, request: Request) -> dict[str, Any]:
+    p = DB.get_project(project_id, owner_id=_current_user_id(request))
     if not p:
         raise HTTPException(status_code=404, detail="Project not found")
     return p
 
 
 @app.patch("/projects/{project_id}")
-def update_project(project_id: str, body: ProjectUpdate) -> dict[str, Any]:
+def update_project(project_id: str, body: ProjectUpdate, request: Request) -> dict[str, Any]:
     title = body.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="Project title is required")
-    p = DB.update_project(project_id, title)
+    try:
+        p = DB.update_project(project_id, title, owner_id=_current_user_id(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if not p:
         raise HTTPException(status_code=404, detail="Project not found")
     return p
 
 
 @app.delete("/projects/{project_id}")
-def delete_project(project_id: str) -> dict[str, Any]:
-    DB.delete_project(project_id)
+def delete_project(project_id: str, request: Request) -> dict[str, Any]:
+    DB.delete_project(project_id, owner_id=_current_user_id(request))
     return {"ok": True}
 
 
 @app.get("/projects/{project_id}/instructions")
-def get_project_instructions(project_id: str) -> dict[str, Any]:
-    project = DB.get_project(project_id)
+def get_project_instructions(project_id: str, request: Request) -> dict[str, Any]:
+    owner_id = _current_user_id(request)
+    project = DB.get_project(project_id, owner_id=owner_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     instructions = DB.get_project_instructions(project_id)
     if instructions is None:
-        source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+        source_rows = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in project.get("files", []) if f.get("source_id")]
         instructions = {"category": detect_project_category(project, [r for r in source_rows if r]), "notes": "", "metrics": {}, "entities": {}}
         DB.upsert_project_instructions(project_id, instructions)
     return {"project_id": project_id, "instructions": instructions}
 
 
 @app.patch("/projects/{project_id}/instructions")
-def update_project_instructions(project_id: str, body: InstructionsUpdate) -> dict[str, Any]:
-    if not DB.get_project(project_id):
+def update_project_instructions(project_id: str, body: InstructionsUpdate, request: Request) -> dict[str, Any]:
+    if not DB.get_project(project_id, owner_id=_current_user_id(request)):
         raise HTTPException(status_code=404, detail="Project not found")
     instructions = dict(body.instructions or {})
     category = str(instructions.get("category") or "").strip().lower()
@@ -1511,12 +1747,13 @@ def update_project_instructions(project_id: str, body: InstructionsUpdate) -> di
 
 
 @app.post("/projects/{project_id}/profile/rebuild")
-def rebuild_project_profile(project_id: str) -> dict[str, Any]:
-    project = DB.get_project(project_id)
+def rebuild_project_profile(project_id: str, request: Request) -> dict[str, Any]:
+    owner_id = _current_user_id(request)
+    project = DB.get_project(project_id, owner_id=owner_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     existing = DB.get_project_instructions(project_id) or {}
-    source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+    source_rows = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in project.get("files", []) if f.get("source_id")]
     new_category = detect_project_category(project, [r for r in source_rows if r])
     if new_category != "general" or not existing.get("category"):
         existing["category"] = new_category
@@ -1526,13 +1763,19 @@ def rebuild_project_profile(project_id: str) -> dict[str, Any]:
 
 
 @app.post("/projects/{project_id}/files")
-def add_project_file(project_id: str, body: ProjectAddFile) -> dict[str, Any]:
+def add_project_file(project_id: str, body: ProjectAddFile, request: Request) -> dict[str, Any]:
+    owner_id = _current_user_id(request)
+    if not DB.get_project(project_id, owner_id=owner_id):
+        raise HTTPException(status_code=404, detail="Project not found")
     if body.source_id:
         # Check if source exists
-        s = DB.get_source(body.source_id)
+        s = DB.get_source(body.source_id, owner_id=owner_id)
         if not s:
             raise HTTPException(status_code=404, detail="Source not found")
-        res = DB.add_file_to_project(project_id, None, source_id=body.source_id, sheet_name=body.sheet)
+        try:
+            res = DB.add_file_to_project(project_id, None, source_id=body.source_id, sheet_name=body.sheet)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
     else:
         if not body.file_path:
             raise HTTPException(status_code=400, detail="file_path or source_id required")
@@ -1540,14 +1783,18 @@ def add_project_file(project_id: str, body: ProjectAddFile) -> dict[str, Any]:
         path = Path(body.file_path).expanduser()
         if not path.exists():
             raise HTTPException(status_code=400, detail="File not found")
-        res = DB.add_file_to_project(project_id, str(path), sheet_name=body.sheet)
+        try:
+            res = DB.add_file_to_project(project_id, str(path), sheet_name=body.sheet)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
 
     # Auto-profile after adding a file
     try:
-        project = DB.get_project(project_id)
+        project = DB.get_project(project_id, owner_id=owner_id)
         if project:
             instructions = DB.get_project_instructions(project_id) or {"category": "general", "notes": "", "metrics": {}, "entities": {}}
-            source_rows = [DB.get_source(f.get("source_id")) for f in project.get("files", []) if f.get("source_id")]
+            source_rows = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in project.get("files", []) if f.get("source_id")]
             new_cat = detect_project_category(project, [r for r in source_rows if r])
             if new_cat != "general" and instructions.get("category") == "general":
                 instructions["category"] = new_cat
@@ -1559,21 +1806,23 @@ def add_project_file(project_id: str, body: ProjectAddFile) -> dict[str, Any]:
 
 
 @app.delete("/projects/{project_id}/files/{file_id}")
-def delete_project_file(project_id: str, file_id: str) -> dict[str, Any]:
+def delete_project_file(project_id: str, file_id: str, request: Request) -> dict[str, Any]:
+    if not DB.get_project(project_id, owner_id=_current_user_id(request)):
+        raise HTTPException(status_code=404, detail="Project not found")
     DB.remove_file_from_project(project_id, file_id)
     return {"ok": True}
 
 
 @app.get("/projects/{project_id}/notes")
-def list_project_notes(project_id: str) -> list[dict[str, Any]]:
-    if not DB.get_project(project_id):
+def list_project_notes(project_id: str, request: Request) -> list[dict[str, Any]]:
+    if not DB.get_project(project_id, owner_id=_current_user_id(request)):
         raise HTTPException(status_code=404, detail="Project not found")
     return DB.list_project_notes(project_id)
 
 
 @app.post("/projects/{project_id}/notes")
-def create_project_note(project_id: str, body: ProjectNoteCreate) -> dict[str, Any]:
-    if not DB.get_project(project_id):
+def create_project_note(project_id: str, body: ProjectNoteCreate, request: Request) -> dict[str, Any]:
+    if not DB.get_project(project_id, owner_id=_current_user_id(request)):
         raise HTTPException(status_code=404, detail="Project not found")
     content = body.content.strip()
     if not content:
@@ -1587,23 +1836,23 @@ def create_project_note(project_id: str, body: ProjectNoteCreate) -> dict[str, A
 
 
 @app.delete("/projects/{project_id}/notes/{note_id}")
-def delete_project_note(project_id: str, note_id: str) -> dict[str, Any]:
-    if not DB.get_project(project_id):
+def delete_project_note(project_id: str, note_id: str, request: Request) -> dict[str, Any]:
+    if not DB.get_project(project_id, owner_id=_current_user_id(request)):
         raise HTTPException(status_code=404, detail="Project not found")
     DB.delete_project_note(project_id, note_id)
     return {"ok": True}
 
 
 @app.get("/projects/{project_id}/mcp")
-def list_project_mcp(project_id: str) -> list[dict[str, Any]]:
-    if not DB.get_project(project_id):
+def list_project_mcp(project_id: str, request: Request) -> list[dict[str, Any]]:
+    if not DB.get_project(project_id, owner_id=_current_user_id(request)):
         raise HTTPException(status_code=404, detail="Project not found")
     return DB.list_project_mcp_connectors(project_id)
 
 
 @app.post("/projects/{project_id}/mcp/{connector_id}")
-def bind_project_mcp(project_id: str, connector_id: str) -> dict[str, Any]:
-    if not DB.get_project(project_id):
+def bind_project_mcp(project_id: str, connector_id: str, request: Request) -> dict[str, Any]:
+    if not DB.get_project(project_id, owner_id=_current_user_id(request)):
         raise HTTPException(status_code=404, detail="Project not found")
     if not DB.get_mcp_connector(connector_id):
         raise HTTPException(status_code=404, detail="MCP connector not found")
@@ -1612,8 +1861,8 @@ def bind_project_mcp(project_id: str, connector_id: str) -> dict[str, Any]:
 
 
 @app.delete("/projects/{project_id}/mcp/{connector_id}")
-def unbind_project_mcp(project_id: str, connector_id: str) -> dict[str, Any]:
-    if not DB.get_project(project_id):
+def unbind_project_mcp(project_id: str, connector_id: str, request: Request) -> dict[str, Any]:
+    if not DB.get_project(project_id, owner_id=_current_user_id(request)):
         raise HTTPException(status_code=404, detail="Project not found")
     DB.unbind_mcp_from_project(project_id, connector_id)
     return {"ok": True}
@@ -2467,10 +2716,10 @@ async def _run_multi_source_agent(
     yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
 
 
-def _load_history(chat_id: str | None) -> list[dict[str, Any]]:
+def _load_history(chat_id: str | None, owner_id: str = "legacy") -> list[dict[str, Any]]:
     if not chat_id:
         return []
-    chat = DB.get_chat(chat_id)
+    chat = DB.get_chat(chat_id, owner_id=owner_id)
     if not chat:
         return []
     return [{"role": m["role"], "content": m["content"]} for m in chat["messages"]]
@@ -2481,13 +2730,14 @@ async def _load_query_sources(
     active_row: dict[str, Any] | None,
     *,
     use_active_fallback: bool,
+    owner_id: str = "legacy",
 ) -> list[tuple[dict[str, Any], DataSource]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for source_id in source_ids:
         if source_id == "mcp" or source_id in seen:
             continue
-        row = DB.get_source(source_id)
+        row = DB.get_source(source_id, owner_id=owner_id)
         if row:
             rows.append(row)
             seen.add(source_id)
@@ -2505,13 +2755,18 @@ async def _load_query_sources(
 
 
 @app.post("/query")
-async def query(body: QueryRequest):
-    chat_id = body.chat_id or DB.create_chat()["id"]
+async def query_endpoint(body: QueryRequest, request: Request):
+    owner_id = _current_user_id(request)
+    if body.chat_id and not DB.get_chat(body.chat_id, owner_id=owner_id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    chat_id = body.chat_id or DB.create_chat(owner_id=owner_id)["id"]
     llm_router = _router_for_model_mode(body.model_mode)
     model_preset = _model_preset_for_mode(body.model_mode)
     if body.project_id:
-        DB.update_chat_project(chat_id, body.project_id)
-    chat = DB.get_chat(chat_id)
+        if not DB.get_project(body.project_id, owner_id=owner_id):
+            raise HTTPException(status_code=404, detail="Project not found")
+        DB.update_chat_project(chat_id, body.project_id, owner_id=owner_id)
+    chat = DB.get_chat(chat_id, owner_id=owner_id)
     if chat and chat.get("project_id"):
         await ensure_project_context(chat["project_id"])
 
@@ -2519,7 +2774,7 @@ async def query(body: QueryRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
 
-    active_row = DB.get_active_source()
+    active_row = DB.get_active_source(owner_id=owner_id)
     pool = get_pool()
     allowed_mcp_ids = _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
     has_mcp = any(s.status == "connected" and s.id in allowed_mcp_ids for s in pool.connectors.values())
@@ -2529,6 +2784,7 @@ async def query(body: QueryRequest):
         requested_source_ids,
         active_row,
         use_active_fallback=not body.source_ids,
+        owner_id=owner_id,
     )
 
     if not selected_sources and not has_mcp:
@@ -2541,18 +2797,26 @@ async def query(body: QueryRequest):
     # Store source_ids in user message payload so we can restore them when loading chat history
     user_payload: dict[str, Any] = {"source_ids": [row["id"] for row, _ in selected_sources]}
     DB.add_message(chat_id, "user", question, payload=user_payload)
-    chat = DB.get_chat(chat_id)
+    chat = DB.get_chat(chat_id, owner_id=owner_id)
     if chat and (not chat.get("title") or chat["title"] == "New chat"):
-        DB.update_chat_title(chat_id, question[:60])
+        DB.update_chat_title(chat_id, question[:60], owner_id=owner_id)
 
-    history = _load_history(chat_id)
+    history = _load_history(chat_id, owner_id=owner_id)
     project_instructions: dict[str, Any] | None = None
     source_instructions: dict[str, Any] | None = None
     memory_snippets: list[dict[str, Any]] = []
     if chat and chat.get("project_id"):
         project_instructions = DB.get_project_instructions(chat["project_id"])
         if project_instructions is None:
-            project_instructions = get_project_instructions(chat["project_id"])["instructions"]
+            project = DB.get_project(chat["project_id"], owner_id=owner_id)
+            source_rows = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in (project or {}).get("files", []) if f.get("source_id")]
+            project_instructions = {
+                "category": detect_project_category(project or {}, [r for r in source_rows if r]),
+                "notes": "",
+                "metrics": {},
+                "entities": {},
+            }
+            DB.upsert_project_instructions(chat["project_id"], project_instructions)
         DB.rebuild_project_memory(chat["project_id"])
         memory_snippets = DB.search_project_memory(chat["project_id"], question, limit=5)
         notes = DB.list_project_notes(chat["project_id"])[:6]
@@ -2621,7 +2885,7 @@ async def query(body: QueryRequest):
                 char_budget=3000,
             )
             if llm_router.available:
-                intent, model_used = await loop.run_in_executor(
+                intent, model_used, usage = await loop.run_in_executor(
                     None,
                     lambda: llm_router.classify_intent(
                         request_id=request_id,
@@ -2632,6 +2896,13 @@ async def query(body: QueryRequest):
                         local_source_name=active_row["name"],
                         instruction_context=instruction_context,
                     ),
+                )
+                DB.add_token_usage(
+                    project_id=chat.get("project_id"),
+                    user_id=owner_id,
+                    model=model_used,
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0)
                 )
             else:
                 intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
@@ -2775,12 +3046,45 @@ async def query(body: QueryRequest):
                 yield {"event": "text", "data": json.dumps({"delta": text})}
 
             full_text = "".join(full_text_parts) or "(no answer)"
+            
+            # Log tokens for the answer (estimated for stream)
+            if llm_router.available:
+                prompt_for_answer = build_answer_prompt(
+                    user_question=question,
+                    intent=intent,
+                    result_sample=sample,
+                    row_count=len(df),
+                    char_budget=llm_router.char_budget,
+                    sql=plan.sql,
+                    total_row=total_row,
+                )
+                DB.add_token_usage(
+                    project_id=chat.get("project_id") if chat else None,
+                    user_id=owner_id,
+                    model=model_used,
+                    prompt_tokens=estimate_tokens(prompt_for_answer),
+                    completion_tokens=estimate_tokens(full_text)
+                )
+
             assistant_payload = {
                 "kind": "result",
                 "model": model_used,
                 "result": result_payload,
             }
             msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
+
+            # Hallucination evaluation
+            if sample and llm_router.available:
+                context_str = json.dumps(sample, indent=2)
+                background_tasks.add_task(
+                    evaluate_hallucination_background,
+                    chat_id,
+                    msg["id"],
+                    question,
+                    full_text,
+                    context_str
+                )
+
             yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
         except Exception as exc:
             log_event(LOGGERS["errors"], "query_error", request_id=request_id, error=str(exc))

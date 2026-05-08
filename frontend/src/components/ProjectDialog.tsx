@@ -28,6 +28,7 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   const [loading, setLoading] = useState(true);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
+  const [confirmFileId, setConfirmFileId] = useState<string | null>(null);
   const projectFileLabel = (file: Project["files"][number]) => {
     if (file.source_id) return displaySourceName(file.source_name || `Source: ${file.source_id}`);
     return displaySourceName(file.file_path?.split("/").pop() || "Unknown File");
@@ -303,12 +304,35 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                         )}
                       </div>
                     </div>
-                    <button
-                      onClick={() => handleRemoveFile(file.id)}
-                      className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    <div className="relative">
+                      <button
+                        onClick={() => setConfirmFileId(file.id)}
+                        className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                        aria-label={`Delete ${projectFileLabel(file)}`}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                      {confirmFileId === file.id && (
+                        <div className="absolute right-0 top-8 z-30 w-[220px] rounded-xl border border-gray-200 bg-white p-3 text-xs shadow-xl">
+                          <div className="font-semibold text-gray-800">Delete this file?</div>
+                          <div className="mt-1 text-gray-500">It will be removed from this project context.</div>
+                          <div className="mt-3 flex justify-end gap-2">
+                            <button className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-gray-600" onClick={() => setConfirmFileId(null)}>
+                              Cancel
+                            </button>
+                            <button
+                              className="rounded-lg bg-red-600 px-2.5 py-1.5 font-medium text-white"
+                              onClick={() => {
+                                setConfirmFileId(null);
+                                handleRemoveFile(file.id);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>

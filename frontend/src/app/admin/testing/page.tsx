@@ -70,7 +70,7 @@ export default function TestingPage() {
     setIsSaving(true);
     try {
       const suite = await api.createTestSuite(name);
-      await api.addTestQueriesBulk({ suite_id: suite.id, queries });
+      await api.addTestQueriesBulk(suite.id, queries);
       await loadSuites();
       setSelectedSuiteId(suite.id);
       setShowInputPane(false);

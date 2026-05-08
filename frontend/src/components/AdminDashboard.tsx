@@ -8,18 +8,26 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  Cell,
 } from "recharts";
-import { Activity, Clock, Database, MessageSquare, Zap } from "lucide-react";
+import { Activity, AlertTriangle, Clock, Database, MessageSquare, Zap, ExternalLink } from "lucide-react";
 
 export function AdminDashboard() {
   const [stats, setStats] = useState<any>(null);
+  const [hallucinations, setHallucinations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let mounted = true;
-    api.getAdminStats()
-      .then((data) => {
-        if (mounted) setStats(data);
+    Promise.all([
+      api.getAdminStats(),
+      api.getHallucinations()
+    ])
+      .then(([statsData, halData]) => {
+        if (mounted) {
+          setStats(statsData);
+          setHallucinations(halData);
+        }
       })
       .catch(console.error)
       .finally(() => {
@@ -96,6 +104,63 @@ export function AdminDashboard() {
             </div>
           </div>
         )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          <div className="p-5 rounded-xl" style={{ border: "1px solid var(--color-border-secondary)", background: "var(--color-background-secondary)" }}>
+            <h2 className="text-sm font-medium mb-4 uppercase tracking-wider" style={{ color: "var(--color-text-tertiary)" }}>Token Usage by Project</h2>
+            {stats.token_usage_by_project && stats.token_usage_by_project.length > 0 ? (
+              <div className="h-[250px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={stats.token_usage_by_project} layout="vertical" margin={{ left: 0, right: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="var(--color-border-secondary)" />
+                    <XAxis type="number" stroke="var(--color-text-tertiary)" fontSize={12} />
+                    <YAxis dataKey="project_name" type="category" width={120} stroke="var(--color-text-tertiary)" fontSize={12} />
+                    <Tooltip cursor={{ fill: "var(--color-background-primary)" }} contentStyle={{ background: "var(--color-background-primary)", borderColor: "var(--color-border-secondary)", borderRadius: 8, color: "var(--color-text-primary)" }} />
+                    <Bar dataKey="total_tokens" name="Tokens" fill="var(--color-text-success)" radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="text-sm" style={{ color: "var(--color-text-tertiary)" }}>No token usage data yet.</div>
+            )}
+          </div>
+
+          <div className="p-5 rounded-xl flex flex-col" style={{ border: "1px solid var(--color-border-secondary)", background: "var(--color-background-secondary)" }}>
+            <h2 className="text-sm font-medium mb-4 uppercase tracking-wider flex items-center gap-2" style={{ color: "var(--color-text-tertiary)" }}>
+              <AlertTriangle size={14} className="text-amber-500" /> Recent Hallucinations (Faithfulness)
+            </h2>
+            <div className="flex-1 overflow-y-auto">
+              {hallucinations.length > 0 ? (
+                <div className="space-y-4">
+                  {hallucinations.map((log: any) => (
+                    <div key={log.id} className="p-3 rounded-lg border border-white/5 bg-white/5">
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="text-xs font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-500">
+                          Score: {(log.score * 100).toFixed(0)}%
+                        </span>
+                        <a href={`/chat/${log.chat_id}`} className="text-xs flex items-center gap-1 text-blue-400 hover:underline">
+                          View Chat <ExternalLink size={10} />
+                        </a>
+                      </div>
+                      <p className="text-xs line-clamp-2 mb-2" style={{ color: "var(--color-text-secondary)" }}>
+                        {log.message_content}
+                      </p>
+                      {log.reason && (
+                        <p className="text-[10px] italic" style={{ color: "var(--color-text-tertiary)" }}>
+                          Reason: {log.reason}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="h-full flex items-center justify-center text-sm" style={{ color: "var(--color-text-tertiary)" }}>
+                  No hallucinations detected.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="p-5 rounded-xl" style={{ border: "1px solid var(--color-border-secondary)", background: "var(--color-background-secondary)" }}>

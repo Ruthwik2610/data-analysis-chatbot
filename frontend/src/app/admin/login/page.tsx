@@ -16,8 +16,11 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
     try {
-      const { token } = await api.adminLogin(password);
+      const { token, user_token } = await api.adminLogin(password);
       localStorage.setItem("datachat_admin_token", token);
+      if (user_token) {
+        localStorage.setItem("datachat_user_token", user_token);
+      }
       router.push("/admin");
     } catch (err: any) {
       setError(err.message || "Invalid password");
