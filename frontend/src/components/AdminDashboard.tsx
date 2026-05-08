@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Activity, AlertTriangle, Clock, Database, MessageSquare, Zap, ExternalLink } from "lucide-react";
+import { Activity, AlertTriangle, Clock, Database, MessageSquare, Zap, ExternalLink, Folder } from "lucide-react";
 
 export function AdminDashboard() {
   const [stats, setStats] = useState<any>(null);
@@ -135,9 +135,16 @@ export function AdminDashboard() {
                   {hallucinations.map((log: any) => (
                     <div key={log.id} className="p-3 rounded-lg border border-white/5 bg-white/5">
                       <div className="flex justify-between items-start mb-2">
-                        <span className="text-xs font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-500">
-                          Score: {(log.score * 100).toFixed(0)}%
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-xs font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-500 w-fit">
+                            Score: {(log.score * 100).toFixed(0)}%
+                          </span>
+                          {log.project_name && (
+                            <span className="text-[10px] opacity-60 flex items-center gap-1" style={{ color: "var(--color-text-secondary)" }}>
+                              <Folder size={8} /> {log.project_name}
+                            </span>
+                          )}
+                        </div>
                         <a href={`/chat/${log.chat_id}`} className="text-xs flex items-center gap-1 text-blue-400 hover:underline">
                           View Chat <ExternalLink size={10} />
                         </a>

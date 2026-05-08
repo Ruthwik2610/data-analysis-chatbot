@@ -1009,9 +1009,18 @@ async def run_test_suite_background(run_id: str, suite_id: str, snapshot: dict):
             # For now, we use a simple text generation to simulate the test
             # In Phase 5+, we should integrate the full query_engine pipeline.
             prompt = f"Answer this data question: {q['question']}"
-            answer = await asyncio.to_thread(ROUTER._generate_text, prompt, f"test_{run_id}_{q['id']}")
+            answer, usage = await asyncio.to_thread(ROUTER._generate_text, prompt, f"test_{run_id}_{q['id']}")
             latency = (time.time() - start_time) * 1000
             DB.add_test_evaluation(run_id, q["id"], answer, latency)
+            
+            # Log token usage for test evaluation
+            DB.add_token_usage(
+                project_id=None,
+                user_id="system_test",
+                model=ROUTER.model,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0)
+            )
         except Exception as e:
             logging.error(f"Test run evaluation failed for query {q['id']}: {e}")
             DB.add_test_evaluation(run_id, q["id"], f"Error: {str(e)}", (time.time() - start_time) * 1000, grade="Error")
@@ -1038,10 +1047,20 @@ Respond ONLY in JSON format:
 }}
 """
     try:
-        result = await asyncio.to_thread(ROUTER._generate_json, prompt, f"hal_{message_id}")
+        result, usage = await asyncio.to_thread(ROUTER._generate_json, prompt, f"hal_{message_id}")
         score = float(result.get("score", 1.0))
         reason = result.get("reason", "")
         DB.add_hallucination_log(chat_id, message_id, score, reason)
+        
+        # Also log token usage for the evaluation itself
+        chat = DB.get_chat(chat_id)
+        DB.add_token_usage(
+            project_id=chat.get("project_id") if chat else None,
+            user_id=chat.get("owner_id") if chat else None,
+            model=ROUTER.model,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0)
+        )
     except Exception as e:
         logging.error(f"Hallucination evaluation failed for message {message_id}: {e}")
 

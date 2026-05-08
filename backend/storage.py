@@ -1165,10 +1165,16 @@ class Storage:
         with self._conn() as con:
             rows = con.execute(
                 """
-                SELECT hl.*, m.content as message_content, c.title as chat_title
+                SELECT 
+                  hl.*, 
+                  m.content as message_content, 
+                  c.title as chat_title,
+                  p.title as project_name,
+                  p.id as project_id
                 FROM hallucination_logs hl
                 JOIN messages m ON hl.message_id = m.id
                 JOIN chats c ON hl.chat_id = c.id
+                LEFT JOIN projects p ON c.project_id = p.id
                 ORDER BY hl.created_at DESC
                 LIMIT ?
                 """,
