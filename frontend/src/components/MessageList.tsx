@@ -56,27 +56,28 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
   }
 
   return (
-    <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-5 flex flex-col">
-      {messages.map((msg, idx) => {
-        const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
-        const isFirst = idx === 0;
-        return (
-          <div key={msg.id} className={`flex flex-col w-full ${isFirst ? "" : isConsecutive ? "mt-1.5" : "mt-6"}`}>
-            <Bubble
-              message={msg}
-              onChoose={(v) => onPendingChoice(msg.id, v)}
-              currentProjectId={currentProjectId}
-              onSaveProjectNote={onSaveProjectNote}
-              onAskFollowUp={onAskFollowUp}
-            />
-            {idx === lastResultIdx && onAskFollowUp && (
-              <div className="mt-4">
-                <FollowUpChips key={`chips-${msg.id}`} onSelect={onAskFollowUp} />
-              </div>
-            )}
-          </div>
-        );
-      })}
+    <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col justify-end">
+      <div className="flex flex-col gap-6">
+        {messages.map((msg, idx) => {
+            const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
+            return (
+            <div key={msg.id} className={`flex flex-col w-full ${isConsecutive ? "mt-1.5" : ""}`}>
+                <Bubble
+                message={msg}
+                onChoose={(v) => onPendingChoice(msg.id, v)}
+                currentProjectId={currentProjectId}
+                onSaveProjectNote={onSaveProjectNote}
+                onAskFollowUp={onAskFollowUp}
+                />
+                {idx === lastResultIdx && onAskFollowUp && (
+                <div className="mt-4">
+                    <FollowUpChips key={`chips-${msg.id}`} onSelect={onAskFollowUp} />
+                </div>
+                )}
+            </div>
+            );
+        })}
+      </div>
     </div>
   );
 }
@@ -197,95 +198,45 @@ function FallbackNotice({ notice }: { notice: ModelFallbackNotice }) {
 function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => void; onConnectClick: () => void }) {
   return (
     <div className="hero-stage flex-1 flex flex-col items-center justify-center px-4 py-8 fade-in sm:px-8">
-      <div className="w-full max-w-[880px] text-center">
+      <div className="w-full max-w-[880px] text-center mb-12">
         <div
-          className="mx-auto mb-7 inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[12px] font-medium"
+          className="mx-auto mb-7 inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] font-bold uppercase tracking-widest glass"
           style={{
-            background: "var(--color-background-secondary)",
-            border: "1px solid var(--color-border-secondary)",
             color: "var(--color-text-secondary)",
           }}
         >
-          <Sparkles size={13} strokeWidth={1.7} />
+          <Sparkles size={13} strokeWidth={2} className="text-blue-500" />
           Unipro AI Workspace
         </div>
-        <h1 className="mx-auto max-w-[820px] text-[34px] font-bold leading-[1.08] sm:text-[58px]" style={{ color: "var(--color-text-primary)", letterSpacing: 0 }}>
-          Analyze your business data with AI.
+        <h1 className="mx-auto max-w-[820px] text-[42px] font-bold leading-[1.1] sm:text-[64px] tracking-tight" style={{ color: "var(--color-text-primary)" }}>
+          The intelligent layer for your <span className="text-blue-500">business data.</span>
         </h1>
-        <p className="mx-auto mt-5 max-w-[680px] text-[15px] leading-[1.65] sm:mt-7 sm:text-[18px]" style={{ color: "var(--color-text-secondary)" }}>
-          Upload files, connect APIs, and generate intelligent insights instantly.
+        <p className="mx-auto mt-6 max-w-[680px] text-[16px] leading-[1.7] sm:text-[20px] opacity-60" style={{ color: "var(--color-text-secondary)" }}>
+          Connect your CSVs, Databases, or APIs and start chatting with your information in seconds.
         </p>
       </div>
 
-      <div
-        data-testid="empty-action-grid"
-        className="hero-console mt-10 flex w-full max-w-[864px] flex-col gap-0 overflow-hidden rounded-[18px] sm:mt-14 sm:flex-row sm:rounded-[22px]"
-        style={{
-          background: "var(--color-background-elevated)",
-          border: "1px solid var(--color-border-secondary)",
-          boxShadow: "var(--shadow-xl)",
-        }}
-      >
-        <div className="flex flex-1 flex-col">
-          <div className="flex flex-wrap items-center gap-2 px-6 py-4" style={{ borderBottom: "1px solid var(--color-border-tertiary)" }}>
+      <div className="flex flex-wrap justify-center gap-4">
             <FilePickButton
               onPick={onPickFile}
               variant="card"
               title="Attach a file"
-              className="inline-flex items-center gap-2 rounded-[12px] px-3 py-2 text-[13px] font-medium transition-colors"
+              className="inline-flex items-center gap-2 rounded-[16px] px-6 py-3 text-[14px] font-bold transition-all glass hover:scale-105 active:scale-95 shadow-xl"
             >
-              <Paperclip size={15} strokeWidth={1.7} />
-              Upload
+              <Paperclip size={18} strokeWidth={2} className="text-blue-500" />
+              Upload Source
             </FilePickButton>
             <button
               onClick={onConnectClick}
-              className="inline-flex items-center gap-2 rounded-[12px] px-3 py-2 text-[13px] font-medium transition-colors"
-              style={{
-                border: "1px solid var(--color-border-secondary)",
-                background: "var(--color-background-secondary)",
-                color: "var(--color-text-secondary)",
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--color-border-primary)")}
-              onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--color-border-secondary)")}
+              className="inline-flex items-center gap-2 rounded-[16px] px-6 py-3 text-[14px] font-bold transition-all glass hover:scale-105 active:scale-95 shadow-xl"
             >
-              <Plug size={15} strokeWidth={1.7} />
-              Connect API
+              <Plug size={18} strokeWidth={2} className="text-indigo-500" />
+              Connect context
             </button>
-            <span
-              className="ml-auto hidden rounded-[12px] px-3 py-2 text-[13px] font-medium sm:inline-flex"
-              style={{
-                background: "#eff6ff",
-                border: "1px solid rgba(37, 99, 235, 0.18)",
-                color: "#1d4ed8",
-              }}
-            >
-              Flash / Pro ready
-            </span>
-          </div>
-          <div className="flex items-center gap-3 px-6 py-6 text-left">
-            <div className="min-w-0 flex-1 text-[18px]" style={{ color: "var(--color-text-tertiary)" }}>
-              Ask anything about your data...
-            </div>
-            <button
-              onClick={() => window.dispatchEvent(new CustomEvent("data-chat:focus-input"))}
-              className="h-10 w-10 flex-shrink-0 rounded-[12px] flex items-center justify-center transition-colors"
-              title="Focus composer"
-              style={{ background: "#2563eb", color: "#ffffff", boxShadow: "0 14px 26px -18px rgba(37, 99, 235, 0.9)" }}
-            >
-              <ArrowRight size={18} strokeWidth={2} />
-            </button>
-          </div>
-        </div>
       </div>
 
-      <div className="mt-5 text-[13px]" style={{ color: "var(--color-text-tertiary)" }}>
-        Powered by advanced AI • Secure • Private
-      </div>
-
-      <div className="mt-6 flex flex-wrap justify-center gap-2 text-[12px]" style={{ color: "var(--color-text-secondary)" }}>
-        <span className="rounded-full px-3 py-1.5" style={{ background: "var(--color-background-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Top 10 by revenue</span>
-        <span className="rounded-full px-3 py-1.5" style={{ background: "var(--color-background-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Find anomalies</span>
-        <span className="rounded-full px-3 py-1.5" style={{ background: "var(--color-background-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Compare periods</span>
+      <div className="mt-12 text-[11px] font-bold uppercase tracking-[0.2em] opacity-30" style={{ color: "var(--color-text-tertiary)" }}>
+        Enterprise Grade • Secure • 100% Grounded
       </div>
     </div>
   );

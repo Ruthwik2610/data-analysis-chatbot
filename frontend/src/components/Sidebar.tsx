@@ -43,11 +43,13 @@ export function Sidebar(p: SidebarProps) {
   const [clearConfirm, setClearConfirm] = useState(false);
   return (
     <aside
-      className="flex flex-col flex-shrink-0"
+      className="flex flex-col flex-shrink-0 relative z-20"
       style={{
         width: 280,
-        background: "var(--color-background-secondary)",
-        borderRight: "1px solid var(--color-border-secondary)",
+        background: "var(--glass-background)",
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
+        borderRight: "1px solid var(--color-border-tertiary)",
       }}
     >
       <div

@@ -33,8 +33,13 @@ export function Topbar({ title, activeSource, selectedSources, projectName, user
 
   return (
     <div
-      className="flex items-center justify-between gap-4 px-6 py-3.5"
-      style={{ borderBottom: "1px solid var(--color-border-tertiary)", background: "var(--color-background-primary)" }}
+      className="flex items-center justify-between gap-4 px-6 py-3.5 relative z-30"
+      style={{ 
+        borderBottom: "1px solid var(--color-border-tertiary)", 
+        background: "var(--glass-background)",
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
+      }}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <button

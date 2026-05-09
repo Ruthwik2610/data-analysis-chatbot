@@ -70,14 +70,12 @@ export function InputBar({
   };
 
   return (
-    <div className="px-6 py-4 relative" style={{ background: "var(--color-background-primary)", borderTop: "1px solid var(--color-border-tertiary)" }}>
+    <div className="px-6 py-4 relative z-30" style={{ background: "transparent" }}>
       <div
-        className="mx-auto flex max-w-[920px] flex-col gap-2 px-4 py-3 relative"
+        className="mx-auto flex max-w-[920px] flex-col gap-2 px-4 py-3 relative glass"
         style={{
-          background: "var(--color-background-elevated)",
-          border: "1px solid var(--color-border-secondary)",
-          borderRadius: 18,
-          boxShadow: "var(--shadow-lg)",
+          borderRadius: 22,
+          boxShadow: "var(--shadow-xl)",
         }}
       >
         <div role="toolbar" aria-label="Composer actions" className="flex flex-wrap items-center gap-1.5">

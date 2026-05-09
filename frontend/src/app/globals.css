@@ -31,14 +31,20 @@
   --shadow-md: 0 8px 18px -12px rgb(15 23 42 / 0.22);
   --shadow-lg: 0 18px 36px -24px rgb(15 23 42 / 0.28);
   --shadow-xl: 0 28px 60px -36px rgb(15 23 42 / 0.35);
+
+  --glass-background: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(15, 23, 42, 0.08);
 }
 
 [data-theme="dark"] {
   --color-background-primary: #111113;
   --color-background-secondary: #1a1a1e;
-  --color-background-tertiary: #222228;
+  --color-background-tertiary: #0a0a0c;
   --color-background-info: #1a253d;
   --color-background-elevated: #1f1f24;
+
+  --glass-background: rgba(26, 26, 30, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.06);
   --color-text-primary: #f0f0f2;
   --color-text-secondary: #b0b0ba;
   --color-text-tertiary: #72727e;
@@ -128,16 +134,25 @@ button { font-family: inherit; cursor: pointer; }
 .duration-700 { animation-duration: 700ms; }
 .duration-500 { animation-duration: 500ms; }
 
+.glass {
+  background: var(--glass-background);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+}
+
 .auth-shell,
 .hero-stage {
   position: relative;
   isolation: isolate;
   background-image:
-    linear-gradient(120deg, color-mix(in srgb, var(--color-background-info) 52%, transparent), transparent 42%),
+    radial-gradient(at 0% 0%, color-mix(in srgb, var(--color-text-info) 10%, transparent) 0, transparent 50%),
+    radial-gradient(at 50% 0%, color-mix(in srgb, #6366f1 8%, transparent) 0, transparent 50%),
+    radial-gradient(at 100% 0%, color-mix(in srgb, #ec4899 8%, transparent) 0, transparent 50%),
     linear-gradient(180deg, var(--color-background-primary), var(--color-background-secondary));
   background-repeat: no-repeat;
   background-position: center, center;
-  background-size: auto, auto;
+  background-size: 100% 100%;
 }
 
 .auth-shell {
