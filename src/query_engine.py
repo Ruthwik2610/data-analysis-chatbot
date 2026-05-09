@@ -285,8 +285,13 @@ def underspecified_clarification(allowed_columns: set[str], source_name: str = "
 
 
 def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set[str]) -> QueryPlan:
-    intent_type = intent.get("intent_type") or "aggregate"
-    q = question.lower()
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
+    
+    with tracer.start_as_current_span("build_query_plan") as span:
+        intent_type = intent.get("intent_type") or "aggregate"
+        span.set_attribute("intent_type", intent_type)
+        q = question.lower()
     
     if intent_type == "clarification":
         raise ValueError(intent.get("clarifying_question") or "I need one more detail to answer that.")

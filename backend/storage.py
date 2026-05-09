@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   payload TEXT,
+  trace_id TEXT,
   created_at REAL NOT NULL
 );
 
@@ -171,6 +172,9 @@ CREATE TABLE IF NOT EXISTS test_evaluations (
   latency_ms REAL,
   grade TEXT, -- 'Pass', 'Fail', 'Partial', 'Error'
   reason TEXT,
+  ai_grade TEXT, -- AI-generated grade
+  ai_reason TEXT, -- AI-generated reasoning
+  trace_id TEXT,
   created_at REAL NOT NULL
 );
 
@@ -217,6 +221,10 @@ class Storage:
             self._ensure_column(con, "connectors", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
             self._ensure_column(con, "mcp_connectors", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
             self._ensure_column(con, "project_files", "source_id", "TEXT REFERENCES sources(id) ON DELETE SET NULL")
+            self._ensure_column(con, "messages", "trace_id", "TEXT")
+            self._ensure_column(con, "test_evaluations", "trace_id", "TEXT")
+            self._ensure_column(con, "test_evaluations", "ai_grade", "TEXT")
+            self._ensure_column(con, "test_evaluations", "ai_reason", "TEXT")
             self._ensure_project_memory_table(con)
             con.execute("PRAGMA journal_mode=WAL")
 
@@ -384,16 +392,26 @@ class Storage:
             else:
                 con.execute("DELETE FROM chats WHERE id = ? AND owner_id = ?", (chat_id, owner_id))
 
-    def add_message(self, chat_id: str, role: str, content: str, payload: dict | None = None) -> dict[str, Any]:
+    def add_message(self, chat_id: str, role: str, content: str, payload: dict | None = None, trace_id: str | None = None) -> dict[str, Any]:
+        # Automatically detect trace_id from current OpenTelemetry context if not provided
+        if not trace_id:
+            try:
+                from opentelemetry import trace
+                span = trace.get_current_span()
+                if span and span.get_span_context().is_valid:
+                    trace_id = format(span.get_span_context().trace_id, '032x')
+            except ImportError:
+                pass
+
         msg_id = f"msg_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
             con.execute(
-                "INSERT INTO messages (id, chat_id, role, content, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (msg_id, chat_id, role, content, json.dumps(payload) if payload else None, now),
+                "INSERT INTO messages (id, chat_id, role, content, payload, trace_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (msg_id, chat_id, role, content, json.dumps(payload) if payload else None, trace_id, now),
             )
             con.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
-        return {"id": msg_id, "role": role, "content": content, "payload": payload, "created_at": now}
+        return {"id": msg_id, "role": role, "content": content, "payload": payload, "trace_id": trace_id, "created_at": now}
 
     # -- sources -------------------------------------------------------------
     def upsert_source(
@@ -1041,9 +1059,36 @@ class Storage:
             query += " WHERE suite_id = ?"
             params.append(suite_id)
         query += " ORDER BY created_at DESC"
+        
+        runs = []
         with self._conn() as con:
             rows = con.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+            for r in rows:
+                run = dict(r)
+                run["snapshot"] = json.loads(run.pop("snapshot_json") or "{}")
+                
+                # Get aggregated stats
+                stats = con.execute(
+                    """
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN lower(grade) = 'pass' THEN 1 ELSE 0 END) as pass,
+                        SUM(CASE WHEN lower(grade) = 'fail' THEN 1 ELSE 0 END) as fail,
+                        SUM(CASE WHEN lower(grade) = 'partial' THEN 1 ELSE 0 END) as partial,
+                        SUM(CASE WHEN lower(grade) = 'error' THEN 1 ELSE 0 END) as error,
+                        SUM(CASE WHEN lower(ai_grade) = 'pass' THEN 1 ELSE 0 END) as ai_pass,
+                        SUM(CASE WHEN lower(ai_grade) = 'fail' THEN 1 ELSE 0 END) as ai_fail,
+                        SUM(CASE WHEN lower(ai_grade) = 'partial' THEN 1 ELSE 0 END) as ai_partial,
+                        SUM(CASE WHEN lower(grade) = lower(ai_grade) AND grade IS NOT NULL THEN 1 ELSE 0 END) as consensus
+                    FROM test_evaluations
+                    WHERE run_id = ?
+                    """,
+                    (run["id"],)
+                ).fetchone()
+                
+                run["stats"] = dict(stats) if stats else {"total": 0, "pass": 0, "fail": 0, "partial": 0, "error": 0, "ai_pass": 0, "ai_fail": 0, "ai_partial": 0, "consensus": 0}
+                runs.append(run)
+        return runs
 
     def add_test_evaluation(
         self,
@@ -1053,23 +1098,32 @@ class Storage:
         latency_ms: float | None,
         grade: str | None = None,
         reason: str | None = None,
-    ) -> None:
+        trace_id: str | None = None,
+    ) -> str:
         eval_id = f"ev_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
             con.execute(
                 """
-                INSERT INTO test_evaluations (id, run_id, query_id, answer, latency_ms, grade, reason, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO test_evaluations (id, run_id, query_id, answer, latency_ms, grade, reason, trace_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (eval_id, run_id, query_id, answer, latency_ms, grade, reason, now),
+                (eval_id, run_id, query_id, answer, latency_ms, grade, reason, trace_id, now),
+            )
+        return eval_id
+
+    def update_test_evaluation_ai_grade(self, eval_id: str, ai_grade: str, ai_reason: str) -> None:
+        with self._conn() as con:
+            con.execute(
+                "UPDATE test_evaluations SET ai_grade = ?, ai_reason = ? WHERE id = ?",
+                (ai_grade, ai_reason, eval_id),
             )
 
     def list_test_evaluations(self, run_id: str) -> list[dict[str, Any]]:
         with self._conn() as con:
             rows = con.execute(
                 """
-                SELECT te.*, tq.question, tq.category
+                SELECT te.*, tq.question, tq.category, tq.expected_answer
                 FROM test_evaluations te
                 JOIN test_queries tq ON te.query_id = tq.id
                 WHERE te.run_id = ?
@@ -1168,6 +1222,7 @@ class Storage:
                 SELECT 
                   hl.*, 
                   m.content as message_content, 
+                  m.trace_id,
                   c.title as chat_title,
                   p.title as project_name,
                   p.id as project_id

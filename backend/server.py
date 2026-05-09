@@ -4,8 +4,8 @@ import asyncio
 import base64
 import contextlib
 import hashlib
-import hmac
-import ipaddress
+import collections
+import collections.abc
 import json
 import logging
 import math
@@ -22,13 +22,17 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
+import psutil
+from opentelemetry import trace
 import pandas as pd
+
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, BackgroundTasks, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+TRACER = trace.get_tracer(__name__)
 
 # -- models ----------------------------------------------------------------
 class AttachCSVPath(BaseModel):
@@ -243,6 +247,13 @@ if not API_KEY:
     )
 
 # Singleton — re-creating per request reloads the genai client and wastes time.
+from src.model_router import setup_phoenix
+setup_phoenix(
+    api_key=CONFIG.phoenix_api_key,
+    project_name=CONFIG.phoenix_project_name,
+    endpoint=os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "https://app.phoenix.arize.com/v1/traces")
+)
+
 ROUTER = LLMRouter(
     openrouter_api_key=CONFIG.openrouter_api_key,
     openrouter_provider_order=CONFIG.openrouter_provider_order,
@@ -800,11 +811,24 @@ async def admin_stats(request: Request) -> dict[str, Any]:
             "total_messages": 0,
             "avg_query_latency_ms": 0,
             "avg_llm_latency_ms": 0,
+            "avg_faithfulness": None,
+            "hallucination_count": 0,
+        },
+        "system_health": {
+            "cpu_percent": psutil.cpu_percent(),
+            "ram_percent": psutil.virtual_memory().percent,
+            "ram_used_gb": round(psutil.virtual_memory().used / (1024**3), 2),
+            "ram_total_gb": round(psutil.virtual_memory().total / (1024**3), 2),
+            "disk_percent": psutil.disk_usage("/").percent,
+            "disk_free_gb": round(psutil.disk_usage("/").free / (1024**3), 1),
         },
         "openrouter": {
             "limit": None,
             "usage": None,
             "label": "Unknown",
+        },
+        "config": {
+            "phoenix_project_name": CONFIG.phoenix_project_name
         }
     }
 
@@ -814,6 +838,16 @@ async def admin_stats(request: Request) -> dict[str, Any]:
 
         row = con.execute("SELECT COUNT(*) as c FROM messages").fetchone()
         if row: stats["system_metrics"]["total_messages"] = row["c"]
+
+        # Calculate average faithfulness from hallucination logs
+        row = con.execute("SELECT AVG(score) as avg_score, COUNT(*) as cnt FROM hallucination_logs").fetchone()
+        if row and row["avg_score"] is not None:
+            stats["system_metrics"]["avg_faithfulness"] = round(row["avg_score"] * 100, 1)
+        
+        # Count hallucinations (score < 0.5)
+        row = con.execute("SELECT COUNT(*) as c FROM hallucination_logs WHERE score < 0.5").fetchone()
+        if row:
+            stats["system_metrics"]["hallucination_count"] = row["c"]
 
         proj_rows = con.execute('''
             SELECT p.title, COUNT(m.id) as msg_count
@@ -907,6 +941,75 @@ async def list_hallucinations(request: Request, limit: int = 50):
     return DB.list_hallucination_logs(limit=limit)
 
 
+@app.get("/admin/traces")
+async def list_traces(request: Request, limit: int = 100):
+    _verify_admin(request)
+    with DB._conn() as con:
+        rows = con.execute(
+            """
+            SELECT 
+                m.id, 
+                m.content as query, 
+                m.trace_id, 
+                m.created_at as timestamp,
+                c.id as chat_id,
+                p.title as project_name,
+                hl.score as hallucination_score
+            FROM messages m
+            JOIN chats c ON m.chat_id = c.id
+            LEFT JOIN projects p ON c.project_id = p.id
+            LEFT JOIN hallucination_logs hl ON hl.message_id = m.id
+            WHERE m.role = 'user' AND m.trace_id IS NOT NULL
+            ORDER BY m.created_at DESC
+            LIMIT ?
+            """,
+            (limit,)
+        ).fetchall()
+    
+    traces = []
+    for r in rows:
+        proj = CONFIG.phoenix_project_name
+        
+        # Determine status based on hallucination score if available
+        status = "success"
+        score = r["hallucination_score"]
+        if score is not None:
+            if score < 0.5: status = "hallucination"
+            elif score < 0.9: status = "error" # Or "partial/warning"
+            
+        traces.append({
+            "id": r["id"],
+            "query": r["query"],
+            "trace_id": r["trace_id"],
+            "timestamp": r["timestamp"],
+            "status": status,
+            "phoenix_url": f"https://app.phoenix.arize.com/projects/{proj}/traces/{r['trace_id']}"
+        })
+    # Calculate summary metrics for the dashboard cards
+    avg_faithfulness = None
+    hallucination_count = 0
+    with DB._conn() as con:
+        row = con.execute("SELECT AVG(score) as avg_s FROM hallucination_logs").fetchone()
+        if row and row["avg_s"] is not None:
+            avg_faithfulness = round(row["avg_s"] * 100, 1)
+        
+        row = con.execute("SELECT COUNT(*) as c FROM hallucination_logs WHERE score < 0.5").fetchone()
+        if row:
+            hallucination_count = row["c"]
+
+    return {
+        "traces": traces,
+        "config": {
+            "phoenix_project_name": CONFIG.phoenix_project_name
+        },
+        "metrics": {
+            "avg_faithfulness": avg_faithfulness,
+            "hallucination_count": hallucination_count,
+            "trace_volume": len(traces)
+        }
+    }
+
+
 @app.post("/admin/testing/suites")
 async def create_test_suite(payload: TestSuiteCreate, request: Request):
     _verify_admin(request)
@@ -998,40 +1101,75 @@ async def list_test_runs(request: Request, suite_id: str | None = None):
 @app.get("/admin/testing/runs/{run_id}/evaluations")
 async def list_test_evaluations(run_id: str, request: Request):
     _verify_admin(request)
-    return DB.list_test_evaluations(run_id)
+    evals = DB.list_test_evaluations(run_id)
+    return {
+        "evaluations": evals,
+        "config": {
+            "phoenix_project_name": CONFIG.phoenix_project_name
+        }
+    }
 
 
 async def run_test_suite_background(run_id: str, suite_id: str, snapshot: dict):
     queries = DB.list_test_queries(suite_id)
     for q in queries:
-        start_time = time.time()
-        try:
-            # For now, we use a simple text generation to simulate the test
-            # In Phase 5+, we should integrate the full query_engine pipeline.
-            prompt = f"Answer this data question: {q['question']}"
-            answer, usage = await asyncio.to_thread(ROUTER._generate_text, prompt, f"test_{run_id}_{q['id']}")
-            latency = (time.time() - start_time) * 1000
-            DB.add_test_evaluation(run_id, q["id"], answer, latency)
+        with TRACER.start_as_current_span("test_query") as span:
+            trace_id = format(span.get_span_context().trace_id, '032x')
+            span.set_attribute("test_run_id", run_id)
+            span.set_attribute("query_id", q["id"])
+            span.set_attribute("question", q["question"])
             
-            # Log token usage for test evaluation
-            DB.add_token_usage(
-                project_id=None,
-                user_id="system_test",
-                model=ROUTER.model,
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0)
-            )
-        except Exception as e:
-            logging.error(f"Test run evaluation failed for query {q['id']}: {e}")
-            DB.add_test_evaluation(run_id, q["id"], f"Error: {str(e)}", (time.time() - start_time) * 1000, grade="Error")
+            start_time = time.time()
+            try:
+                # For now, we use a simple text generation to simulate the test
+                # In Phase 5+, we should integrate the full query_engine pipeline.
+                prompt = f"Answer this data question: {q['question']}"
+                answer, usage = await asyncio.to_thread(ROUTER._generate_text, prompt, f"test_{run_id}_{q['id']}")
+                latency = (time.time() - start_time) * 1000
+                eval_id = DB.add_test_evaluation(run_id, q["id"], answer, latency, trace_id=trace_id)
+                
+                # Trigger AI auto-grading in background
+                if ROUTER.available:
+                    from opentelemetry.trace import set_span_in_context
+                    bg_context = set_span_in_context(span)
+                    background_tasks.add_task(
+                        evaluate_test_evaluation_background,
+                        eval_id,
+                        q["question"],
+                        answer,
+                        q.get("expected_answer"),
+                        parent_context=bg_context
+                    )
+                
+                # Log token usage for test evaluation
+                DB.add_token_usage(
+                    project_id=None,
+                    user_id="system_test",
+                    model=ROUTER.model,
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0)
+                )
+            except Exception as e:
+                logging.error(f"Test run evaluation failed for query {q['id']}: {e}")
+                span.record_exception(e)
+                DB.add_test_evaluation(run_id, q["id"], f"Error: {str(e)}", (time.time() - start_time) * 1000, grade="Error", trace_id=trace_id)
 
 
-async def evaluate_hallucination_background(chat_id: str, message_id: str, question: str, answer: str, context: str):
+async def evaluate_hallucination_background(chat_id: str, message_id: str, question: str, answer: str, context: str, parent_context: Any = None):
     """LLM-as-a-judge to detect hallucinations (faithfulness)."""
     if not ROUTER.available:
         return
     
-    prompt = f"""
+    # Propagate trace context if provided
+    from opentelemetry.context import attach, detach
+    token = None
+    if parent_context:
+        token = attach(parent_context)
+    
+    with TRACER.start_as_current_span("faithfulness_judge") as span:
+        span.set_attribute("message_id", message_id)
+        
+        prompt = f"""
 Evaluate if the following Answer is faithful to the provided Context.
 A faithful answer only contains information present in or logically inferrable from the context.
 An unfaithful answer (hallucination) contains information NOT in the context.
@@ -1046,23 +1184,78 @@ Respond ONLY in JSON format:
   "reason": "short explanation"
 }}
 """
-    try:
-        result, usage = await asyncio.to_thread(ROUTER._generate_json, prompt, f"hal_{message_id}")
-        score = float(result.get("score", 1.0))
-        reason = result.get("reason", "")
-        DB.add_hallucination_log(chat_id, message_id, score, reason)
+        try:
+            result, usage = await asyncio.to_thread(ROUTER._generate_json, prompt, f"hal_{message_id}")
+            score = float(result.get("score", 1.0))
+            reason = result.get("reason", "")
+            span.set_attribute("score", score)
+            span.set_attribute("reason", reason)
+            
+            DB.add_hallucination_log(chat_id, message_id, score, reason)
+            
+            # Also log token usage for the evaluation itself
+            chat = DB.get_chat(chat_id)
+            DB.add_token_usage(
+                project_id=chat.get("project_id") if chat else None,
+                user_id=chat.get("owner_id") if chat else None,
+                model=ROUTER.model,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0)
+            )
+        except Exception as e:
+            span.record_exception(e)
+            logging.error(f"Hallucination evaluation failed for message {message_id}: {e}")
+        finally:
+            if token:
+                detach(token)
+
+
+async def evaluate_test_evaluation_background(eval_id: str, question: str, answer: str, expected: str | None, parent_context: Any = None):
+    """LLM-as-a-judge to auto-grade benchmark test queries."""
+    if not ROUTER.available:
+        return
         
-        # Also log token usage for the evaluation itself
-        chat = DB.get_chat(chat_id)
-        DB.add_token_usage(
-            project_id=chat.get("project_id") if chat else None,
-            user_id=chat.get("owner_id") if chat else None,
-            model=ROUTER.model,
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0)
-        )
-    except Exception as e:
-        logging.error(f"Hallucination evaluation failed for message {message_id}: {e}")
+    # Propagate trace context if provided
+    from opentelemetry.context import attach, detach
+    token = None
+    if parent_context:
+        token = attach(parent_context)
+        
+    with TRACER.start_as_current_span("benchmark_judge") as span:
+        span.set_attribute("eval_id", eval_id)
+        
+        prompt = f"""
+Evaluate if the following AI Answer is correct given the Question and the Expected Answer (if provided).
+
+Question: {question}
+Expected Answer (Golden): {expected or "Not provided"}
+AI Answer to Evaluate: {answer}
+
+Criteria:
+1. 'Pass' if the AI answer is factually correct and matches the core meaning of the expected answer.
+2. 'Partial' if it's mostly correct but misses a small detail or formatting.
+3. 'Fail' if it's factually wrong or contradicts the expected answer.
+
+Respond ONLY in JSON format:
+{{
+  "grade": "Pass" | "Partial" | "Fail",
+  "reason": "short explanation of why this grade was given"
+}}
+"""
+        try:
+            result, usage = await asyncio.to_thread(ROUTER._generate_json, prompt, f"test_eval_{eval_id}")
+            grade = result.get("grade", "Fail")
+            reason = result.get("reason", "")
+            span.set_attribute("ai_grade", grade)
+            span.set_attribute("ai_reason", reason)
+            
+            DB.update_test_evaluation_ai_grade(eval_id, grade, reason)
+        except Exception as e:
+            span.record_exception(e)
+            logging.error(f"Benchmark auto-grading failed for eval {eval_id}: {e}")
+        finally:
+            if token:
+                detach(token)
 
 
 def _allowed_mcp_connector_ids_for_project(project_id: str | None) -> set[str]:
@@ -2129,31 +2322,42 @@ def _result_grounded_answer(question: str, payload: dict[str, Any]) -> str:
 
 
 def _run_query(plan, source: DataSource) -> tuple[pd.DataFrame, int]:
-    import duckdb
+    with TRACER.start_as_current_span("duckdb_execute") as span:
+        span.set_attribute("plan_title", plan.title)
+        import duckdb
 
-    start = time.perf_counter()
-    p_key = params_key(plan.params)
-    if source.db_path:
-        params = json.loads(p_key)
-        con = _connect_duckdb(source.db_path, read_only=True)
+        start = time.perf_counter()
         try:
-            if source.table_name != "orders":
-                safe_table = '"' + source.table_name.replace('"', '""') + '"'
-                con.execute(f"CREATE TEMP VIEW orders AS SELECT * FROM {safe_table}")
-            df = con.execute(plan.sql, params).fetchdf()
+            p_key = params_key(plan.params)
+            if source.db_path:
+                params = json.loads(p_key)
+                con = _connect_duckdb(source.db_path, read_only=True)
+                try:
+                    if source.table_name != "orders":
+                        safe_table = '"' + source.table_name.replace('"', '""') + '"'
+                        con.execute(f"CREATE TEMP VIEW orders AS SELECT * FROM {safe_table}")
+                    df = con.execute(plan.sql, params).fetchdf()
+                finally:
+                    con.close()
+            elif source.dataframe is not None:
+                params = json.loads(p_key)
+                con = _connect_duckdb(":memory:")
+                try:
+                    con.register("orders", source.dataframe)
+                    df = con.execute(plan.sql, params).fetchdf()
+                finally:
+                    con.close()
+            else:
+                raise RuntimeError("No executable source")
+        except Exception as exc:
+            span.record_exception(exc)
+            raise
         finally:
-            con.close()
-    elif source.dataframe is not None:
-        params = json.loads(p_key)
-        con = _connect_duckdb(":memory:")
-        try:
-            con.register("orders", source.dataframe)
-            df = con.execute(plan.sql, params).fetchdf()
-        finally:
-            con.close()
-    else:
-        raise RuntimeError("No executable source")
-    elapsed_ms = int((time.perf_counter() - start) * 1000)
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            span.set_attribute("elapsed_ms", elapsed_ms)
+            if 'df' in locals():
+                span.set_attribute("row_count", len(df))
+
     return df, elapsed_ms
 
 
@@ -2301,130 +2505,133 @@ async def _run_mcp_agent(
     allowed_connector_ids: set[str] | None = None,
     llm_router: LLMRouter | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Drive the function-calling agent loop, stream SSE events, and persist the
-    final assistant message. Picks the LAST tabular tool result (>=2 rows,
-    >=2 cols) and emits it as a `result` event so ResultBlock renders a chart.
-    The agent's natural sequence is explore (describe/list) → fetch (query/get) →
-    answer; the data the user actually asked for is always the last fetch."""
-    router = llm_router or ROUTER
-    pool = get_pool()
-    specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
-    if not specs:
-        msg_text = "I don't have any tools available right now — connect an MCP bridge and try again."
-        msg = DB.add_message(chat_id, "assistant", msg_text, payload={"kind": "error"})
-        yield {"event": "text", "data": json.dumps({"delta": msg_text})}
-        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
-        return
-
-    connector_summary_lines: list[str] = []
-    by_connector: dict[str, list[str]] = {}
-    name_lookup: dict[str, str] = {}
-    for s in pool.connectors.values():
-        if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
-            continue
-        if s.status == "connected":
-            name_lookup[s.id] = s.name
-            by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
-    for cid, tnames in by_connector.items():
-        connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
-    connector_summary = "\n\n".join(connector_summary_lines)
-
-    # Track per-tool results so we can pick the largest tabular one for charting.
-    collected_dfs: list[tuple[str, pd.DataFrame]] = []
-
-    async def on_tool_call(tool_name: str, args: dict[str, Any]):
-        connector_id = routing.get(tool_name)
-        if not connector_id:
-            return "", f"Tool '{tool_name}' is not available.", None
-        try:
-            result = await pool.call_tool(connector_id, tool_name, args)
-            text = extract_text_content(result)
-            df = await asyncio.to_thread(parse_tool_result_to_dataframe, text)
-            if df is not None:
-                collected_dfs.append((tool_name, df))
-            # Truncate text fed back to LLM to keep context lean.
-            if len(text) > 6000:
-                text = text[:6000] + f"\n\n[truncated at 6000 of {len(text)} chars]"
-            return text, None, connector_id
-        except Exception as exc:
-            return "", str(exc), connector_id
-
-    full_text_parts: list[str] = []
-    last_tool_call: dict[str, Any] | None = None
-    agent = _get_domain_agent(chat_id)
-    domain_prompt = agent.get_system_prompt() if agent else ""
-    domain_tools = agent.get_tools() if agent else []
-
-    # Merge domain tools into the specs if any
-    final_specs = specs + domain_tools
-
+    span = TRACER.start_span("mcp_agent")
+    span.set_attribute("question", question)
     try:
-        async for ev in router.agent_loop_stream(
-            request_id=request_id,
-            user_question=question,
-            conversation_summary=conversation_summary(history),
-            tool_specs=final_specs,
-            connector_summary=connector_summary,
-            on_tool_call=on_tool_call,
-            system_prompt=f"{domain_prompt}\n\n{build_mcp_agent_system_prompt(connector_summary)}" if domain_prompt else None,
-        ):
-            kind = ev["kind"]
-            if kind == "tool_call":
-                last_tool_call = ev
-                connector_id = routing.get(ev["name"])
-                cname = name_lookup.get(connector_id, "MCP")
-                args_str = ", ".join(f"{k}={v!r}" for k, v in (ev.get("args") or {}).items())
-                step = f"Calling {ev['name']}({args_str}) on {cname}"
-                yield {"event": "thinking", "data": json.dumps({"step": step})}
-            elif kind == "tool_result":
-                if ev.get("error"):
-                    yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned an error"})}
-                else:
-                    yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
-            elif kind == "text":
-                delta = ev.get("delta") or ""
-                # Prevent raw DSML from hitting the UI
-                if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
-                    full_text_parts.append(delta)
-                    # We still append the raw delta to the buffer so the agent can parse tool calls,
-                    # but we don't emit it to the user.
-                    pass
-                else:
-                    full_text_parts.append(delta)
-                    yield {"event": "text", "data": json.dumps({"delta": delta})}
-    except LLMUnavailable as exc:
-        err_text = "All language models are unavailable right now. Try again in a moment."
-        msg = DB.add_message(chat_id, "assistant", err_text, payload={"kind": "error", "detail": str(exc)})
-        yield {"event": "error", "data": json.dumps({"message": err_text, "detail": str(exc)})}
+        """Drive the function-calling agent loop, stream SSE events, and persist the
+        final assistant message. Picks the LAST tabular tool result (>=2 rows,
+        >=2 cols) and emits it as a `result` event so ResultBlock renders a chart.
+        The agent's natural sequence is explore (describe/list) → fetch (query/get) →
+        answer; the data the user actually asked for is always the last fetch."""
+        router = llm_router or ROUTER
+        pool = get_pool()
+        specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
+        if not specs:
+            msg_text = "I don't have any tools available right now — connect an MCP bridge and try again."
+            msg = DB.add_message(chat_id, "assistant", msg_text, payload={"kind": "error"})
+            yield {"event": "text", "data": json.dumps({"delta": msg_text})}
+            yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+            return
+
+        connector_summary_lines: list[str] = []
+        by_connector: dict[str, list[str]] = {}
+        name_lookup: dict[str, str] = {}
+        for s in pool.connectors.values():
+            if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
+                continue
+            if s.status == "connected":
+                name_lookup[s.id] = s.name
+                by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
+        for cid, tnames in by_connector.items():
+            connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
+        connector_summary = "\n\n".join(connector_summary_lines)
+
+        # Track per-tool results so we can pick the largest tabular one for charting.
+        collected_dfs: list[tuple[str, pd.DataFrame]] = []
+
+        async def on_tool_call(tool_name: str, args: dict[str, Any]):
+            connector_id = routing.get(tool_name)
+            if not connector_id:
+                return "", f"Tool '{tool_name}' is not available.", None
+            try:
+                result = await pool.call_tool(connector_id, tool_name, args)
+                text = extract_text_content(result)
+                df = await asyncio.to_thread(parse_tool_result_to_dataframe, text)
+                if df is not None:
+                    collected_dfs.append((tool_name, df))
+                # Truncate text fed back to LLM to keep context lean.
+                if len(text) > 6000:
+                    text = text[:6000] + f"\n\n[truncated at 6000 of {len(text)} chars]"
+                return text, None, connector_id
+            except Exception as exc:
+                return "", str(exc), connector_id
+
+        full_text_parts: list[str] = []
+        last_tool_call: dict[str, Any] | None = None
+        agent = _get_domain_agent(chat_id)
+        domain_prompt = agent.get_system_prompt() if agent else ""
+        domain_tools = agent.get_tools() if agent else []
+
+        # Merge domain tools into the specs if any
+        final_specs = specs + domain_tools
+
+        try:
+            async for ev in router.agent_loop_stream(
+                request_id=request_id,
+                user_question=question,
+                conversation_summary=conversation_summary(history),
+                tool_specs=final_specs,
+                connector_summary=connector_summary,
+                on_tool_call=on_tool_call,
+                system_prompt=f"{domain_prompt}\n\n{build_mcp_agent_system_prompt(connector_summary)}" if domain_prompt else None,
+            ):
+                kind = ev["kind"]
+                if kind == "tool_call":
+                    last_tool_call = ev
+                    connector_id = routing.get(ev["name"])
+                    cname = name_lookup.get(connector_id, "MCP")
+                    args_str = ", ".join(f"{k}={v!r}" for k, v in (ev.get("args") or {}).items())
+                    step = f"Calling {ev['name']}({args_str}) on {cname}"
+                    yield {"event": "thinking", "data": json.dumps({"step": step})}
+                elif kind == "tool_result":
+                    if ev.get("error"):
+                        yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned an error"})}
+                    else:
+                        yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
+                elif kind == "text":
+                    delta = ev.get("delta") or ""
+                    # Prevent raw DSML from hitting the UI
+                    if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
+                        full_text_parts.append(delta)
+                        pass
+                    else:
+                        full_text_parts.append(delta)
+                        yield {"event": "text", "data": json.dumps({"delta": delta})}
+        except LLMUnavailable as exc:
+            err_text = "All language models are unavailable right now. Try again in a moment."
+            msg = DB.add_message(chat_id, "assistant", err_text, payload={"kind": "error", "detail": str(exc)})
+            yield {"event": "error", "data": json.dumps({"message": err_text, "detail": str(exc)})}
+            yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+            return
+
+        full_text = "".join(full_text_parts).strip() or "(no answer)"
+
+        # Pick the LAST tabular tool result for charting (see docstring for rationale).
+        result_payload: dict[str, Any] | None = None
+        if collected_dfs:
+            tool_name, df = collected_dfs[-1]
+            viz = choose_visualization(question, {}, df)
+            connector_id = routing.get(tool_name)
+            cname = name_lookup.get(connector_id, "MCP")
+            result_payload = {
+                "title": tool_name,
+                "viz": viz,
+                "elapsed_ms": 0,
+                "sql": "",
+                "how": f"Source: {cname} via tool {tool_name}.",
+                "view_type": _get_view_type(chat_id),
+                **_df_to_payload(df),
+            }
+            yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+
+        full_text = _sanitize_assistant_text(full_text)
+        assistant_payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "agent"}
+        if result_payload:
+            assistant_payload["result"] = result_payload
+        msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
-        return
-
-    full_text = "".join(full_text_parts).strip() or "(no answer)"
-
-    # Pick the LAST tabular tool result for charting (see docstring for rationale).
-    result_payload: dict[str, Any] | None = None
-    if collected_dfs:
-        tool_name, df = collected_dfs[-1]
-        viz = choose_visualization(question, {}, df)
-        connector_id = routing.get(tool_name)
-        cname = name_lookup.get(connector_id, "MCP")
-        result_payload = {
-            "title": tool_name,
-            "viz": viz,
-            "elapsed_ms": 0,
-            "sql": "",
-            "how": f"Source: {cname} via tool {tool_name}.",
-            "view_type": _get_view_type(chat_id),
-            **_df_to_payload(df),
-        }
-        yield {"event": "result", "data": json.dumps(result_payload, default=str)}
-
-    full_text = _sanitize_assistant_text(full_text)
-    assistant_payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "agent"}
-    if result_payload:
-        assistant_payload["result"] = result_payload
-    msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
-    yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+    finally:
+        span.end()
 
 
 async def _run_local_agent(
@@ -2436,137 +2643,143 @@ async def _run_local_agent(
     model_used: str,
     llm_router: LLMRouter | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Drive a function-calling loop against the local DuckDB source.
-
-    Used when the intent classifier picks intent_type="multi_step" — the question
-    chains two queries where the second depends on the first's result. The LLM
-    calls run_sql once to find the anchor (e.g. peak month), reads the result,
-    then calls run_sql again parameterized by that anchor."""
-    router = llm_router or ROUTER
-    agent = _get_domain_agent(chat_id)
-    domain_prompt = agent.get_system_prompt() if agent else ""
-    domain_tools = agent.get_tools() if agent else []
-
-    base_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
-    system_prompt = f"{domain_prompt}\n\n{base_prompt}" if domain_prompt else base_prompt
-
-    tool_specs = [{
-        "name": "run_sql",
-        "description": "Execute a read-only DuckDB SELECT against the local dataset (table name 'orders'). Returns matching rows as JSON records.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "DuckDB SELECT query."},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    }] + domain_tools
-
-    collected: list[tuple[str, pd.DataFrame]] = []
-    loop = asyncio.get_event_loop()
-
-    def _run_sql_blocking(sql: str) -> pd.DataFrame:
-        import duckdb
-        if source.db_path:
-            con = _connect_duckdb(source.db_path, read_only=True)
-            try:
-                if source.table_name != "orders":
-                    safe = '"' + source.table_name.replace('"', '""') + '"'
-                    con.execute(f"CREATE TEMP VIEW orders AS SELECT * FROM {safe}")
-                return con.execute(sql).fetchdf()
-            finally:
-                con.close()
-        if source.dataframe is not None:
-            con = _connect_duckdb(":memory:")
-            try:
-                con.register("orders", source.dataframe)
-                return con.execute(sql).fetchdf()
-            finally:
-                con.close()
-        raise RuntimeError("No executable source")
-
-    async def on_tool_call(tool_name: str, args: dict[str, Any]):
-        if tool_name != "run_sql":
-            return "", f"Unknown tool: {tool_name}", None
-        sql = (args.get("query") or "").strip()
-        try:
-            validate_readonly_sql(sql)
-        except Exception as exc:
-            return "", f"SQL rejected: {exc}", None
-        try:
-            df = await loop.run_in_executor(None, _run_sql_blocking, sql)
-        except Exception as exc:
-            return "", str(exc), None
-        if not df.empty:
-            collected.append((sql, df))
-        records = df.head(50).to_dict(orient="records")
-        text = json.dumps(records, default=str)
-        if len(text) > 6000:
-            text = text[:6000] + f"\n[truncated, total rows: {len(df)}]"
-        return text, None, "local"
-
-    full_text_parts: list[str] = []
-
+    span = TRACER.start_span("local_agent")
+    span.set_attribute("question", question)
+    span.set_attribute("source_name", source.display_name)
     try:
-        async for ev in router.agent_loop_stream(
-            request_id=request_id,
-            user_question=question,
-            conversation_summary=conversation_summary(history),
-            tool_specs=tool_specs,
-            connector_summary="",
-            on_tool_call=on_tool_call,
-            system_prompt=system_prompt,
-        ):
-            kind = ev["kind"]
-            if kind == "tool_call":
-                sql_arg = (ev.get("args") or {}).get("query", "")
-                preview = sql_arg.replace("\n", " ").strip()[:120]
-                step = f"Querying: {preview}{'…' if len(sql_arg) > 120 else ''}"
-                yield {"event": "thinking", "data": json.dumps({"step": step})}
-            elif kind == "tool_result":
-                if ev.get("error"):
-                    yield {"event": "thinking", "data": json.dumps({"step": "Query returned an error — adjusting"})}
-                else:
-                    yield {"event": "thinking", "data": json.dumps({"step": "Got data"})}
-            elif kind == "text":
-                delta = ev.get("delta") or ""
-                if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
-                    full_text_parts.append(delta)
-                else:
-                    full_text_parts.append(delta)
-                    yield {"event": "text", "data": json.dumps({"delta": delta})}
-    except LLMUnavailable as exc:
-        err_msg = "All language models are rate-limited right now. Wait a minute and retry."
-        DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
-        yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
-        yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
-        return
+        """Drive a function-calling loop against the local DuckDB source.
 
-    full_text = "".join(full_text_parts).strip() or "(no answer)"
+        Used when the intent classifier picks intent_type="multi_step" — the question
+        chains two queries where the second depends on the first's result. The LLM
+        calls run_sql once to find the anchor (e.g. peak month), reads the result,
+        then calls run_sql again parameterized by that anchor."""
+        router = llm_router or ROUTER
+        agent = _get_domain_agent(chat_id)
+        domain_prompt = agent.get_system_prompt() if agent else ""
+        domain_tools = agent.get_tools() if agent else []
 
-    # The last successful query's result is the chart card.
-    result_payload: dict[str, Any] | None = None
-    if collected:
-        sql, df = collected[-1]
-        viz = choose_visualization(question, {}, df)
-        result_payload = {
-            "title": "Multi-step Result",
-            "viz": viz,
-            "elapsed_ms": 0,
-            "sql": sql,
-            "how": f"Source: {source.source_kind}. Model: {model_used}. Multi-step query (final). Display: {viz}.",
-            "view_type": _get_view_type(chat_id),
-            **_df_to_payload(df),
-        }
-        yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+        base_prompt = build_local_agent_system_prompt(source.display_name, source.schema)
+        system_prompt = f"{domain_prompt}\n\n{base_prompt}" if domain_prompt else base_prompt
 
-    full_text = _sanitize_assistant_text(full_text)
-    payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": model_used}
-    if result_payload:
-        payload["result"] = result_payload
-    msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
-    yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+        tool_specs = [{
+            "name": "run_sql",
+            "description": "Execute a read-only DuckDB SELECT against the local dataset (table name 'orders'). Returns matching rows as JSON records.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "DuckDB SELECT query."},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        }] + domain_tools
+
+        collected: list[tuple[str, pd.DataFrame]] = []
+        loop = asyncio.get_event_loop()
+
+        def _run_sql_blocking(sql: str) -> pd.DataFrame:
+            import duckdb
+            if source.db_path:
+                con = _connect_duckdb(source.db_path, read_only=True)
+                try:
+                    if source.table_name != "orders":
+                        safe = '"' + source.table_name.replace('"', '""') + '"'
+                        con.execute(f"CREATE TEMP VIEW orders AS SELECT * FROM {safe}")
+                    return con.execute(sql).fetchdf()
+                finally:
+                    con.close()
+            if source.dataframe is not None:
+                con = _connect_duckdb(":memory:")
+                try:
+                    con.register("orders", source.dataframe)
+                    return con.execute(sql).fetchdf()
+                finally:
+                    con.close()
+            raise RuntimeError("No executable source")
+
+        async def on_tool_call(tool_name: str, args: dict[str, Any]):
+            if tool_name != "run_sql":
+                return "", f"Unknown tool: {tool_name}", None
+            sql = (args.get("query") or "").strip()
+            try:
+                validate_readonly_sql(sql)
+            except Exception as exc:
+                return "", f"SQL rejected: {exc}", None
+            try:
+                df = await loop.run_in_executor(None, _run_sql_blocking, sql)
+            except Exception as exc:
+                return "", str(exc), None
+            if not df.empty:
+                collected.append((sql, df))
+            records = df.head(50).to_dict(orient="records")
+            text = json.dumps(records, default=str)
+            if len(text) > 6000:
+                text = text[:6000] + f"\n[truncated, total rows: {len(df)}]"
+            return text, None, "local"
+
+        full_text_parts: list[str] = []
+
+        try:
+            async for ev in router.agent_loop_stream(
+                request_id=request_id,
+                user_question=question,
+                conversation_summary=conversation_summary(history),
+                tool_specs=tool_specs,
+                connector_summary="",
+                on_tool_call=on_tool_call,
+                system_prompt=system_prompt,
+            ):
+                kind = ev["kind"]
+                if kind == "tool_call":
+                    sql_arg = (ev.get("args") or {}).get("query", "")
+                    preview = sql_arg.replace("\n", " ").strip()[:120]
+                    step = f"Querying: {preview}{'…' if len(sql_arg) > 120 else ''}"
+                    yield {"event": "thinking", "data": json.dumps({"step": step})}
+                elif kind == "tool_result":
+                    if ev.get("error"):
+                        yield {"event": "thinking", "data": json.dumps({"step": "Query returned an error — adjusting"})}
+                    else:
+                        yield {"event": "thinking", "data": json.dumps({"step": "Got data"})}
+                elif kind == "text":
+                    delta = ev.get("delta") or ""
+                    if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
+                        full_text_parts.append(delta)
+                    else:
+                        full_text_parts.append(delta)
+                        yield {"event": "text", "data": json.dumps({"delta": delta})}
+        except LLMUnavailable as exc:
+            err_msg = "All language models are rate-limited right now. Wait a minute and retry."
+            DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
+            yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+            yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
+            return
+
+        full_text = "".join(full_text_parts).strip() or "(no answer)"
+
+        # The last successful query's result is the chart card.
+        result_payload: dict[str, Any] | None = None
+        if collected:
+            sql, df = collected[-1]
+            viz = choose_visualization(question, {}, df)
+            result_payload = {
+                "title": "Multi-step Result",
+                "viz": viz,
+                "elapsed_ms": 0,
+                "sql": sql,
+                "how": f"Source: {source.source_kind}. Model: {model_used}. Multi-step query (final). Display: {viz}.",
+                "view_type": _get_view_type(chat_id),
+                **_df_to_payload(df),
+            }
+            yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+
+        full_text = _sanitize_assistant_text(full_text)
+        payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": model_used}
+        if result_payload:
+            payload["result"] = result_payload
+        msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
+        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+    finally:
+        span.end()
 
 
 async def _run_multi_source_agent(
@@ -2578,161 +2791,169 @@ async def _run_multi_source_agent(
     allowed_connector_ids: set[str] | None = None,
     llm_router: LLMRouter | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    router = llm_router or ROUTER
-    pool = get_pool()
-    specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
-    loop = asyncio.get_running_loop()
-    source_summaries = await loop.run_in_executor(None, lambda: _prepare_workspace_sync(chat_id, selected))
-    join_candidates = _detect_join_candidates(source_summaries)
-
-    connector_summary_lines: list[str] = []
-    name_lookup: dict[str, str] = {}
-    by_connector: dict[str, list[str]] = {}
-    for s in pool.connectors.values():
-        if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
-            continue
-        if s.status == "connected":
-            name_lookup[s.id] = s.name
-            by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
-    for cid, tnames in by_connector.items():
-        connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
-    connector_summary = "\n\n".join(connector_summary_lines)
-
-    agent = _get_domain_agent(chat_id)
-    domain_tools = agent.get_tools() if agent else []
-
-    tool_specs = [{
-        "name": "run_sql",
-        "description": "Execute a read-only DuckDB SELECT against the per-chat workspace tables. Use this for joins, aggregation, filtering, and final result shaping.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "DuckDB SELECT query against workspace tables."}},
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    }] + specs + domain_tools
-
-    if len(tool_specs) == 1 and not source_summaries:
-        msg_text = "I don't have any usable sources yet. Attach a file, connect an API, or add an MCP bridge first."
-        msg = DB.add_message(chat_id, "assistant", msg_text, payload={"kind": "error"})
-        yield {"event": "text", "data": json.dumps({"delta": msg_text})}
-        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
-        return
-
-    collected: list[tuple[str, pd.DataFrame, int]] = []
-    materialized_count = 0
-
-    async def on_tool_call(tool_name: str, args: dict[str, Any]):
-        nonlocal materialized_count
-        if tool_name == "run_sql":
-            sql = (args.get("query") or "").strip()
-            try:
-                validate_readonly_sql(sql)
-            except Exception as exc:
-                return "", f"SQL rejected: {exc}", None
-            try:
-                df, elapsed_ms = await loop.run_in_executor(None, lambda: _run_workspace_sql_sync(chat_id, sql))
-            except Exception as exc:
-                return "", str(exc), None
-            collected.append((sql, df, elapsed_ms))
-            text = json.dumps(df.head(50).to_dict(orient="records"), default=str)
-            if len(text) > 6000:
-                text = text[:6000] + f"\n[truncated, total rows: {len(df)}]"
-            return text, None, "workspace"
-
-        connector_id = routing.get(tool_name)
-        if not connector_id:
-            return "", f"Tool '{tool_name}' is not available.", None
-        try:
-            result = await pool.call_tool(connector_id, tool_name, args)
-            text = extract_text_content(result)
-            df = await asyncio.to_thread(parse_tool_result_to_dataframe, text)
-            if df is not None:
-                materialized_count += 1
-                table = f"mcp_{re.sub(r'[^0-9a-zA-Z]+', '_', tool_name).strip('_').lower()[:28]}_{materialized_count}"
-                info = await loop.run_in_executor(None, lambda: _materialize_workspace_df_sync(chat_id, table, df))
-                source_summaries.append({
-                    "id": f"mcp:{tool_name}:{materialized_count}",
-                    "name": f"{tool_name} result",
-                    "kind": "mcp",
-                    **info,
-                })
-                cols = ", ".join(f"{c['name']}:{c['type']}" for c in info["columns"][:30])
-                text += f"\n\n[Cached this tabular result as workspace table {table} with {info['rows']} rows. Columns: {cols}]"
-            if len(text) > 6000:
-                text = text[:6000] + f"\n\n[truncated at 6000 of {len(text)} chars]"
-            return text, None, connector_id
-        except Exception as exc:
-            return "", str(exc), connector_id
-
-    full_text_parts: list[str] = []
+    span = TRACER.start_span("multi_source_agent")
+    span.set_attribute("question", question)
     try:
-        async for ev in router.agent_loop_stream(
-            request_id=request_id,
-            user_question=question,
-            conversation_summary=conversation_summary(history),
-            tool_specs=tool_specs,
-            connector_summary=connector_summary,
-            on_tool_call=on_tool_call,
-            system_prompt=_workspace_prompt(source_summaries, connector_summary, join_candidates, domain_prompt=_get_domain_prompt(chat_id)),
-        ):
-            kind = ev["kind"]
-            if kind == "tool_call":
-                if ev["name"] == "run_sql":
-                    sql_arg = (ev.get("args") or {}).get("query", "")
-                    preview = sql_arg.replace("\n", " ").strip()[:120]
-                    yield {"event": "thinking", "data": json.dumps({"step": f"Querying workspace: {preview}{'…' if len(sql_arg) > 120 else ''}"})}
-                else:
-                    connector_id = routing.get(ev["name"])
-                    cname = name_lookup.get(connector_id, "connected source")
-                    yield {"event": "thinking", "data": json.dumps({"step": f"Fetching data from {cname}"})}
-            elif kind == "tool_result":
-                if ev.get("error"):
-                    yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned an error — adjusting"})}
-                else:
-                    yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
-            elif kind == "text":
-                delta = ev.get("delta") or ""
-                # Prevent raw DSML from hitting the UI
-                if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
-                    full_text_parts.append(delta)
-                    # We still append the raw delta to the buffer so the agent can parse tool calls,
-                    # but we don't emit it to the user.
-                    pass
-                else:
-                    full_text_parts.append(delta)
-                    yield {"event": "text", "data": json.dumps({"delta": delta})}
-    except LLMUnavailable as exc:
-        err_msg = "The language model is unavailable, so I can't run a multi-source agent query right now."
-        msg = DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
-        yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+        router = llm_router or ROUTER
+        pool = get_pool()
+        specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
+        loop = asyncio.get_running_loop()
+        source_summaries = await loop.run_in_executor(None, lambda: _prepare_workspace_sync(chat_id, selected))
+        join_candidates = _detect_join_candidates(source_summaries)
+        span.set_attribute("source_count", len(source_summaries))
+
+        connector_summary_lines: list[str] = []
+        name_lookup: dict[str, str] = {}
+        by_connector: dict[str, list[str]] = {}
+        for s in pool.connectors.values():
+            if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
+                continue
+            if s.status == "connected":
+                name_lookup[s.id] = s.name
+                by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
+        for cid, tnames in by_connector.items():
+            connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
+        connector_summary = "\n\n".join(connector_summary_lines)
+
+        agent = _get_domain_agent(chat_id)
+        domain_tools = agent.get_tools() if agent else []
+
+        tool_specs = [{
+            "name": "run_sql",
+            "description": "Execute a read-only DuckDB SELECT against the per-chat workspace tables. Use this for joins, aggregation, filtering, and final result shaping.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "DuckDB SELECT query against workspace tables."}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        }] + specs + domain_tools
+
+        if len(tool_specs) == 1 and not source_summaries:
+            msg_text = "I don't have any usable sources yet. Attach a file, connect an API, or add an MCP bridge first."
+            msg = DB.add_message(chat_id, "assistant", msg_text, payload={"kind": "error"})
+            yield {"event": "text", "data": json.dumps({"delta": msg_text})}
+            yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+            return
+
+        collected: list[tuple[str, pd.DataFrame, int]] = []
+        materialized_count = 0
+
+        async def on_tool_call(tool_name: str, args: dict[str, Any]):
+            nonlocal materialized_count
+            if tool_name == "run_sql":
+                sql = (args.get("query") or "").strip()
+                try:
+                    validate_readonly_sql(sql)
+                except Exception as exc:
+                    return "", f"SQL rejected: {exc}", None
+                try:
+                    df, elapsed_ms = await loop.run_in_executor(None, lambda: _run_workspace_sql_sync(chat_id, sql))
+                except Exception as exc:
+                    return "", str(exc), None
+                collected.append((sql, df, elapsed_ms))
+                text = json.dumps(df.head(50).to_dict(orient="records"), default=str)
+                if len(text) > 6000:
+                    text = text[:6000] + f"\n[truncated, total rows: {len(df)}]"
+                return text, None, "workspace"
+
+            connector_id = routing.get(tool_name)
+            if not connector_id:
+                return "", f"Tool '{tool_name}' is not available.", None
+            try:
+                result = await pool.call_tool(connector_id, tool_name, args)
+                text = extract_text_content(result)
+                df = await asyncio.to_thread(parse_tool_result_to_dataframe, text)
+                if df is not None:
+                    materialized_count += 1
+                    table = f"mcp_{re.sub(r'[^0-9a-zA-Z]+', '_', tool_name).strip('_').lower()[:28]}_{materialized_count}"
+                    info = await loop.run_in_executor(None, lambda: _materialize_workspace_df_sync(chat_id, table, df))
+                    source_summaries.append({
+                        "id": f"mcp:{tool_name}:{materialized_count}",
+                        "name": f"{tool_name} result",
+                        "kind": "mcp",
+                        **info,
+                    })
+                    cols = ", ".join(f"{c['name']}:{c['type']}" for c in info["columns"][:30])
+                    text += f"\n\n[Cached this tabular result as workspace table {table} with {info['rows']} rows. Columns: {cols}]"
+                if len(text) > 6000:
+                    text = text[:6000] + f"\n\n[truncated at 6000 of {len(text)} chars]"
+                return text, None, connector_id
+            except Exception as exc:
+                return "", str(exc), connector_id
+
+        full_text_parts: list[str] = []
+        try:
+            async for ev in router.agent_loop_stream(
+                request_id=request_id,
+                user_question=question,
+                conversation_summary=conversation_summary(history),
+                tool_specs=tool_specs,
+                connector_summary=connector_summary,
+                on_tool_call=on_tool_call,
+                system_prompt=_workspace_prompt(source_summaries, connector_summary, join_candidates, domain_prompt=_get_domain_prompt(chat_id)),
+            ):
+                kind = ev["kind"]
+                if kind == "tool_call":
+                    if ev["name"] == "run_sql":
+                        sql_arg = (ev.get("args") or {}).get("query", "")
+                        preview = sql_arg.replace("\n", " ").strip()[:120]
+                        yield {"event": "thinking", "data": json.dumps({"step": f"Querying workspace: {preview}{'…' if len(sql_arg) > 120 else ''}"})}
+                    else:
+                        connector_id = routing.get(ev["name"])
+                        cname = name_lookup.get(connector_id, "connected source")
+                        yield {"event": "thinking", "data": json.dumps({"step": f"Fetching data from {cname}"})}
+                elif kind == "tool_result":
+                    if ev.get("error"):
+                        yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned an error — adjusting"})}
+                    else:
+                        yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
+                elif kind == "text":
+                    delta = ev.get("delta") or ""
+                    # Prevent raw DSML from hitting the UI
+                    if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
+                        full_text_parts.append(delta)
+                        # We still append the raw delta to the buffer so the agent can parse tool calls,
+                        # but we don't emit it to the user.
+                        pass
+                    else:
+                        full_text_parts.append(delta)
+                        yield {"event": "text", "data": json.dumps({"delta": delta})}
+        except LLMUnavailable as exc:
+            err_msg = "The language model is unavailable, so I can't run a multi-source agent query right now."
+            msg = DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
+            yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+            yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+            return
+        finally:
+            span.end()
+
+        full_text = "".join(full_text_parts).strip() or "(no answer)"
+        result_payload: dict[str, Any] | None = None
+        if collected:
+            sql, df, elapsed_ms = collected[-1]
+            viz = choose_visualization(question, {}, df)
+            result_payload = {
+                "title": "Multi-source Result",
+                "viz": viz,
+                "elapsed_ms": elapsed_ms,
+                "sql": sql,
+                "how": f"Sources: {', '.join(s['name'] for s in source_summaries[:8])}. Display: {viz}.",
+                "view_type": _get_view_type(chat_id),
+                **_df_to_payload(df),
+            }
+            yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+        elif source_summaries:
+            full_text = full_text if full_text != "(no answer)" else "I fetched data, but did not get a final table to show."
+
+        full_text = _sanitize_assistant_text(full_text)
+        payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "multi-source-agent"}
+        if result_payload:
+            payload["result"] = result_payload
+        msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
-        return
-
-    full_text = "".join(full_text_parts).strip() or "(no answer)"
-    result_payload: dict[str, Any] | None = None
-    if collected:
-        sql, df, elapsed_ms = collected[-1]
-        viz = choose_visualization(question, {}, df)
-        result_payload = {
-            "title": "Multi-source Result",
-            "viz": viz,
-            "elapsed_ms": elapsed_ms,
-            "sql": sql,
-            "how": f"Sources: {', '.join(s['name'] for s in source_summaries[:8])}. Display: {viz}.",
-            "view_type": _get_view_type(chat_id),
-            **_df_to_payload(df),
-        }
-        yield {"event": "result", "data": json.dumps(result_payload, default=str)}
-    elif source_summaries:
-        full_text = full_text if full_text != "(no answer)" else "I fetched data, but did not get a final table to show."
-
-    full_text = _sanitize_assistant_text(full_text)
-    payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "multi-source-agent"}
-    if result_payload:
-        payload["result"] = result_payload
-    msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
-    yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+    finally:
+        span.end()
 
 
 def _load_history(chat_id: str | None, owner_id: str = "legacy") -> list[dict[str, Any]]:
@@ -2775,347 +2996,360 @@ async def _load_query_sources(
 
 @app.post("/query")
 async def query_endpoint(body: QueryRequest, request: Request):
-    owner_id = _current_user_id(request)
-    if body.chat_id and not DB.get_chat(body.chat_id, owner_id=owner_id):
-        raise HTTPException(status_code=404, detail="Chat not found")
-    chat_id = body.chat_id or DB.create_chat(owner_id=owner_id)["id"]
-    llm_router = _router_for_model_mode(body.model_mode)
-    model_preset = _model_preset_for_mode(body.model_mode)
-    if body.project_id:
-        if not DB.get_project(body.project_id, owner_id=owner_id):
-            raise HTTPException(status_code=404, detail="Project not found")
-        DB.update_chat_project(chat_id, body.project_id, owner_id=owner_id)
-    chat = DB.get_chat(chat_id, owner_id=owner_id)
-    if chat and chat.get("project_id"):
-        await ensure_project_context(chat["project_id"])
+    with TRACER.start_as_current_span("query") as span:
+        trace_id = format(span.get_span_context().trace_id, '032x')
+        owner_id = _current_user_id(request)
+        if body.chat_id and not DB.get_chat(body.chat_id, owner_id=owner_id):
+            raise HTTPException(status_code=404, detail="Chat not found")
+        chat_id = body.chat_id or DB.create_chat(owner_id=owner_id)["id"]
+        llm_router = _router_for_model_mode(body.model_mode)
+        model_preset = _model_preset_for_mode(body.model_mode)
+        if body.project_id:
+            if not DB.get_project(body.project_id, owner_id=owner_id):
+                raise HTTPException(status_code=404, detail="Project not found")
+            DB.update_chat_project(chat_id, body.project_id, owner_id=owner_id)
+        chat = DB.get_chat(chat_id, owner_id=owner_id)
+        if chat and chat.get("project_id"):
+            await ensure_project_context(chat["project_id"])
 
-    question = body.question.strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="Question is required")
+        question = body.question.strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Question is required")
 
-    active_row = DB.get_active_source(owner_id=owner_id)
-    pool = get_pool()
-    allowed_mcp_ids = _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
-    has_mcp = any(s.status == "connected" and s.id in allowed_mcp_ids for s in pool.connectors.values())
-    requested_source_ids = body.source_ids or []
-    selected_mcp = "mcp" in requested_source_ids
-    selected_sources = await _load_query_sources(
-        requested_source_ids,
-        active_row,
-        use_active_fallback=not body.source_ids,
-        owner_id=owner_id,
-    )
+        active_row = DB.get_active_source(owner_id=owner_id)
+        pool = get_pool()
+        allowed_mcp_ids = _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
+        has_mcp = any(s.status == "connected" and s.id in allowed_mcp_ids for s in pool.connectors.values())
+        requested_source_ids = body.source_ids or []
+        selected_mcp = "mcp" in requested_source_ids
+        selected_sources = await _load_query_sources(
+            requested_source_ids,
+            active_row,
+            use_active_fallback=not body.source_ids,
+            owner_id=owner_id,
+        )
 
-    if not selected_sources and not has_mcp:
-        raise HTTPException(status_code=400, detail="Attach a source first")
+        if not selected_sources and not has_mcp:
+            raise HTTPException(status_code=400, detail="Attach a source first")
 
-    active_for_legacy = selected_sources[0] if len(selected_sources) == 1 else None
-    active_row = active_for_legacy[0] if active_for_legacy else active_row
-    source: DataSource | None = active_for_legacy[1] if active_for_legacy else None
+        active_for_legacy = selected_sources[0] if len(selected_sources) == 1 else None
+        active_row = active_for_legacy[0] if active_for_legacy else active_row
+        source: DataSource | None = active_for_legacy[1] if active_for_legacy else None
 
-    # Store source_ids in user message payload so we can restore them when loading chat history
-    user_payload: dict[str, Any] = {"source_ids": [row["id"] for row, _ in selected_sources]}
-    DB.add_message(chat_id, "user", question, payload=user_payload)
-    chat = DB.get_chat(chat_id, owner_id=owner_id)
-    if chat and (not chat.get("title") or chat["title"] == "New chat"):
-        DB.update_chat_title(chat_id, question[:60], owner_id=owner_id)
+        # Store source_ids in user message payload so we can restore them when loading chat history
+        user_payload: dict[str, Any] = {"source_ids": [row["id"] for row, _ in selected_sources]}
+        DB.add_message(chat_id, "user", question, payload=user_payload, trace_id=trace_id)
+        chat = DB.get_chat(chat_id, owner_id=owner_id)
+        if chat and (not chat.get("title") or chat["title"] == "New chat"):
+            DB.update_chat_title(chat_id, question[:60], owner_id=owner_id)
 
-    history = _load_history(chat_id, owner_id=owner_id)
-    project_instructions: dict[str, Any] | None = None
-    source_instructions: dict[str, Any] | None = None
-    memory_snippets: list[dict[str, Any]] = []
-    if chat and chat.get("project_id"):
-        project_instructions = DB.get_project_instructions(chat["project_id"])
-        if project_instructions is None:
-            project = DB.get_project(chat["project_id"], owner_id=owner_id)
-            source_rows = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in (project or {}).get("files", []) if f.get("source_id")]
-            project_instructions = {
-                "category": detect_project_category(project or {}, [r for r in source_rows if r]),
-                "notes": "",
-                "metrics": {},
-                "entities": {},
-            }
-            DB.upsert_project_instructions(chat["project_id"], project_instructions)
-        DB.rebuild_project_memory(chat["project_id"])
-        memory_snippets = DB.search_project_memory(chat["project_id"], question, limit=5)
-        notes = DB.list_project_notes(chat["project_id"])[:6]
-        if notes:
-            note_lines = "\n".join(f"- {n['title']}: {n['content'][:300]}" for n in notes)
-            history.append({"role": "project_notes", "content": f"Saved project notes:\n{note_lines}"})
-    if active_row:
-        source_instructions = _get_or_create_source_instructions(active_row["id"])
-    request_id = uuid.uuid4().hex[:12]
-
-    async def event_stream() -> AsyncIterator[dict[str, Any]]:
-        loop = asyncio.get_running_loop()
-
-        if selected_sources:
-            if len(selected_sources) == 1:
-                row, selected_source = selected_sources[0]
-                meta_source = {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "kind": row["kind"],
-                    "rows": row["rows"],
+        history = _load_history(chat_id, owner_id=owner_id)
+        project_instructions: dict[str, Any] | None = None
+        source_instructions: dict[str, Any] | None = None
+        memory_snippets: list[dict[str, Any]] = []
+        if chat and chat.get("project_id"):
+            project_instructions = DB.get_project_instructions(chat["project_id"])
+            if project_instructions is None:
+                project = DB.get_project(chat["project_id"], owner_id=owner_id)
+                source_rows = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in (project or {}).get("files", []) if f.get("source_id")]
+                project_instructions = {
+                    "category": detect_project_category(project or {}, [r for r in source_rows if r]),
+                    "notes": "",
+                    "metrics": {},
+                    "entities": {},
                 }
-            else:
-                total_rows = sum(int(row.get("rows") or 0) for row, _ in selected_sources)
-                meta_source = {
-                    "id": "multi",
-                    "name": ", ".join(row["name"] for row, _ in selected_sources[:3]) + ("…" if len(selected_sources) > 3 else ""),
-                    "kind": "multi",
-                    "rows": total_rows,
-                }
-        elif has_mcp:
-            visible_mcp = [s for s in pool.connectors.values() if s.status == "connected" and s.id in allowed_mcp_ids]
-            meta_source = {
-                "id": None,
-                "name": ", ".join(s.name for s in visible_mcp) or "MCP",
-                "kind": "mcp",
-                "rows": 0,
-            }
-        else:
-            meta_source = {"id": None, "name": "No source", "kind": "none", "rows": 0}
-        yield {
-            "event": "meta",
-            "data": json.dumps({"chat_id": chat_id, "source": meta_source}),
-        }
-        yield {"event": "thinking", "data": json.dumps({"step": "Reading your question"})}
+                DB.upsert_project_instructions(chat["project_id"], project_instructions)
+            DB.rebuild_project_memory(chat["project_id"])
+            memory_snippets = DB.search_project_memory(chat["project_id"], question, limit=5)
+            notes = DB.list_project_notes(chat["project_id"])[:6]
+            if notes:
+                note_lines = "\n".join(f"- {n['title']}: {n['content'][:300]}" for n in notes)
+                history.append({"role": "project_notes", "content": f"Saved project notes:\n{note_lines}"})
+        if active_row:
+            source_instructions = _get_or_create_source_instructions(active_row["id"])
+        request_id = uuid.uuid4().hex[:12]
 
-        if len(selected_sources) > 1 or selected_mcp or (source is None and has_mcp):
+        # Explicitly capture current context for the background stream
+        from opentelemetry.context import attach, detach
+        from opentelemetry.trace import set_span_in_context
+        parent_context = set_span_in_context(span)
+
+        async def event_stream() -> AsyncIterator[dict[str, Any]]:
+            # Re-attach parent context inside the generator thread/loop
+            token = attach(parent_context)
             try:
-                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router):
-                    yield ev
-            except Exception as exc:
-                log_event(LOGGERS["errors"], "multi_source_agent_error", request_id=request_id, error=str(exc))
-                err_msg = "An unexpected error occurred while working across the selected sources."
-                DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
-                yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
-                yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
-            return
+                loop = asyncio.get_running_loop()
 
-        try:
-            mcp_summary_text = _build_mcp_summary(pool, allowed_mcp_ids) if has_mcp else ""
-            instruction_context = build_instruction_context(
-                source_instructions=source_instructions,
-                project_instructions=project_instructions,
-                memory_snippets=memory_snippets,
-                allowed_columns=source.allowed_columns,
-                char_budget=3000,
-            )
-            if llm_router.available:
-                intent, model_used, usage = await loop.run_in_executor(
-                    None,
-                    lambda: llm_router.classify_intent(
-                        request_id=request_id,
-                        user_question=question,
-                        schema_context=source.schema,
-                        conversation_summary=conversation_summary(history),
-                        mcp_summary=mcp_summary_text,
-                        local_source_name=active_row["name"],
-                        instruction_context=instruction_context,
-                    ),
-                )
-                DB.add_token_usage(
-                    project_id=chat.get("project_id"),
-                    user_id=owner_id,
-                    model=model_used,
-                    prompt_tokens=usage.get("prompt_tokens", 0),
-                    completion_tokens=usage.get("completion_tokens", 0)
-                )
-            else:
-                intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
-            if model_used != "offline-heuristic":
-                model_used = model_preset["model"]
-            intent = apply_instruction_rules(
-                intent,
-                question,
-                source.allowed_columns,
-                source_instructions=source_instructions,
-                project_instructions=project_instructions,
-            )
+                if selected_sources:
+                    if len(selected_sources) == 1:
+                        row, selected_source = selected_sources[0]
+                        meta_source = {
+                            "id": row["id"],
+                            "name": row["name"],
+                            "kind": row["kind"],
+                            "rows": row["rows"],
+                        }
+                    else:
+                        total_rows = sum(int(row.get("rows") or 0) for row, _ in selected_sources)
+                        meta_source = {
+                            "id": "multi",
+                            "name": ", ".join(row["name"] for row, _ in selected_sources[:3]) + ("…" if len(selected_sources) > 3 else ""),
+                            "kind": "multi",
+                            "rows": total_rows,
+                        }
+                elif has_mcp:
+                    visible_mcp = [s for s in pool.connectors.values() if s.status == "connected" and s.id in allowed_mcp_ids]
+                    meta_source = {
+                        "id": None,
+                        "name": ", ".join(s.name for s in visible_mcp) or "MCP",
+                        "kind": "mcp",
+                        "rows": 0,
+                    }
+                else:
+                    meta_source = {"id": None, "name": "No source", "kind": "none", "rows": 0}
+                yield {
+                    "event": "meta",
+                    "data": json.dumps({"chat_id": chat_id, "source": meta_source}),
+                }
+                yield {"event": "thinking", "data": json.dumps({"step": "Reading your question"})}
 
-            route = (intent.get("route") or "local").lower()
-
-            # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
-            if route == "mcp" and has_mcp:
-                async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router):
-                    yield ev
-                return
-
-            # Compound question that needs sequential SQL — route to local agent loop.
-            if intent.get("intent_type") == "multi_step" and source is not None:
-                async for ev in _run_local_agent(chat_id, question, source, history, request_id, model_used, llm_router):
-                    yield ev
-                return
-
-            if intent.get("intent_type") == "clarification":
-                content = intent.get("clarifying_question") or "Can you clarify the metric or grouping?"
-                msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used})
-                yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
-                yield {"event": "done", "data": json.dumps({"message_id": msg["id"]})}
-                return
-
-            if is_underspecified(intent, question, source.allowed_columns):
-                content = underspecified_clarification(source.allowed_columns, active_row["name"])
-                msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used})
-                yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
-                yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
-                return
-
-            if intent.get("intent_type") == "unsupported":
-                # Safety net: if the classifier missed the route field but MCP is connected,
-                # let the agent try (e.g. user asked about BigQuery while a CSV is active).
-                # However, if the user explicitly asked about the "table" or "file" or if the
-                # prompt classified it explicitly as 'local' route, don't hallucinate MCP calls.
-                if has_mcp and route != "local" and "table" not in question.lower() and "file" not in question.lower():
-                    async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids, llm_router):
-                        yield ev
+                if len(selected_sources) > 1 or selected_mcp or (source is None and has_mcp):
+                    try:
+                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router):
+                            yield ev
+                    except Exception as exc:
+                        log_event(LOGGERS["errors"], "multi_source_agent_error", request_id=request_id, error=str(exc))
+                        err_msg = "An unexpected error occurred while working across the selected sources."
+                        DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
+                        yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+                        yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
                     return
-                content = (
-                    intent.get("clarifying_question")
-                    or f"I can only answer questions about the loaded source ({active_row['name']}). Try asking about its columns, totals, breakdowns, or trends."
-                )
-                msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "unsupported", "model": model_used})
-                yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
-                yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
-                return
 
-            plan = build_query_plan(intent, question, source.allowed_columns)
-            validate_readonly_sql(plan.sql)
-
-            filter_count = len(intent.get("filters") or [])
-            filter_note = f" · {filter_count} filter{'s' if filter_count != 1 else ''}" if filter_count else ""
-            yield {"event": "thinking", "data": json.dumps({"step": f"Understood: {plan.title}{filter_note}"})}
-            yield {"event": "thinking", "data": json.dumps({"step": f"Querying {active_row['name']}"})}
-
-            df, elapsed_ms = await loop.run_in_executor(None, lambda: _run_query(plan, source))
-            log_event(LOGGERS["query"], "query_executed", request_id=request_id, source=source.source_kind, sql_hash=plan.cache_key, rows=len(df), elapsed_ms=elapsed_ms)
-            viz = choose_visualization(question, intent, df)
-
-            result_payload = {
-                "title": plan.title,
-                "viz": viz,
-                "elapsed_ms": elapsed_ms,
-                "sql": plan.sql,
-                "how": f"Source: {source.source_kind}. Model: {model_used}. {plan.how} Display: {viz}.",
-                "view_type": _get_view_type(chat_id),
-                **_df_to_payload(df),
-            }
-            yield {"event": "result", "data": json.dumps(result_payload, default=str)}
-            yield {"event": "thinking", "data": json.dumps({"step": "Putting an answer together"})}
-
-            # Format datetime columns to human-readable labels before serializing to the LLM,
-            # so the model doesn't parrot back ISO strings like "2023-04-01T00:00:00".
-            sample_df = df.head(50).copy()
-            for col in sample_df.columns:
-                if pd.api.types.is_datetime64_any_dtype(sample_df[col]):
-                    sample_df[col] = sample_df[col].apply(_format_period_for_llm)
-            sample = sample_df.to_dict(orient="records")
-            full_text_parts: list[str] = []
-
-            # Always compute the grand total for multi-row breakdowns so the answer can quote it
-            # without summing the (possibly truncated) sample. ~50ms extra DuckDB query.
-            total_row: dict[str, Any] | None = None
-            if (
-                intent.get("intent_type") in {"aggregate", "trend", "comparison", "chart_request"}
-                and (intent.get("dimensions") or len(df) > 1)
-            ):
                 try:
-                    total_plan = build_total_plan(intent, source.allowed_columns, question=question)
-                    validate_readonly_sql(total_plan.sql)
-                    total_df, total_ms = await loop.run_in_executor(None, lambda: _run_query(total_plan, source))
-                    if not total_df.empty:
-                        raw = total_df.iloc[0].to_dict()
-                        total_row = {}
-                        for k, v in raw.items():
-                            if hasattr(v, "item"):
-                                v = v.item()
-                            if isinstance(v, pd.Timestamp) or pd.api.types.is_datetime64_any_dtype(type(v)):
-                                v = _format_period_for_llm(v)
-                            total_row[k] = v
-                        log_event(LOGGERS["query"], "grand_total_executed", request_id=request_id, sql_hash=total_plan.cache_key, elapsed_ms=total_ms)
-                except Exception as exc:  # pragma: no cover - secondary query best-effort
-                    log_event(LOGGERS["query"], "grand_total_failed", request_id=request_id, error=str(exc))
-
-            if llm_router.available:
-                try:
-                    chunks_iter = llm_router.summarize_answer_stream(
-                        request_id=request_id,
-                        user_question=question,
-                        intent=intent,
-                        result_sample=sample,
-                        row_count=len(df),
-                        sql=plan.sql,
-                        total_row=total_row,
+                    mcp_summary_text = _build_mcp_summary(pool, allowed_mcp_ids) if has_mcp else ""
+                    instruction_context = build_instruction_context(
+                        source_instructions=source_instructions,
+                        project_instructions=project_instructions,
+                        memory_snippets=memory_snippets,
+                        allowed_columns=source.allowed_columns,
+                        char_budget=3000,
                     )
-                    while True:
-                        chunk = await loop.run_in_executor(None, lambda it=chunks_iter: next(it, None))
-                        if chunk is None:
-                            break
-                        full_text_parts.append(chunk)
-                        yield {"event": "text", "data": json.dumps({"delta": chunk})}
-                except LLMUnavailable as exc:
-                    text = deterministic_summary(question, df, len(df))
-                    full_text_parts = [text]
-                    yield {"event": "text", "data": json.dumps({"delta": text})}
-            else:
-                text = deterministic_summary(question, df, len(df))
-                full_text_parts = [text]
-                yield {"event": "text", "data": json.dumps({"delta": text})}
+                    if llm_router.available:
+                        intent, model_used, usage = await loop.run_in_executor(
+                            None,
+                            lambda: llm_router.classify_intent(
+                                request_id=request_id,
+                                user_question=question,
+                                schema_context=source.schema,
+                                conversation_summary=conversation_summary(history),
+                                mcp_summary=mcp_summary_text,
+                                local_source_name=active_row["name"],
+                                instruction_context=instruction_context,
+                            ),
+                        )
+                        DB.add_token_usage(
+                            project_id=chat.get("project_id"),
+                            user_id=owner_id,
+                            model=model_used,
+                            prompt_tokens=usage.get("prompt_tokens", 0),
+                            completion_tokens=usage.get("completion_tokens", 0)
+                        )
+                    else:
+                        intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
+                    if model_used != "offline-heuristic":
+                        model_used = model_preset["model"]
+                    intent = apply_instruction_rules(
+                        intent,
+                        question,
+                        source.allowed_columns,
+                        source_instructions=source_instructions,
+                        project_instructions=project_instructions,
+                    )
 
-            full_text = "".join(full_text_parts) or "(no answer)"
-            
-            # Log tokens for the answer (estimated for stream)
-            if llm_router.available:
-                prompt_for_answer = build_answer_prompt(
-                    user_question=question,
-                    intent=intent,
-                    result_sample=sample,
-                    row_count=len(df),
-                    char_budget=llm_router.char_budget,
-                    sql=plan.sql,
-                    total_row=total_row,
-                )
-                DB.add_token_usage(
-                    project_id=chat.get("project_id") if chat else None,
-                    user_id=owner_id,
-                    model=model_used,
-                    prompt_tokens=estimate_tokens(prompt_for_answer),
-                    completion_tokens=estimate_tokens(full_text)
-                )
+                    route = (intent.get("route") or "local").lower()
 
-            assistant_payload = {
-                "kind": "result",
-                "model": model_used,
-                "result": result_payload,
-            }
-            msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
+                    # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
+                    if route == "mcp" and has_mcp:
+                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router):
+                            yield ev
+                        return
 
-            # Hallucination evaluation
-            if sample and llm_router.available:
-                context_str = json.dumps(sample, indent=2)
-                background_tasks.add_task(
-                    evaluate_hallucination_background,
-                    chat_id,
-                    msg["id"],
-                    question,
-                    full_text,
-                    context_str
-                )
+                    # Compound question that needs sequential SQL — route to local agent loop.
+                    if intent.get("intent_type") == "multi_step" and source is not None:
+                        async for ev in _run_local_agent(chat_id, question, source, history, request_id, model_used, llm_router):
+                            yield ev
+                        return
 
-            yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
-        except Exception as exc:
-            log_event(LOGGERS["errors"], "query_error", request_id=request_id, error=str(exc))
-            detail = str(exc)
-            if "Binder Error" in detail or "TRY_CAST" in detail or "INVALID INPUT" in detail.upper():
-                err_msg = "That query couldn't run against this dataset's column types — the date or numeric column may be stored as text. Try a non-time-grouped version of the question."
-            elif "LLMUnavailable" in type(exc).__name__ or "RESOURCE_EXHAUSTED" in detail or "429" in detail:
-                err_msg = "All language models are rate-limited right now. Wait a minute and retry."
-            else:
-                err_msg = "I couldn't answer that from the available data. (Internal error logged — check /opt/datachat/logs/errors.log)"
-            DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": detail})
-            yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": detail})}
-            yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
+                    if intent.get("intent_type") == "clarification":
+                        content = intent.get("clarifying_question") or "Can you clarify the metric or grouping?"
+                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used})
+                        yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
+                        yield {"event": "done", "data": json.dumps({"message_id": msg["id"]})}
+                        return
 
-    return EventSourceResponse(event_stream())
+                    if is_underspecified(intent, question, source.allowed_columns):
+                        content = underspecified_clarification(source.allowed_columns, active_row["name"])
+                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used})
+                        yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
+                        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+                        return
+
+                    if intent.get("intent_type") == "unsupported":
+                        # Safety net: if the classifier missed the route field but MCP is connected,
+                        # let the agent try (e.g. user asked about BigQuery while a CSV is active).
+                        # However, if the user explicitly asked about the "table" or "file" or if the
+                        # prompt classified it explicitly as 'local' route, don't hallucinate MCP calls.
+                        if has_mcp and route != "local" and "table" not in question.lower() and "file" not in question.lower():
+                            async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids, llm_router):
+                                yield ev
+                            return
+                        content = (
+                            intent.get("clarifying_question")
+                            or f"I can only answer questions about the loaded source ({active_row['name']}). Try asking about its columns, totals, breakdowns, or trends."
+                        )
+                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "unsupported", "model": model_used})
+                        yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
+                        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+                        return
+
+                    plan = build_query_plan(intent, question, source.allowed_columns)
+                    validate_readonly_sql(plan.sql)
+
+                    filter_count = len(intent.get("filters") or [])
+                    filter_note = f" · {filter_count} filter{'s' if filter_count != 1 else ''}" if filter_count else ""
+                    yield {"event": "thinking", "data": json.dumps({"step": f"Understood: {plan.title}{filter_note}"})}
+                    yield {"event": "thinking", "data": json.dumps({"step": f"Querying {active_row['name']}"})}
+
+                    df, elapsed_ms = await loop.run_in_executor(None, lambda: _run_query(plan, source))
+                    log_event(LOGGERS["query"], "query_executed", request_id=request_id, source=source.source_kind, sql_hash=plan.cache_key, rows=len(df), elapsed_ms=elapsed_ms)
+                    viz = choose_visualization(question, intent, df)
+
+                    result_payload = {
+                        "title": plan.title,
+                        "viz": viz,
+                        "elapsed_ms": elapsed_ms,
+                        "sql": plan.sql,
+                        "how": f"Source: {source.source_kind}. Model: {model_used}. {plan.how} Display: {viz}.",
+                        "view_type": _get_view_type(chat_id),
+                        **_df_to_payload(df),
+                    }
+                    yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+                    yield {"event": "thinking", "data": json.dumps({"step": "Putting an answer together"})}
+
+                    # Format datetime columns to human-readable labels before serializing to the LLM,
+                    # so the model doesn't parrot back ISO strings like "2023-04-01T00:00:00".
+                    sample_df = df.head(50).copy()
+                    for col in sample_df.columns:
+                        if pd.api.types.is_datetime64_any_dtype(sample_df[col]):
+                            sample_df[col] = sample_df[col].apply(_format_period_for_llm)
+                    sample = sample_df.to_dict(orient="records")
+                    full_text_parts: list[str] = []
+
+                    # Always compute the grand total for multi-row breakdowns so the answer can quote it
+                    # without summing the (possibly truncated) sample. ~50ms extra DuckDB query.
+                    total_row: dict[str, Any] | None = None
+                    if (
+                        intent.get("intent_type") in {"aggregate", "trend", "comparison", "chart_request"}
+                        and (intent.get("dimensions") or len(df) > 1)
+                    ):
+                        try:
+                            total_plan = build_total_plan(intent, source.allowed_columns, question=question)
+                            validate_readonly_sql(total_plan.sql)
+                            total_df, total_ms = await loop.run_in_executor(None, lambda: _run_query(total_plan, source))
+                            if not total_df.empty:
+                                raw = total_df.iloc[0].to_dict()
+                                total_row = {}
+                                for k, v in raw.items():
+                                    if hasattr(v, "item"):
+                                        v = v.item()
+                                    if isinstance(v, pd.Timestamp) or pd.api.types.is_datetime64_any_dtype(type(v)):
+                                        v = _format_period_for_llm(v)
+                                    total_row[k] = v
+                                log_event(LOGGERS["query"], "grand_total_executed", request_id=request_id, sql_hash=total_plan.cache_key, elapsed_ms=total_ms)
+                        except Exception as exc:  # pragma: no cover - secondary query best-effort
+                            log_event(LOGGERS["query"], "grand_total_failed", request_id=request_id, error=str(exc))
+
+                    if llm_router.available:
+                        try:
+                            chunks_iter = llm_router.summarize_answer_stream(
+                                request_id=request_id,
+                                user_question=question,
+                                intent=intent,
+                                result_sample=sample,
+                                row_count=len(df),
+                                sql=plan.sql,
+                                total_row=total_row,
+                            )
+                            while True:
+                                chunk = await loop.run_in_executor(None, lambda it=chunks_iter: next(it, None))
+                                if chunk is None:
+                                    break
+                                full_text_parts.append(chunk)
+                                yield {"event": "text", "data": json.dumps({"delta": chunk})}
+                        except LLMUnavailable as exc:
+                            text = deterministic_summary(question, df, len(df))
+                            full_text_parts = [text]
+                            yield {"event": "text", "data": json.dumps({"delta": text})}
+                    else:
+                        text = deterministic_summary(question, df, len(df))
+                        full_text_parts = [text]
+                        yield {"event": "text", "data": json.dumps({"delta": text})}
+
+                    full_text = "".join(full_text_parts) or "(no answer)"
+                    
+                    # Log tokens for the answer (estimated for stream)
+                    if llm_router.available:
+                        prompt_for_answer = build_answer_prompt(
+                            user_question=question,
+                            intent=intent,
+                            result_sample=sample,
+                            row_count=len(df),
+                            char_budget=llm_router.char_budget,
+                            sql=plan.sql,
+                            total_row=total_row,
+                        )
+                        DB.add_token_usage(
+                            project_id=chat.get("project_id") if chat else None,
+                            user_id=owner_id,
+                            model=model_used,
+                            prompt_tokens=estimate_tokens(prompt_for_answer),
+                            completion_tokens=estimate_tokens(full_text)
+                        )
+
+                    assistant_payload = {
+                        "kind": "result",
+                        "model": model_used,
+                        "result": result_payload,
+                    }
+                    msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
+
+                    # Hallucination evaluation
+                    if sample and llm_router.available:
+                        context_str = json.dumps(sample, indent=2)
+                        background_tasks.add_task(
+                            evaluate_hallucination_background,
+                            chat_id,
+                            msg["id"],
+                            question,
+                            full_text,
+                            context_str,
+                            parent_context
+                        )
+
+                    yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+                except Exception as exc:
+                    log_event(LOGGERS["errors"], "query_error", request_id=request_id, error=str(exc))
+                    detail = str(exc)
+                    if "Binder Error" in detail or "TRY_CAST" in detail or "INVALID INPUT" in detail.upper():
+                        err_msg = "That query couldn't run against this dataset's column types — the date or numeric column may be stored as text. Try a non-time-grouped version of the question."
+                    elif "LLMUnavailable" in type(exc).__name__ or "RESOURCE_EXHAUSTED" in detail or "429" in detail:
+                        err_msg = "All language models are rate-limited right now. Wait a minute and retry."
+                    else:
+                        err_msg = "I couldn't answer that from the available data. (Internal error logged — check /opt/datachat/logs/errors.log)"
+                    DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": detail})
+                    yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": detail})}
+                    yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
+            finally:
+                detach(token)
+
+        return EventSourceResponse(event_stream())

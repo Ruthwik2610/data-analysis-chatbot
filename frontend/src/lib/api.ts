@@ -61,6 +61,7 @@ export const api = {
   adminLogin: (password: string) => jpost<{ token: string; user_token: string; user: { id: string; email: string } }>("/admin/login", { password }),
   getAdminStats: () => jget<any>("/admin/stats"),
   getHallucinations: () => jget<any[]>("/admin/hallucinations"),
+  getTraces: (limit?: number) => jget<any[]>(limit ? `/admin/traces?limit=${limit}` : "/admin/traces"),
 
   listSources: (projectId?: string | null) =>
     jget<Source[]>(projectId ? `/sources?project_id=${encodeURIComponent(projectId)}` : "/sources"),

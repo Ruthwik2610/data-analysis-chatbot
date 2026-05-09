@@ -16,7 +16,7 @@ def load_dotenv_if_present(path: str = ".env") -> None:
         key, value = line.split("=", 1)
         clean_key = key.strip()
         clean_value = value.strip().strip('"').strip("'")
-        if clean_key.startswith("OPENROUTER_") or clean_key in {
+        if clean_key.startswith("OPENROUTER_") or clean_key.startswith("PHOENIX_") or clean_key in {
             "MODEL",
             "AGENT_MODEL",
             "MODEL_FLASH",
@@ -42,6 +42,8 @@ class AppConfig:
     agent_model: str
     prompt_char_budget: int
     admin_password: str | None
+    phoenix_api_key: str | None
+    phoenix_project_name: str
     max_preview_rows: int = 100
 
     @classmethod
@@ -64,4 +66,6 @@ class AppConfig:
             agent_model=os.getenv("AGENT_MODEL", "openrouter/deepseek/deepseek-v4-pro"),
             prompt_char_budget=int(os.getenv("PROMPT_CHAR_BUDGET", "24000")),
             admin_password=os.getenv("ADMIN_PASSWORD") or None,
+            phoenix_api_key=os.getenv("PHOENIX_API_KEY") or None,
+            phoenix_project_name=os.getenv("PHOENIX_PROJECT_NAME", "data-analysis-chatbot"),
         )

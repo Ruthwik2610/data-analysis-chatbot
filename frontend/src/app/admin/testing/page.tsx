@@ -1,17 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import { ChevronLeft, FlaskConical, Play, Plus, History, CheckCircle, AlertTriangle, XCircle, HelpCircle, LayoutGrid, ListTodo, Activity, X, ChevronRight, Search, BarChart3 } from "lucide-react";
-import Link from "next/link";
+import { FlaskConical, Play, Plus, History, CheckCircle, ListTodo, Activity, X, ChevronLeft, ChevronRight, BarChart3, LayoutGrid } from "lucide-react";
 import TestInputPane from "@/components/admin/TestInputPane";
 import GradingInterface from "@/components/admin/GradingInterface";
 import TestingDashboard from "@/components/admin/TestingDashboard";
 
 export default function TestingPage() {
-  const router = useRouter();
-  const [authorized, setAuthorized] = useState(false);
   const [suites, setSuites] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showInputPane, setShowInputPane] = useState(false);
@@ -28,14 +24,8 @@ export default function TestingPage() {
   const selectedSuite = suites.find(s => s.id === selectedSuiteId);
 
   useEffect(() => {
-    const token = localStorage.getItem("datachat_admin_token");
-    if (!token) {
-      router.replace("/admin/login");
-    } else {
-      setAuthorized(true);
-      loadSuites();
-    }
-  }, [router]);
+    loadSuites();
+  }, []);
 
   useEffect(() => {
     if (selectedSuiteId) {
@@ -97,58 +87,8 @@ export default function TestingPage() {
     }
   };
 
-  if (!authorized) return null;
-
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-primary">
-       <header 
-        className="flex items-center justify-between px-6 py-3" 
-        style={{ borderBottom: "0.5px solid var(--color-border-tertiary)", background: "var(--color-background-secondary)" }}
-      >
-        <Link 
-          href="/" 
-          className="flex items-center gap-2 text-sm font-medium transition-colors"
-          style={{ color: "var(--color-text-secondary)" }}
-          onMouseEnter={(e) => e.currentTarget.style.color = "var(--color-text-primary)"}
-          onMouseLeave={(e) => e.currentTarget.style.color = "var(--color-text-secondary)"}
-        >
-          <ChevronLeft size={16} />
-          Back to Chat
-        </Link>
-        <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
-            <img src="/unipro-icon.svg" alt="Unipro" className="w-5 h-5" />
-            <div className="flex items-center gap-6">
-                <Link 
-                    href="/admin" 
-                    className="text-[11px] uppercase tracking-widest font-bold border-b-2 border-transparent pb-1 hover:border-blue-500/30 transition-all"
-                    style={{ color: "var(--color-text-tertiary)" }}
-                >
-                    Insights
-                </Link>
-                <Link 
-                    href="/admin/testing" 
-                    className="text-[11px] uppercase tracking-widest font-bold border-b-2 border-blue-500 pb-1"
-                    style={{ color: "var(--color-text-primary)" }}
-                >
-                    Testing Gateway
-                </Link>
-            </div>
-        </div>
-        <button 
-          onClick={() => {
-            localStorage.removeItem("datachat_admin_token");
-            router.push("/admin/login");
-          }}
-          className="text-xs font-medium px-3 py-1.5 rounded-md transition-colors"
-          style={{ border: "0.5px solid var(--color-border-secondary)", color: "var(--color-text-secondary)" }}
-          onMouseEnter={(e) => e.currentTarget.style.background = "var(--color-background-primary)"}
-          onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
-        >
-          Logout
-        </button>
-      </header>
-
-      <main className="flex-1 overflow-hidden flex flex-col p-8 max-w-7xl mx-auto w-full">
+    <div className="flex-1 overflow-hidden flex flex-col p-8 max-w-7xl mx-auto w-full">
          <div className="flex items-end justify-between mb-8">
             <div className="animate-in fade-in slide-in-from-left-4 duration-700">
                 <h1 className="text-3xl font-bold tracking-tight mb-2" style={{ color: "var(--color-text-primary)" }}>CI/CD Testing Gateway</h1>
@@ -396,20 +336,19 @@ export default function TestingPage() {
                 )}
             </div>
          </div>
-      </main>
-
-      <style jsx>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: var(--color-border-tertiary);
-          border-radius: 10px;
-        }
-      `}</style>
+         
+         <style jsx>{`
+            .custom-scrollbar::-webkit-scrollbar {
+            width: 4px;
+            }
+            .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+            }
+            .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: var(--color-border-tertiary);
+            border-radius: 10px;
+            }
+        `}</style>
     </div>
   );
 }

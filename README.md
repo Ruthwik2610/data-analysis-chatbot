@@ -48,6 +48,27 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+## LLM Observability (Arize Phoenix)
+
+This project integrates with **Arize Phoenix** for deep LLM tracing and evaluation. This provides visibility into "Chain of Thought" reasoning, intent detection, and SQL generation.
+
+1. Create a free account at [app.phoenix.arize.com](https://app.phoenix.arize.com).
+2. Create a project named `data-analysis-chatbot`.
+3. Obtain your API key and add it to your `.env`:
+
+```bash
+PHOENIX_API_KEY=your_phoenix_api_key
+PHOENIX_PROJECT_NAME=data-analysis-chatbot
+PHOENIX_COLLECTOR_ENDPOINT=https://app.phoenix.arize.com/v1/traces
+```
+
+The system will automatically capture:
+- **Classify Intent:** How the LLM interpreted the user's natural language.
+- **Build Query Plan:** The conversion of intent into DuckDB SQL logic.
+- **Summarize Answer:** The final grounded response generation.
+
+Access the **Observability** tab in the Admin Dashboard to view live traces and deep-link into Phoenix for debugging.
+
 ## Sources
 
 The app supports:

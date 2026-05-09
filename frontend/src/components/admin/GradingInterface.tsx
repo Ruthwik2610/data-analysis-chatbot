@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
-import { CheckCircle2, XCircle, AlertCircle, HelpCircle, ChevronRight, ChevronLeft, Save, MessageSquare, Clock, FileText } from "lucide-react";
+import { CheckCircle2, XCircle, AlertCircle, HelpCircle, ChevronRight, ChevronLeft, Save, MessageSquare, Clock, FileText, ExternalLink, Zap } from "lucide-react";
 
 interface Evaluation {
   id: string;
@@ -13,6 +13,9 @@ interface Evaluation {
   answer: string;
   grade: "pass" | "partial" | "fail" | "error" | null;
   reason: string | null;
+  ai_grade: "Pass" | "Partial" | "Fail" | null;
+  ai_reason: string | null;
+  trace_id: string | null;
 }
 
 interface GradingInterfaceProps {
@@ -22,6 +25,7 @@ interface GradingInterfaceProps {
 
 export default function GradingInterface({ runId, onClose }: GradingInterfaceProps) {
   const [evaluations, setEvaluations] = useState<Evaluation[]>([]);
+  const [projectName, setProjectName] = useState("data-analysis-chatbot");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [grading, setGrading] = useState(false);
@@ -34,11 +38,15 @@ export default function GradingInterface({ runId, onClose }: GradingInterfacePro
 
   const loadEvaluations = async () => {
     try {
-      const data = await api.listTestEvaluations(runId);
-      setEvaluations(data);
-      if (data.length > 0) {
-        setReason(data[0].reason || "");
-        setShowReasonField(!!data[0].reason || data[0].grade === "partial" || data[0].grade === "error");
+      const data: any = await api.listTestEvaluations(runId);
+      const evals = data.evaluations || [];
+      setEvaluations(evals);
+      if (data.config?.phoenix_project_name) {
+          setProjectName(data.config.phoenix_project_name);
+      }
+      if (evals.length > 0) {
+        setReason(evals[0].reason || "");
+        setShowReasonField(!!evals[0].reason || evals[0].grade === "partial" || evals[0].grade === "error");
       }
     } catch (err) {
       console.error(err);
@@ -202,16 +210,48 @@ export default function GradingInterface({ runId, onClose }: GradingInterfacePro
             {/* Left: Input */}
             <div className="flex flex-col gap-6">
                 <div className="p-8 rounded-[32px] bg-white/5 border border-white/5 flex flex-col gap-4">
-                    <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-400 text-[9px] font-bold uppercase tracking-wider">
-                            {currentEval.category}
-                        </span>
-                        <span className="text-[10px] font-bold uppercase tracking-widest opacity-30">Input Query</span>
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <span className="px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-400 text-[9px] font-bold uppercase tracking-wider">
+                                {currentEval.category}
+                            </span>
+                            <span className="text-[10px] font-bold uppercase tracking-widest opacity-30">Input Query</span>
+                        </div>
+                        {currentEval.trace_id && (
+                            <a 
+                                href={`https://app.phoenix.arize.com/projects/${projectName}/traces/${currentEval.trace_id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-500/10 text-blue-400 text-[10px] font-bold uppercase tracking-widest hover:bg-blue-500/20 transition-all"
+                            >
+                                <ExternalLink size={12} /> Deep Trace
+                            </a>
+                        )}
                     </div>
                     <div className="text-xl font-medium leading-relaxed" style={{ color: "var(--color-text-primary)" }}>
                         {currentEval.question}
                     </div>
                 </div>
+
+                {currentEval.ai_grade && (
+                    <div className="p-6 rounded-[24px] bg-blue-500/5 border border-blue-500/10 flex flex-col gap-3 animate-in fade-in slide-in-from-top-2 duration-500">
+                        <div className="flex items-center justify-between">
+                            <div className="text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-2 text-blue-400">
+                                <Zap size={12} /> AI Judge Verdict
+                            </div>
+                            <span className={`px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider ${
+                                currentEval.ai_grade === 'Pass' ? 'bg-green-500/10 text-green-500' :
+                                currentEval.ai_grade === 'Partial' ? 'bg-orange-500/10 text-orange-500' :
+                                'bg-red-500/10 text-red-500'
+                            }`}>
+                                AI: {currentEval.ai_grade}
+                            </span>
+                        </div>
+                        <p className="text-xs text-white/60 leading-relaxed italic">
+                            "{currentEval.ai_reason}"
+                        </p>
+                    </div>
+                )}
 
                 <div className="flex flex-col gap-4">
                     <div className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 flex items-center gap-2" style={{ color: "var(--color-text-tertiary)" }}>

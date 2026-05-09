@@ -1,12 +1,38 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import time
 from typing import Any
 
+# Tracing imports
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from openinference.instrumentation.openai import OpenAIInstrumentor
+
 from .logging_config import log_event
 from .prompting import build_answer_prompt, build_intent_prompt, build_mcp_agent_system_prompt, estimate_tokens
+
+
+def setup_phoenix(api_key: str | None, project_name: str, endpoint: str = "https://app.phoenix.arize.com/v1/traces") -> None:
+    if not api_key:
+        return
+        
+    tracer_provider = TracerProvider()
+    headers = {"api_key": api_key}
+    exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
+    span_processor = BatchSpanProcessor(exporter)
+    tracer_provider.add_span_processor(span_processor)
+    trace.set_tracer_provider(tracer_provider)
+    
+    # Instrument OpenAI-compatible calls (OpenRouter)
+    OpenAIInstrumentor().instrument()
+    logging.info(f"Arize Phoenix Cloud tracing initialized for project: {project_name}")
+
 
 MAX_TOOL_ROUNDS = 8
 
@@ -49,6 +75,7 @@ class LLMRouter:
         self.agent_model = agent_model or model
         self.logger = logger
         self.char_budget = char_budget
+        self.tracer = trace.get_tracer(__name__)
 
     @property
     def available(self) -> bool:
@@ -164,21 +191,29 @@ class LLMRouter:
         local_source_name: str = "the loaded dataset",
         instruction_context: str = "",
     ) -> tuple[dict[str, Any], str, dict[str, int]]:
-        prompt = build_intent_prompt(
-            schema_context=schema_context,
-            conversation_summary=conversation_summary,
-            user_question=user_question,
-            char_budget=self.char_budget,
-            mcp_summary=mcp_summary,
-            local_source_name=local_source_name,
-            instruction_context=instruction_context,
-        )
-        try:
-            intent, usage = self._generate_json(prompt, request_id)
-            return intent, self.model, usage
-        except Exception as exc:  # pragma: no cover - network/API dependent
-            log_event(self.logger, "llm_failure", request_id=request_id, model=self.model, error=str(exc))
-            raise LLMUnavailable(str(exc)) from exc
+        with self.tracer.start_as_current_span("classify_intent") as span:
+            span.set_attribute("user_question", user_question)
+            span.set_attribute("schema_context", json.dumps(schema_context))
+            if instruction_context:
+                span.set_attribute("instruction_context", instruction_context)
+            
+            prompt = build_intent_prompt(
+                schema_context=schema_context,
+                conversation_summary=conversation_summary,
+                user_question=user_question,
+                char_budget=self.char_budget,
+                mcp_summary=mcp_summary,
+                local_source_name=local_source_name,
+                instruction_context=instruction_context,
+            )
+            try:
+                intent, usage = self._generate_json(prompt, request_id)
+                span.set_attribute("intent_type", intent.get("intent_type", "unknown"))
+                return intent, self.model, usage
+            except Exception as exc:  # pragma: no cover - network/API dependent
+                log_event(self.logger, "llm_failure", request_id=request_id, model=self.model, error=str(exc))
+                span.record_exception(exc)
+                raise LLMUnavailable(str(exc)) from exc
 
     def summarize_answer(
         self,
@@ -190,19 +225,24 @@ class LLMRouter:
         row_count: int,
         sql: str | None = None,
     ) -> tuple[str, dict[str, int]]:
-        prompt = build_answer_prompt(
-            user_question=user_question,
-            intent=intent,
-            result_sample=result_sample,
-            row_count=row_count,
-            char_budget=self.char_budget,
-            sql=sql,
-        )
-        try:
-            return self._generate_text(prompt, request_id)
-        except Exception as exc:  # pragma: no cover - network/API dependent
-            log_event(self.logger, "llm_summary_failure", request_id=request_id, model=self.model, error=str(exc))
-            raise LLMUnavailable(str(exc)) from exc
+        with self.tracer.start_as_current_span("summarize_answer") as span:
+            span.set_attribute("row_count", row_count)
+            if sql:
+                span.set_attribute("sql", sql)
+            prompt = build_answer_prompt(
+                user_question=user_question,
+                intent=intent,
+                result_sample=result_sample,
+                row_count=row_count,
+                char_budget=self.char_budget,
+                sql=sql,
+            )
+            try:
+                return self._generate_text(prompt, request_id)
+            except Exception as exc:  # pragma: no cover - network/API dependent
+                log_event(self.logger, "llm_summary_failure", request_id=request_id, model=self.model, error=str(exc))
+                span.record_exception(exc)
+                raise LLMUnavailable(str(exc)) from exc
 
     def summarize_answer_stream(
         self,
@@ -241,107 +281,115 @@ class LLMRouter:
         on_tool_call,
         system_prompt: str | None = None,
     ):
-        """Run a function-calling agent loop. Yields events:
-            {"kind": "tool_call", "name", "args", "connector_id"}
-            {"kind": "tool_result", "name", "text", "error"}
-            {"kind": "text", "delta"}
+        parent_span = self.tracer.start_span("agent_loop")
+        parent_span.set_attribute("user_question", user_question)
+        
+        try:
+            if not self.openrouter_api_key:
+                raise LLMUnavailable("OpenRouter API key is not configured.")
+            import httpx
 
-        `on_tool_call(tool_name, args) -> awaitable[(text_result, error_or_none, connector_id)]`.
-        Pass `system_prompt` to use a custom base prompt (e.g. local DuckDB agent).
-        """
-        if not self.openrouter_api_key:
-            raise LLMUnavailable("OpenRouter API key is not configured.")
-        import httpx
+            tools = [{
+                "type": "function",
+                "function": {
+                    "name": spec["name"],
+                    "description": spec.get("description") or "",
+                    "parameters": spec.get("input_schema") or {"type": "object", "properties": {}},
+                },
+            } for spec in tool_specs] or None
 
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": spec["name"],
-                "description": spec.get("description") or "",
-                "parameters": spec.get("input_schema") or {"type": "object", "properties": {}},
-            },
-        } for spec in tool_specs] or None
+            system_text = system_prompt if system_prompt is not None else build_mcp_agent_system_prompt(connector_summary)
+            if conversation_summary:
+                system_text += "\n\n## Recent conversation\n" + conversation_summary[-2000:]
 
-        system_text = system_prompt if system_prompt is not None else build_mcp_agent_system_prompt(connector_summary)
-        if conversation_summary:
-            system_text += "\n\n## Recent conversation\n" + conversation_summary[-2000:]
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_question},
+            ]
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {self.openrouter_api_key}"}
+            base_body: dict[str, Any] = {
+                "model": strip_openrouter_prefix(self.agent_model),
+                "temperature": 0.1,
+            }
+            base_body.update(self._openrouter_provider_pref())
 
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_text},
-            {"role": "user", "content": user_question},
-        ]
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {self.openrouter_api_key}"}
-        base_body: dict[str, Any] = {
-            "model": strip_openrouter_prefix(self.agent_model),
-            "temperature": 0.1,
-        }
-        base_body.update(self._openrouter_provider_pref())
+            async def _stream_final(client: httpx.AsyncClient) -> Any:
+                stream_body = {**base_body, "messages": messages, "stream": True}
+                async with client.stream("POST", url, headers=headers, json=stream_body) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data_str = line[len("data: "):].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            delta = json.loads(data_str)["choices"][0]["delta"].get("content")
+                        except Exception:
+                            continue
+                        if delta:
+                            yield delta
 
-        async def _stream_final(client: httpx.AsyncClient) -> Any:
-            stream_body = {**base_body, "messages": messages, "stream": True}
-            async with client.stream("POST", url, headers=headers, json=stream_body) as r:
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data_str = line[len("data: "):].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        delta = json.loads(data_str)["choices"][0]["delta"].get("content")
-                    except Exception:
-                        continue
-                    if delta:
-                        yield delta
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                for round_idx in range(MAX_TOOL_ROUNDS):
+                    with self.tracer.start_as_current_span(f"agent_round_{round_idx}") as round_span:
+                        round_span.set_attribute("round", round_idx)
+                        body = {**base_body, "messages": messages}
+                        if tools:
+                            body["tools"] = tools
+                        try:
+                            resp = await client.post(url, headers=headers, json=body)
+                            resp.raise_for_status()
+                        except Exception as exc:
+                            log_event(self.logger, "agent_llm_failure", request_id=request_id, model=self.agent_model, streaming=False, error=str(exc))
+                            round_span.record_exception(exc)
+                            raise LLMUnavailable(str(exc)) from exc
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            for round_idx in range(MAX_TOOL_ROUNDS):
-                body = {**base_body, "messages": messages}
-                if tools:
-                    body["tools"] = tools
-                try:
-                    resp = await client.post(url, headers=headers, json=body)
-                    resp.raise_for_status()
-                except Exception as exc:
-                    log_event(self.logger, "agent_llm_failure", request_id=request_id, model=self.agent_model, streaming=False, error=str(exc))
-                    raise LLMUnavailable(str(exc)) from exc
+                        msg = resp.json()["choices"][0]["message"]
+                        tool_calls = msg.get("tool_calls") or []
+                        log_event(self.logger, "agent_round", request_id=request_id, round=round_idx, model=self.agent_model, tool_calls=len(tool_calls))
+                        round_span.set_attribute("tool_calls_count", len(tool_calls))
 
-                msg = resp.json()["choices"][0]["message"]
-                tool_calls = msg.get("tool_calls") or []
-                log_event(self.logger, "agent_round", request_id=request_id, round=round_idx, model=self.agent_model, tool_calls=len(tool_calls))
+                        if not tool_calls:
+                            # Final answer — re-issue as a stream so the user sees deltas.
+                            async for delta in _stream_final(client):
+                                yield {"kind": "text", "delta": delta}
+                            return
 
-                if not tool_calls:
-                    # Final answer — re-issue as a stream so the user sees deltas.
-                    async for delta in _stream_final(client):
-                        yield {"kind": "text", "delta": delta}
-                    return
+                        # V4 Pro thinking mode requires the assistant message be passed back verbatim
+                        # (including reasoning / reasoning_details), so append the message dict as-is.
+                        messages.append(msg)
 
-                # V4 Pro thinking mode requires the assistant message be passed back verbatim
-                # (including reasoning / reasoning_details), so append the message dict as-is.
-                messages.append(msg)
+                        for tc in tool_calls:
+                            fn = tc.get("function") or {}
+                            tool_name = fn.get("name") or ""
+                            args_raw = fn.get("arguments") or "{}"
+                            try:
+                                args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+                            except Exception:
+                                args = {}
+                            
+                            round_span.set_attribute("tool_name", tool_name)
+                            round_span.set_attribute("tool_args", json.dumps(args))
+                            
+                            yield {"kind": "tool_call", "name": tool_name, "args": args}
+                            try:
+                                result_text, error, connector_id = await on_tool_call(tool_name, args)
+                            except Exception as exc:
+                                result_text, error, connector_id = "", str(exc), None
+                                round_span.record_exception(exc)
+                            
+                            yield {"kind": "tool_result", "name": tool_name, "text": result_text, "error": error, "connector_id": connector_id}
+                            tool_content = json.dumps({"error": error}) if error else (result_text or "")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id"),
+                                "content": tool_content,
+                            })
 
-                for tc in tool_calls:
-                    fn = tc.get("function") or {}
-                    tool_name = fn.get("name") or ""
-                    args_raw = fn.get("arguments") or "{}"
-                    try:
-                        args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-                    except Exception:
-                        args = {}
-                    yield {"kind": "tool_call", "name": tool_name, "args": args}
-                    try:
-                        result_text, error, connector_id = await on_tool_call(tool_name, args)
-                    except Exception as exc:
-                        result_text, error, connector_id = "", str(exc), None
-                    yield {"kind": "tool_result", "name": tool_name, "text": result_text, "error": error, "connector_id": connector_id}
-                    tool_content = json.dumps({"error": error}) if error else (result_text or "")
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id"),
-                        "content": tool_content,
-                    })
-
-            # Hit the cap — final answer attempt with no tools.
-            async for delta in _stream_final(client):
-                yield {"kind": "text", "delta": delta}
+                # Hit the cap — final answer attempt with no tools.
+                async for delta in _stream_final(client):
+                    yield {"kind": "text", "delta": delta}
+        finally:
+            parent_span.end()

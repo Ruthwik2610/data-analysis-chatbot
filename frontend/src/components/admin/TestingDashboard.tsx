@@ -5,16 +5,21 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, 
   LineChart, Line, AreaChart, Area 
 } from "recharts";
-import { TrendingUp, BarChart3, Activity, Target } from "lucide-react";
+import { TrendingUp, BarChart3, Activity, Target, Zap } from "lucide-react";
 
 interface RunStats {
   id: string;
   created_at: number;
   stats: {
+    total: number;
     pass: number;
     fail: number;
     partial: number;
     error: number;
+    ai_pass: number;
+    ai_fail: number;
+    ai_partial: number;
+    consensus: number;
   };
   snapshot?: {
     model?: string;
@@ -36,7 +41,10 @@ export default function TestingDashboard({ runs }: TestingDashboardProps) {
       fail: run.stats?.fail || 0,
       partial: run.stats?.partial || 0,
       error: run.stats?.error || 0,
-      total: (run.stats?.pass || 0) + (run.stats?.fail || 0) + (run.stats?.partial || 0) + (run.stats?.error || 0),
+      ai_pass: run.stats?.ai_pass || 0,
+      ai_fail: run.stats?.ai_fail || 0,
+      consensus: run.stats?.consensus || 0,
+      total: run.stats?.total || 1,
       timestamp: run.created_at,
       model: run.snapshot?.model || "Unknown",
     }));
@@ -45,6 +53,14 @@ export default function TestingDashboard({ runs }: TestingDashboardProps) {
   const latestStats = chartData[chartData.length - 1];
   const passRate = latestStats && latestStats.total > 0 
     ? ((latestStats.pass / latestStats.total) * 100).toFixed(1) 
+    : "0.0";
+  
+  const aiPassRate = latestStats && latestStats.total > 0
+    ? ((latestStats.ai_pass / latestStats.total) * 100).toFixed(1)
+    : "0.0";
+
+  const consensusRate = latestStats && latestStats.total > 0
+    ? ((latestStats.consensus / latestStats.total) * 100).toFixed(1)
     : "0.0";
 
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -89,25 +105,26 @@ export default function TestingDashboard({ runs }: TestingDashboardProps) {
                     <TrendingUp size={10} /> +2.4%
                 </div>
             </div>
-            <div className="text-[10px] opacity-30 font-bold uppercase tracking-tighter">Pass rate on latest run</div>
+            <div className="text-[10px] opacity-30 font-bold uppercase tracking-tighter">Human-graded pass rate</div>
          </div>
          
-         <div className="p-6 rounded-[24px] bg-white/[0.03] border border-white/5 flex flex-col gap-2">
-            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-blue-500">
-                <Activity size={12} /> Total Eval
+         <div className="p-6 rounded-[24px] bg-white/[0.03] border border-white/5 flex flex-col gap-2 relative overflow-hidden group">
+            <div className="absolute -right-4 -top-4 opacity-5 group-hover:opacity-10 transition-opacity scale-150 text-blue-500">
+                <Zap size={48} />
             </div>
-            <div className="text-3xl font-bold">{runs.reduce((acc, r) => acc + (r.stats?.pass || 0) + (r.stats?.fail || 0), 0)}</div>
-            <div className="text-[10px] opacity-30 font-bold uppercase tracking-tighter">Queries evaluated across all runs</div>
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-blue-400">
+                <Zap size={12} /> AI Reliability
+            </div>
+            <div className="text-3xl font-bold">{aiPassRate}%</div>
+            <div className="text-[10px] opacity-30 font-bold uppercase tracking-tighter">Judge-graded pass rate</div>
          </div>
 
          <div className="p-6 rounded-[24px] bg-white/[0.03] border border-white/5 flex flex-col gap-2">
             <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-orange-500">
-                <TrendingUp size={12} /> Partial Avg
+                <Activity size={12} /> Consensus
             </div>
-            <div className="text-3xl font-bold">
-                {chartData.length > 0 ? (chartData.reduce((acc, d) => acc + d.partial, 0) / chartData.length).toFixed(1) : 0}
-            </div>
-            <div className="text-[10px] opacity-30 font-bold uppercase tracking-tighter">Average partial scores per run</div>
+            <div className="text-3xl font-bold">{consensusRate}%</div>
+            <div className="text-[10px] opacity-30 font-bold uppercase tracking-tighter">Human/AI grade agreement</div>
          </div>
 
          <div className="p-6 rounded-[24px] bg-white/[0.03] border border-white/5 flex flex-col gap-2">
@@ -122,19 +139,19 @@ export default function TestingDashboard({ runs }: TestingDashboardProps) {
       {/* Main Chart */}
       <div className="flex flex-col gap-4">
         <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 flex items-center gap-2" style={{ color: "var(--color-text-tertiary)" }}>
-            <TrendingUp size={12} /> Performance Trend (Pass vs Fail)
+            <TrendingUp size={12} /> Performance Trend (Human vs AI Judge)
         </h3>
         <div className="w-full h-[350px] bg-white/[0.02] border border-white/5 rounded-[32px] p-8">
             <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <defs>
-                        <linearGradient id="colorPass" x1="0" y1="0" x2="0" y2="1">
+                        <linearGradient id="colorHuman" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="5%" stopColor="#22c55e" stopOpacity={0.3}/>
                             <stop offset="95%" stopColor="#22c55e" stopOpacity={0}/>
                         </linearGradient>
-                        <linearGradient id="colorFail" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                        <linearGradient id="colorAI" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
                         </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
@@ -152,20 +169,23 @@ export default function TestingDashboard({ runs }: TestingDashboardProps) {
                     />
                     <Tooltip content={<CustomTooltip />} />
                     <Area 
+                        name="Human Pass"
                         type="monotone" 
                         dataKey="pass" 
                         stroke="#22c55e" 
                         strokeWidth={3}
                         fillOpacity={1} 
-                        fill="url(#colorPass)" 
+                        fill="url(#colorHuman)" 
                     />
                     <Area 
+                        name="AI Pass"
                         type="monotone" 
-                        dataKey="fail" 
-                        stroke="#ef4444" 
-                        strokeWidth={3}
+                        dataKey="ai_pass" 
+                        stroke="#3b82f6" 
+                        strokeWidth={2}
+                        strokeDasharray="5 5"
                         fillOpacity={1} 
-                        fill="url(#colorFail)" 
+                        fill="url(#colorAI)" 
                     />
                 </AreaChart>
             </ResponsiveContainer>
