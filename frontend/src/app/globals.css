@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
-:root {
+@theme {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 
+  /* Base Colors - Light Mode */
   --color-background-primary: #ffffff;
   --color-background-secondary: #f8fafc;
   --color-background-tertiary: #eef3f8;
@@ -16,10 +17,11 @@
   --color-text-info: #2563eb;
   --color-text-warning: #f59e0b;
 
-  --color-border-primary: rgba(15, 23, 42, 0.14);
-  --color-border-secondary: rgba(15, 23, 42, 0.09);
-  --color-border-tertiary: rgba(15, 23, 42, 0.06);
-  --color-border-info: rgba(37, 99, 235, 0.22);
+  /* Dynamic Borders - Using color-mix for automatic theme adaptation */
+  --color-border-primary: color-mix(in srgb, var(--color-text-primary) 14%, transparent);
+  --color-border-secondary: color-mix(in srgb, var(--color-text-primary) 9%, transparent);
+  --color-border-tertiary: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
+  --color-border-info: color-mix(in srgb, var(--color-text-info) 22%, transparent);
 
   --border-radius-sm: 6px;
   --border-radius-md: 10px;
@@ -32,10 +34,12 @@
   --shadow-lg: 0 18px 36px -24px rgb(15 23 42 / 0.28);
   --shadow-xl: 0 28px 60px -36px rgb(15 23 42 / 0.35);
 
-  --glass-background: rgba(255, 255, 255, 0.72);
-  --glass-border: rgba(15, 23, 42, 0.08);
+  /* Glassmorphism primitives */
+  --glass-background: color-mix(in srgb, var(--color-background-primary) 72%, transparent);
+  --glass-border: color-mix(in srgb, var(--color-text-primary) 8%, transparent);
 }
 
+/* Theme Overrides */
 [data-theme="dark"] {
   --color-background-primary: #111113;
   --color-background-secondary: #1a1a1e;
@@ -43,18 +47,14 @@
   --color-background-info: #1a253d;
   --color-background-elevated: #1f1f24;
 
-  --glass-background: rgba(26, 26, 30, 0.72);
-  --glass-border: rgba(255, 255, 255, 0.06);
   --color-text-primary: #f0f0f2;
   --color-text-secondary: #b0b0ba;
   --color-text-tertiary: #72727e;
   --color-text-success: #34d399;
   --color-text-info: #60a5fa;
   --color-text-warning: #fbbf24;
-  --color-border-primary: rgba(255,255,255,0.12);
-  --color-border-secondary: rgba(255,255,255,0.07);
-  --color-border-tertiary: rgba(255,255,255,0.04);
-  --color-border-info: rgba(96,165,250,0.2);
+
+  /* Shadow overrides for dark mode */
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4);
 }
