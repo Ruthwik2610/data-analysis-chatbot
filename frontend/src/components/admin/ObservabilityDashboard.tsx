@@ -125,30 +125,17 @@ export function ObservabilityDashboard() {
             />
         </div>
 
-        {/* Embedded Visual (Placeholder for actual UMAP/Clustering iframe) */}
+        {/* Layered evaluation path */}
         <div className="flex flex-col gap-4">
             <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
-                <LayoutGrid size={12} /> Semantic Clusters (Embedding Space)
+                <LayoutGrid size={12} /> Evaluation Path
             </h3>
-            <div className="w-full h-[300px] bg-white/[0.02] border border-white/5 rounded-[32px] overflow-hidden relative group">
-                <div className="absolute inset-0 flex items-center justify-center bg-slate-900/40 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity z-10">
-                    <p className="text-xs font-bold text-white bg-white/10 px-4 py-2 rounded-full border border-white/10">
-                        Visualizing 1,240 Spans...
-                    </p>
-                </div>
-                {/* Visual Placeholder: Grid of glowing dots */}
-                <div className="grid grid-cols-12 gap-4 p-12 opacity-20">
-                    {Array.from({ length: 48 }).map((_, i) => (
-                        <div 
-                            key={i} 
-                            className={`w-2 h-2 rounded-full ${i % 7 === 0 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.8)]' : 'bg-blue-400 opacity-40'}`}
-                            style={{ 
-                                marginTop: Math.sin(i) * 20,
-                                marginLeft: Math.cos(i) * 20
-                            }}
-                        />
-                    ))}
-                </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+                <LayerCard title="Business Metrics" body="Cost, RAM, disk, query volume" href="/admin" />
+                <LayerCard title="Intent Understanding" body={`${metrics.trace_volume} captured trace roots`} />
+                <LayerCard title="Answer Quality" body={metrics.avg_faithfulness ? `${metrics.avg_faithfulness}% faithfulness` : "No judge data yet"} />
+                <LayerCard title="Feedback Loop" body={`${metrics.hallucination_count} quality alerts`} href="/admin/feedback" />
+                <LayerCard title="Auto Testing" body="Generate suites from uploaded tables" href="/admin/testing" />
             </div>
         </div>
 
@@ -192,6 +179,16 @@ export function ObservabilityDashboard() {
       </div>
     </div>
   );
+}
+
+function LayerCard({ title, body, href }: { title: string; body: string; href?: string }) {
+    const content = (
+        <div className="h-full rounded-[22px] border border-white/5 bg-white/[0.03] p-4 transition-all hover:bg-white/[0.05]">
+            <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-blue-300/70">{title}</div>
+            <div className="mt-2 text-xs leading-relaxed text-white/45">{body}</div>
+        </div>
+    );
+    return href ? <a href={href}>{content}</a> : content;
 }
 
 function EvalCard({ label, value, description, status, icon }: any) {

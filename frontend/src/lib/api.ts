@@ -62,6 +62,17 @@ export const api = {
   getAdminStats: () => jget<any>("/admin/stats"),
   getHallucinations: () => jget<any[]>("/admin/hallucinations"),
   getTraces: (limit?: number) => jget<any[]>(limit ? `/admin/traces?limit=${limit}` : "/admin/traces"),
+  getFeedback: (status?: string) => jget<any>(status ? `/admin/feedback?status=${encodeURIComponent(status)}` : "/admin/feedback"),
+  updateFeedbackStatus: (id: string, status: string) =>
+    fetch(`${BASE}/admin/feedback/${id}`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ status }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      return r.json();
+    }),
+  getUserAnalytics: () => jget<any>("/admin/user-analytics"),
   clearCache: () => jpost<any>("/admin/maintenance/clear-cache", {}),
 
   listSources: (projectId?: string | null) =>
@@ -195,7 +206,7 @@ export const api = {
       if (!r.ok) throw new Error(`${r.status}`);
       return r.json();
     }),
-  postFeedback: (body: { chat_id?: string | null; message_id?: string | null; rating: number; comment?: string }) =>
+  postFeedback: (body: { chat_id?: string | null; message_id?: string | null; rating: number; comment?: string; category?: string }) =>
     jpost<{ ok: boolean }>("/feedback", body),
 
   // Testing Gateway
@@ -205,6 +216,8 @@ export const api = {
   addTestQueriesBulk: (suiteId: string, queries: any[], queriesText?: string) => 
     jpost<any>("/admin/testing/queries/bulk", { suite_id: suiteId, queries, queries_text: queriesText }),
   startTestRun: (suiteId: string) => jpost<any>("/admin/testing/runs", { suite_id: suiteId }),
+  createAutoTestSuite: (body: { name?: string; source_ids?: string[]; project_id?: string | null }) =>
+    jpost<any>("/admin/testing/suites/auto", body),
   listTestRuns: (suiteId?: string) => jget<any[]>(suiteId ? `/admin/testing/runs?suite_id=${suiteId}` : "/admin/testing/runs"),
   listTestEvaluations: (runId: string) => jget<any[]>(`/admin/testing/runs/${runId}/evaluations`),
   gradeEvaluation: (evaluationId: string, grade: string, reason?: string) =>

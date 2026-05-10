@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS test_queries (
   suite_id TEXT NOT NULL REFERENCES test_suites(id) ON DELETE CASCADE,
   question TEXT NOT NULL,
   category TEXT NOT NULL DEFAULT 'Uncategorized',
+  expected_answer TEXT,
   created_at REAL NOT NULL
 );
 
@@ -161,6 +162,10 @@ CREATE TABLE IF NOT EXISTS test_runs (
   id TEXT PRIMARY KEY,
   suite_id TEXT NOT NULL REFERENCES test_suites(id) ON DELETE CASCADE,
   snapshot_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  total_count INTEGER NOT NULL DEFAULT 0,
+  completed_count INTEGER NOT NULL DEFAULT 0,
+  completed_at REAL,
   created_at REAL NOT NULL
 );
 
@@ -183,6 +188,8 @@ CREATE TABLE IF NOT EXISTS user_feedback (
   chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
   message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
   rating INTEGER, -- e.g. 1-5 or simple boolean
+  category TEXT NOT NULL DEFAULT 'feedback',
+  status TEXT NOT NULL DEFAULT 'open',
   comment TEXT,
   created_at REAL NOT NULL
 );
@@ -192,6 +199,7 @@ CREATE TABLE IF NOT EXISTS token_usage (
   project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
   user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
   model TEXT NOT NULL,
+  purpose TEXT NOT NULL DEFAULT 'chat',
   prompt_tokens INTEGER NOT NULL DEFAULT 0,
   completion_tokens INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL
@@ -222,9 +230,17 @@ class Storage:
             self._ensure_column(con, "mcp_connectors", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
             self._ensure_column(con, "project_files", "source_id", "TEXT REFERENCES sources(id) ON DELETE SET NULL")
             self._ensure_column(con, "messages", "trace_id", "TEXT")
+            self._ensure_column(con, "test_queries", "expected_answer", "TEXT")
+            self._ensure_column(con, "test_runs", "status", "TEXT NOT NULL DEFAULT 'running'")
+            self._ensure_column(con, "test_runs", "total_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(con, "test_runs", "completed_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(con, "test_runs", "completed_at", "REAL")
             self._ensure_column(con, "test_evaluations", "trace_id", "TEXT")
             self._ensure_column(con, "test_evaluations", "ai_grade", "TEXT")
             self._ensure_column(con, "test_evaluations", "ai_reason", "TEXT")
+            self._ensure_column(con, "user_feedback", "category", "TEXT NOT NULL DEFAULT 'feedback'")
+            self._ensure_column(con, "user_feedback", "status", "TEXT NOT NULL DEFAULT 'open'")
+            self._ensure_column(con, "token_usage", "purpose", "TEXT NOT NULL DEFAULT 'chat'")
             self._ensure_project_memory_table(con)
             con.execute("PRAGMA journal_mode=WAL")
 
@@ -1058,11 +1074,27 @@ class Storage:
         run_id = f"tr_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
+            total_count = con.execute(
+                "SELECT COUNT(*) as c FROM test_queries WHERE suite_id = ?",
+                (suite_id,),
+            ).fetchone()["c"]
             con.execute(
-                "INSERT INTO test_runs (id, suite_id, snapshot_json, created_at) VALUES (?, ?, ?, ?)",
-                (run_id, suite_id, json.dumps(snapshot), now),
+                """
+                INSERT INTO test_runs (id, suite_id, snapshot_json, status, total_count, completed_count, completed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, suite_id, json.dumps(snapshot), "running", total_count, 0, None, now),
             )
-        return {"id": run_id, "suite_id": suite_id, "snapshot": snapshot, "created_at": now}
+        return {
+            "id": run_id,
+            "suite_id": suite_id,
+            "snapshot": snapshot,
+            "status": "running",
+            "total_count": total_count,
+            "completed_count": 0,
+            "completed_at": None,
+            "created_at": now,
+        }
 
     def list_test_runs(self, suite_id: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM test_runs"
@@ -1099,8 +1131,29 @@ class Storage:
                 ).fetchone()
                 
                 run["stats"] = dict(stats) if stats else {"total": 0, "pass": 0, "fail": 0, "partial": 0, "error": 0, "ai_pass": 0, "ai_fail": 0, "ai_partial": 0, "consensus": 0}
+                run["completed_count"] = int(run.get("completed_count") or run["stats"].get("total") or 0)
+                if not run.get("total_count"):
+                    run["total_count"] = con.execute(
+                        "SELECT COUNT(*) as c FROM test_queries WHERE suite_id = ?",
+                        (run["suite_id"],),
+                    ).fetchone()["c"]
                 runs.append(run)
         return runs
+
+    def update_test_run_progress(self, run_id: str, *, status: str | None = None, completed_at: float | None = None) -> None:
+        with self._conn() as con:
+            completed_count = con.execute(
+                "SELECT COUNT(*) as c FROM test_evaluations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["c"]
+            if status is None:
+                run = con.execute("SELECT total_count FROM test_runs WHERE id = ?", (run_id,)).fetchone()
+                total_count = int(run["total_count"] or 0) if run else 0
+                status = "completed" if total_count and completed_count >= total_count else "running"
+            con.execute(
+                "UPDATE test_runs SET status = ?, completed_count = ?, completed_at = ? WHERE id = ?",
+                (status, completed_count, completed_at, run_id),
+            )
 
     def add_test_evaluation(
         self,
@@ -1121,6 +1174,18 @@ class Storage:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (eval_id, run_id, query_id, answer, latency_ms, grade, reason, trace_id, now),
+            )
+            completed_count = con.execute(
+                "SELECT COUNT(*) as c FROM test_evaluations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["c"]
+            run = con.execute("SELECT total_count FROM test_runs WHERE id = ?", (run_id,)).fetchone()
+            total_count = int(run["total_count"] or 0) if run else 0
+            status = "completed" if total_count and completed_count >= total_count else "running"
+            completed_at = now if status == "completed" else None
+            con.execute(
+                "UPDATE test_runs SET completed_count = ?, status = ?, completed_at = ? WHERE id = ?",
+                (completed_count, status, completed_at, run_id),
             )
         return eval_id
 
@@ -1151,18 +1216,62 @@ class Storage:
         message_id: str | None,
         rating: int,
         comment: str | None = None,
+        category: str = "feedback",
     ) -> dict[str, Any]:
         feedback_id = f"fb_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
             con.execute(
                 """
-                INSERT INTO user_feedback (id, chat_id, message_id, rating, comment, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO user_feedback (id, chat_id, message_id, rating, category, status, comment, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (feedback_id, chat_id, message_id, rating, comment, now),
+                (feedback_id, chat_id, message_id, rating, category, "open", comment, now),
             )
-        return {"id": feedback_id, "chat_id": chat_id, "rating": rating, "created_at": now}
+        return {"id": feedback_id, "chat_id": chat_id, "rating": rating, "category": category, "status": "open", "created_at": now}
+
+    def list_user_feedback(self, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+        clauses = []
+        params: list[Any] = []
+        if status:
+            clauses.append("uf.status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._conn() as con:
+            rows = con.execute(
+                f"""
+                SELECT
+                  uf.*,
+                  c.title as chat_title,
+                  p.title as project_name,
+                  p.id as project_id,
+                  m.content as answer,
+                  m.trace_id,
+                  (
+                    SELECT prev.content
+                    FROM messages prev
+                    WHERE prev.chat_id = uf.chat_id
+                      AND prev.role = 'user'
+                      AND prev.created_at <= COALESCE(m.created_at, uf.created_at)
+                    ORDER BY prev.created_at DESC
+                    LIMIT 1
+                  ) as question
+                FROM user_feedback uf
+                LEFT JOIN chats c ON c.id = uf.chat_id
+                LEFT JOIN projects p ON p.id = c.project_id
+                LEFT JOIN messages m ON m.id = uf.message_id
+                {where}
+                ORDER BY uf.created_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_user_feedback_status(self, feedback_id: str, status: str) -> None:
+        with self._conn() as con:
+            con.execute("UPDATE user_feedback SET status = ? WHERE id = ?", (status, feedback_id))
 
     def update_test_evaluation(self, evaluation_id: str, grade: str, reason: str | None = None) -> None:
         with self._conn() as con:
@@ -1179,16 +1288,17 @@ class Storage:
         model: str,
         prompt_tokens: int,
         completion_tokens: int,
+        purpose: str = "chat",
     ) -> None:
         usage_id = f"tok_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
             con.execute(
                 """
-                INSERT INTO token_usage (id, project_id, user_id, model, prompt_tokens, completion_tokens, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO token_usage (id, project_id, user_id, model, purpose, prompt_tokens, completion_tokens, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (usage_id, project_id, user_id, model, prompt_tokens, completion_tokens, now),
+                (usage_id, project_id, user_id, model, purpose, prompt_tokens, completion_tokens, now),
             )
 
     def list_token_usage_by_project(self) -> list[dict[str, Any]]:
@@ -1204,6 +1314,23 @@ class Storage:
                 FROM projects p
                 JOIN token_usage tu ON tu.project_id = p.id
                 GROUP BY p.id
+                ORDER BY total_tokens DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_token_usage_by_purpose(self) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT
+                  purpose,
+                  SUM(prompt_tokens) as prompt_tokens,
+                  SUM(completion_tokens) as completion_tokens,
+                  SUM(prompt_tokens + completion_tokens) as total_tokens,
+                  COUNT(*) as request_count
+                FROM token_usage
+                GROUP BY purpose
                 ORDER BY total_tokens DESC
                 """
             ).fetchall()

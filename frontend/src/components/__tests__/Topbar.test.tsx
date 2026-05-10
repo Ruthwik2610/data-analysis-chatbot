@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { Topbar } from "../Topbar";
 import type { Source } from "@/lib/types";
 
@@ -9,7 +9,7 @@ const sources: Source[] = [
 ];
 
 describe("Topbar", () => {
-  it("shows title, project, first selected source, and overflow count", () => {
+  it("shows title and project without duplicating selected source context", () => {
     render(
       <Topbar
         title="Pizza analysis"
@@ -21,8 +21,8 @@ describe("Topbar", () => {
 
     expect(screen.getByText("Pizza analysis")).toBeInTheDocument();
     expect(screen.getByText("Restaurant ops")).toBeInTheDocument();
-    expect(screen.getByText("pizza_sales")).toBeInTheDocument();
-    expect(screen.getByText("+2")).toBeInTheDocument();
+    expect(screen.queryByText("pizza_sales")).not.toBeInTheDocument();
+    expect(screen.queryByText("+2")).not.toBeInTheDocument();
   });
 
   it("keeps model controls out of the topbar", () => {
@@ -38,23 +38,20 @@ describe("Topbar", () => {
     expect(screen.queryByLabelText("Query model")).not.toBeInTheDocument();
   });
 
-  it("constrains long selected source names", () => {
-    const longSource: Source = {
-      id: "long",
-      name: "very_long_enterprise_revenue_extract_for_all_regions_and_channels.csv",
-      kind: "csv",
-      rows: 1245000,
-      active: true,
-    };
+  it("wires settings and feedback buttons to real actions", () => {
+    const onOpenSettings = vi.fn();
     render(
       <Topbar
-        title="Long source analysis"
-        activeSource={longSource}
-        selectedSources={[longSource]}
+        title="Pizza analysis"
+        activeSource={sources[0]}
+        selectedSources={sources}
         projectName="Restaurant ops"
+        onOpenSettings={onOpenSettings}
       />,
     );
 
-    expect(screen.getByText("very_long_enterprise_revenue_extract_for_all_regions_and_channels")).toHaveClass("truncate");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("link", { name: "Feedback inbox" })).toHaveAttribute("href", "/admin/feedback");
   });
 });

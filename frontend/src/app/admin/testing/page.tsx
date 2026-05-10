@@ -20,6 +20,7 @@ export default function TestingPage() {
   const [runs, setRuns] = useState<any[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [isStartingRun, setIsStartingRun] = useState(false);
+  const [isAutoGenerating, setIsAutoGenerating] = useState(false);
 
   const selectedSuite = suites.find(s => s.id === selectedSuiteId);
 
@@ -87,6 +88,22 @@ export default function TestingPage() {
     }
   };
 
+  const handleAutoGenerate = async () => {
+    setIsAutoGenerating(true);
+    try {
+      const suite = await api.createAutoTestSuite({});
+      await loadSuites();
+      setSelectedSuiteId(suite.id);
+      setShowDashboard(false);
+      setSelectedRunId(null);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to generate an auto test suite. Attach a source first.");
+    } finally {
+      setIsAutoGenerating(false);
+    }
+  };
+
   return (
     <div className="flex-1 overflow-hidden flex flex-col p-8 max-w-7xl mx-auto w-full">
          <div className="flex items-end justify-between mb-8">
@@ -94,16 +111,26 @@ export default function TestingPage() {
                 <h1 className="text-3xl font-bold tracking-tight mb-2" style={{ color: "var(--color-text-primary)" }}>CI/CD Testing Gateway</h1>
                 <p className="text-sm" style={{ color: "var(--color-text-tertiary)" }}>Manage test suites, run bulk evaluations, and grade model performance.</p>
             </div>
-            <button 
-                onClick={() => {
-                    setShowInputPane(true);
-                    setShowDashboard(false);
-                    setSelectedRunId(null);
-                }}
-                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20 active:scale-95"
-            >
-                <Plus size={18} /> New Test Suite
-            </button>
+            <div className="flex items-center gap-3">
+                <button
+                    onClick={handleAutoGenerate}
+                    disabled={isAutoGenerating}
+                    className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-emerald-500/20 active:scale-95"
+                >
+                    {isAutoGenerating ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <FlaskConical size={18} />}
+                    Auto-create Tests
+                </button>
+                <button
+                    onClick={() => {
+                        setShowInputPane(true);
+                        setShowDashboard(false);
+                        setSelectedRunId(null);
+                    }}
+                    className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-lg shadow-blue-500/20 active:scale-95"
+                >
+                    <Plus size={18} /> New Test Suite
+                </button>
+            </div>
          </div>
 
          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 flex-1 overflow-hidden">

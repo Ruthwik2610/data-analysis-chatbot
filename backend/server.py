@@ -129,11 +129,22 @@ class TestQueriesBulk(BaseModel):
     queries: list[dict[str, Any]] | None = None
 
 
+class AutoTestSuiteCreate(BaseModel):
+    name: str | None = None
+    source_ids: list[str] | None = None
+    project_id: str | None = None
+
+
 class FeedbackRequest(BaseModel):
     chat_id: str | None = None
     message_id: str | None = None
     rating: int
     comment: str | None = None
+    category: str = "feedback"
+
+
+class FeedbackStatusUpdate(BaseModel):
+    status: str
 
 
 class TestEvaluationGrade(BaseModel):
@@ -883,6 +894,7 @@ async def admin_stats(request: Request) -> dict[str, Any]:
         stats["top_sources"] = [{"name": r["name"] or "Unnamed", "value": r["link_count"]} for r in src_rows]
 
     stats["token_usage_by_project"] = DB.list_token_usage_by_project()
+    stats["token_usage_by_purpose"] = DB.list_token_usage_by_purpose()
 
     if CONFIG.openrouter_api_key:
         def fetch_or():
@@ -980,6 +992,58 @@ async def list_traces(request: Request, limit: int = 100):
     }
 
 
+@app.get("/admin/user-analytics")
+async def user_analytics(request: Request, limit: int = 100):
+    _verify_admin(request)
+    with DB._conn() as con:
+        feedback_rows = con.execute(
+            """
+            SELECT category, rating, status, COUNT(*) as count
+            FROM user_feedback
+            GROUP BY category, rating, status
+            ORDER BY count DESC
+            """
+        ).fetchall()
+        error_rows = con.execute(
+            """
+            SELECT m.id, m.chat_id, m.content, m.created_at, c.title as chat_title
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            WHERE m.payload LIKE '%"kind": "error"%'
+            ORDER BY m.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        user_rows = con.execute(
+            """
+            SELECT content
+            FROM messages
+            WHERE role = 'user'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    stop_words = {"the", "and", "for", "with", "from", "this", "that", "what", "show", "give", "how", "can", "you", "about", "please"}
+    vocab: dict[str, int] = {}
+    for row in user_rows:
+        for word in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", row["content"].lower()):
+            if word not in stop_words:
+                vocab[word] = vocab.get(word, 0) + 1
+
+    return {
+        "feedback_summary": [dict(r) for r in feedback_rows],
+        "recent_errors": [dict(r) for r in error_rows],
+        "vocabulary": [
+            {"term": term, "count": count}
+            for term, count in sorted(vocab.items(), key=lambda item: item[1], reverse=True)[:30]
+        ],
+        "message_sample_size": len(user_rows),
+    }
+
+
 @app.post("/admin/maintenance/clear-cache")
 async def clear_cache_endpoint(request: Request):
     _verify_admin(request)
@@ -1041,14 +1105,88 @@ async def add_test_queries_bulk(payload: TestQueriesBulk, request: Request):
     return {"count": len(queries)}
 
 
+def _auto_test_queries_for_source(source: dict[str, Any]) -> list[dict[str, str]]:
+    try:
+        schema = json.loads(source.get("schema_json") or "{}")
+    except json.JSONDecodeError:
+        schema = {}
+    raw_columns = schema.get("columns") or []
+    columns = [c.get("name") if isinstance(c, dict) else str(c) for c in raw_columns]
+    columns = [c for c in columns if c]
+    source_name = source.get("name") or "this source"
+    numeric_hints = [c for c in columns if re.search(r"amount|price|revenue|sales|total|qty|quantity|count|cost|profit", c, re.I)]
+    date_hints = [c for c in columns if re.search(r"date|month|year|time|created|updated", c, re.I)]
+    category_hints = [c for c in columns if c not in numeric_hints + date_hints][:3]
+
+    queries = [
+        {"category": "Source health", "question": f"Summarize the row count and available columns in {source_name}."},
+        {"category": "Schema understanding", "question": f"What are the most important business fields in {source_name}?"},
+    ]
+    if numeric_hints:
+        metric = numeric_hints[0]
+        queries.append({"category": "Aggregation", "question": f"What is the total {metric} in {source_name}?"})
+        if category_hints:
+            queries.append({"category": "Breakdown", "question": f"Break down {metric} by {category_hints[0]} in {source_name}."})
+    if date_hints and numeric_hints:
+        queries.append({"category": "Trend", "question": f"Show the {numeric_hints[0]} trend by {date_hints[0]} in {source_name}."})
+    if category_hints:
+        queries.append({"category": "Lookup", "question": f"Show a sample of records grouped by {category_hints[0]} in {source_name}."})
+    return queries
+
+
+@app.post("/admin/testing/suites/auto")
+async def create_auto_test_suite(payload: AutoTestSuiteCreate, request: Request):
+    _verify_admin(request)
+    sources: list[dict[str, Any]] = []
+    owner_id = _current_user_id(request)
+    if payload.source_ids:
+        sources = [s for sid in payload.source_ids if (s := DB.get_source(sid, owner_id=owner_id))]
+    elif payload.project_id:
+        project = DB.get_project(payload.project_id, owner_id=owner_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        sources = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in project.get("files", []) if f.get("source_id")]
+        sources = [s for s in sources if s]
+    else:
+        sources = DB.list_sources(owner_id=owner_id)[:3]
+
+    queries: list[dict[str, str]] = []
+    for source in sources:
+        full_source = DB.get_source(source["id"], owner_id=owner_id) or source
+        queries.extend(_auto_test_queries_for_source(full_source))
+    if not queries:
+        raise HTTPException(status_code=400, detail="No sources available for auto test generation")
+
+    name = payload.name or f"Auto suite {time.strftime('%Y-%m-%d %H:%M')}"
+    suite = DB.create_test_suite(name)
+    DB.add_test_queries(suite["id"], queries)
+    return {**suite, "query_count": len(queries), "queries": queries}
+
+
 @app.post("/feedback")
 async def post_feedback(payload: FeedbackRequest):
     return DB.add_user_feedback(
         chat_id=payload.chat_id,
         message_id=payload.message_id,
         rating=payload.rating,
-        comment=payload.comment
+        comment=payload.comment,
+        category=payload.category,
     )
+
+
+@app.get("/admin/feedback")
+async def list_feedback(request: Request, limit: int = 100, status: str | None = None):
+    _verify_admin(request)
+    return {"items": DB.list_user_feedback(limit=limit, status=status)}
+
+
+@app.patch("/admin/feedback/{feedback_id}")
+async def update_feedback(feedback_id: str, payload: FeedbackStatusUpdate, request: Request):
+    _verify_admin(request)
+    if payload.status not in {"open", "reviewing", "resolved", "dismissed"}:
+        raise HTTPException(status_code=400, detail="Unsupported feedback status")
+    DB.update_user_feedback_status(feedback_id, payload.status)
+    return {"ok": True}
 
 
 @app.patch("/admin/testing/evaluations/{evaluation_id}")
@@ -1121,12 +1259,11 @@ async def run_test_suite_background(run_id: str, suite_id: str, snapshot: dict):
                 latency = (time.time() - start_time) * 1000
                 eval_id = DB.add_test_evaluation(run_id, q["id"], answer, latency, trace_id=trace_id)
                 
-                # Trigger AI auto-grading in background
+                # Trigger AI auto-grading inside this background run.
                 if ROUTER.available:
                     from opentelemetry.trace import set_span_in_context
                     bg_context = set_span_in_context(span)
-                    background_tasks.add_task(
-                        evaluate_test_evaluation_background,
+                    await evaluate_test_evaluation_background(
                         eval_id,
                         q["question"],
                         answer,
@@ -1140,12 +1277,14 @@ async def run_test_suite_background(run_id: str, suite_id: str, snapshot: dict):
                     user_id="system_test",
                     model=ROUTER.model,
                     prompt_tokens=usage.get("prompt_tokens", 0),
-                    completion_tokens=usage.get("completion_tokens", 0)
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    purpose="testing",
                 )
             except Exception as e:
                 logging.error(f"Test run evaluation failed for query {q['id']}: {e}")
                 span.record_exception(e)
                 DB.add_test_evaluation(run_id, q["id"], f"Error: {str(e)}", (time.time() - start_time) * 1000, grade="Error", trace_id=trace_id)
+    DB.update_test_run_progress(run_id, status="completed", completed_at=time.time())
 
 
 async def evaluate_hallucination_background(chat_id: str, message_id: str, question: str, answer: str, context: str, parent_context: Any = None):
@@ -1193,7 +1332,8 @@ Respond ONLY in JSON format:
                 user_id=chat.get("owner_id") if chat else None,
                 model=ROUTER.model,
                 prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0)
+                completion_tokens=usage.get("completion_tokens", 0),
+                purpose="administrative",
             )
         except Exception as e:
             span.record_exception(e)
@@ -3141,13 +3281,14 @@ async def query_endpoint(body: QueryRequest, request: Request):
                             ),
                         )
                         if usage:
-                            DB.add_token_usage(
-                                project_id=chat.get("project_id") if chat else None,
-                                user_id=owner_id,
-                                model=model_used,
-                                prompt_tokens=usage.get("prompt_tokens", 0),
-                                completion_tokens=usage.get("completion_tokens", 0)
-                            )
+	                            DB.add_token_usage(
+	                                project_id=chat.get("project_id") if chat else None,
+	                                user_id=owner_id,
+	                                model=model_used,
+	                                prompt_tokens=usage.get("prompt_tokens", 0),
+	                                completion_tokens=usage.get("completion_tokens", 0),
+	                                purpose="chat",
+	                            )
                     else:
                         intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
                     if model_used != "offline-heuristic":
@@ -3305,10 +3446,11 @@ async def query_endpoint(body: QueryRequest, request: Request):
                         DB.add_token_usage(
                             project_id=chat.get("project_id") if chat else None,
                             user_id=owner_id,
-                            model=model_used,
-                            prompt_tokens=estimate_tokens(prompt_for_answer),
-                            completion_tokens=estimate_tokens(full_text)
-                        )
+	                            model=model_used,
+	                            prompt_tokens=estimate_tokens(prompt_for_answer),
+	                            completion_tokens=estimate_tokens(full_text),
+	                            purpose="chat",
+	                        )
 
                     assistant_payload = {
                         "kind": "result",

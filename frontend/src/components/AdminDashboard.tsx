@@ -266,7 +266,7 @@ export function AdminDashboard() {
                                                     <Zap size={12} />
                                                 </a>
                                             )}
-                                            <a href={`/chat/${log.chat_id}`} className="p-2 rounded-lg bg-white/5 text-white/20 hover:text-blue-400 transition-all opacity-0 group-hover:opacity-100">
+                                            <a href={`/?chat_id=${encodeURIComponent(log.chat_id)}`} className="p-2 rounded-lg bg-white/5 text-white/20 hover:text-blue-400 transition-all opacity-0 group-hover:opacity-100">
                                                 <ExternalLink size={12} />
                                             </a>
                                         </div>
@@ -346,6 +346,29 @@ export function AdminDashboard() {
                         <div className="h-[250px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-white/10">No traffic data</div>
                     )}
                 </div>
+            </div>
+        </div>
+
+        <div className="flex flex-col gap-4">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
+                <Zap size={12} /> Token Spend by Purpose
+            </h3>
+            <div className="p-6 rounded-[32px] bg-white/[0.02] border border-white/5 min-h-[220px]">
+                {stats.token_usage_by_purpose && stats.token_usage_by_purpose.length > 0 ? (
+                    <div className="h-[180px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={stats.token_usage_by_purpose}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                                <XAxis dataKey="purpose" stroke="rgba(255,255,255,0.3)" fontSize={10} fontWeight="bold" />
+                                <YAxis hide />
+                                <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, fontSize: 10, fontWeight: "bold" }} />
+                                <Bar dataKey="total_tokens" name="Tokens" fill="#10b981" radius={[8, 8, 0, 0]} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                ) : (
+                    <div className="h-[180px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-white/10">No token spend data</div>
+                )}
             </div>
         </div>
 

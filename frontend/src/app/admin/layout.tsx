@@ -60,6 +60,9 @@ export default function AdminLayout({
                 <div className="flex items-center gap-6 ml-2">
                     <NavLink href="/admin" active={pathname === "/admin"}>Insights</NavLink>
                     <NavLink href="/admin/observability" active={pathname === "/admin/observability"}>Observability</NavLink>
+                    <NavLink href="/admin/feedback" active={pathname === "/admin/feedback"}>Feedback</NavLink>
+                    <NavLink href="/admin/user-analytics" active={pathname === "/admin/user-analytics"}>Users</NavLink>
+                    <NavLink href="/admin/costs" active={pathname === "/admin/costs"}>Costs</NavLink>
                     <NavLink href="/admin/testing" active={pathname === "/admin/testing"}>Testing Gateway</NavLink>
                 </div>
             </div>

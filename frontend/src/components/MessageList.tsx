@@ -20,6 +20,7 @@ interface MessageListProps {
   currentProjectId?: string | null;
   onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
   onAskFollowUp?: (content: string) => void;
+  onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
 }
 
 function formatRelative(ts?: number): string {
@@ -31,7 +32,7 @@ function formatRelative(ts?: number): string {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
-export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentProjectId, onSaveProjectNote, onAskFollowUp }: MessageListProps) {
+export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentProjectId, onSaveProjectNote, onAskFollowUp, onFeedback }: MessageListProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isStreaming = messages.some((m) => m.role === "assistant" && m.streaming);
 
@@ -68,6 +69,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
                 currentProjectId={currentProjectId}
                 onSaveProjectNote={onSaveProjectNote}
                 onAskFollowUp={onAskFollowUp}
+                onFeedback={onFeedback}
                 />
                 {idx === lastResultIdx && onAskFollowUp && (
                 <div className="mt-4">
@@ -88,12 +90,14 @@ function Bubble({
   currentProjectId,
   onSaveProjectNote,
   onAskFollowUp,
+  onFeedback,
 }: {
   message: Message;
   onChoose: (value: string) => void;
   currentProjectId?: string | null;
   onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
   onAskFollowUp?: (content: string) => void;
+  onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
 }) {
   if (message.role === "user") {
     return (
@@ -152,6 +156,7 @@ function Bubble({
             canSave={!!currentProjectId}
             onSave={() => onSaveProjectNote?.(message)}
             onFollowUp={() => onAskFollowUp?.(`Follow up on this: ${message.content.slice(0, 240)}`)}
+            onFeedback={(rating, category) => onFeedback?.(message, rating, category)}
           />
         )}
         {message.result && <ResultBlock result={message.result} />}

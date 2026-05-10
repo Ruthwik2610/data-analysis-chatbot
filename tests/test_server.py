@@ -22,11 +22,51 @@ def test_df_to_payload_handles_nat():
 
 def test_assert_public_url_is_async():
     import asyncio
+    import socket
     from backend.server import _assert_public_url
-    
+
+    async def fake_getaddrinfo(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.getaddrinfo = fake_getaddrinfo
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_assert_public_url("http://example.com"))
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_assert_public_url_rejects_private_resolution():
+    import asyncio
+    import socket
+    from fastapi import HTTPException
+    from backend.server import _assert_public_url
+
+    async def fake_getaddrinfo(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.getaddrinfo = fake_getaddrinfo
+        asyncio.set_event_loop(loop)
+        with pytest.raises(HTTPException):
+            loop.run_until_complete(_assert_public_url("http://example.com"))
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_assert_public_url_returns_coroutine():
+    import asyncio
+    from backend.server import _assert_public_url
+
     # This will fail (TypeError) if _assert_public_url is synchronous,
     # driving us to make it async.
-    asyncio.run(_assert_public_url("http://example.com"))
+    coroutine = _assert_public_url("http://example.com")
+    assert asyncio.iscoroutine(coroutine)
+    coroutine.close()
 
 def test_workspace_sql_sync_path_traversal(monkeypatch):
     from backend.server import _run_workspace_sql_sync
@@ -146,6 +186,69 @@ def test_chats_endpoint_filters_by_project_id(isolated_server):
 
     assert [chat["id"] for chat in scoped] == [project_chat["id"]]
     assert [chat["id"] for chat in unscoped] == [unscoped_chat["id"]]
+
+
+def test_test_runs_expose_progress_fields(isolated_server):
+    _server, storage, _pool = isolated_server
+
+    suite = storage.create_test_suite("Smoke")
+    storage.add_test_queries(
+        suite["id"],
+        [
+            {"question": "What is revenue?", "category": "Finance"},
+            {"question": "What is order count?", "category": "Finance"},
+        ],
+    )
+
+    run = storage.create_test_run(suite["id"], {"model": "test-model"})
+    runs = storage.list_test_runs(suite["id"])
+
+    assert runs[0]["id"] == run["id"]
+    assert runs[0]["status"] == "running"
+    assert runs[0]["total_count"] == 2
+    assert runs[0]["completed_count"] == 0
+
+    query = storage.list_test_queries(suite["id"])[0]
+    storage.add_test_evaluation(run["id"], query["id"], "answer", 12.0)
+    updated = storage.list_test_runs(suite["id"])[0]
+
+    assert updated["completed_count"] == 1
+    assert updated["stats"]["total"] == 1
+
+
+def test_admin_feedback_endpoint_lists_review_items(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server, "_verify_admin", lambda request: None)
+    chat = storage.create_chat("Revenue")
+    user_message = storage.add_message(chat["id"], "user", "What is revenue?", trace_id="trace_user")
+    assistant_message = storage.add_message(chat["id"], "assistant", "Revenue is 10.", trace_id="trace_answer")
+
+    post = TestClient(server.app).post(
+        "/feedback",
+        json={
+            "chat_id": chat["id"],
+            "message_id": assistant_message["id"],
+            "rating": -1,
+            "comment": "Wrong total",
+            "category": "bug",
+        },
+    )
+    assert post.status_code == 200
+
+    response = TestClient(server.app).get("/admin/feedback")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["chat_id"] == chat["id"]
+    assert item["message_id"] == assistant_message["id"]
+    assert item["comment"] == "Wrong total"
+    assert item["category"] == "bug"
+    assert item["status"] == "open"
+    assert item["answer"] == "Revenue is 10."
+    assert item["question"] == "What is revenue?"
+    assert item["trace_id"] == "trace_answer"
 
 
 def test_project_notes_endpoints_create_list_and_delete(isolated_server):
@@ -604,19 +707,21 @@ def test_allowed_mcp_ids_for_project_chat_include_global_and_project(isolated_se
     assert server._allowed_mcp_connector_ids_for_chat(None) == {"global-db"}
 
 
-def test_unsupported_local_table_query_does_not_fall_through_to_mcp(isolated_server):
+def test_unsupported_local_table_query_does_not_fall_through_to_mcp(isolated_server, tmp_path):
     server, storage, pool = isolated_server
     from fastapi.testclient import TestClient
     
     project = storage.create_project("Test Project")
     source_id = "src_timetable"
+    csv_path = tmp_path / "timetable.csv"
+    csv_path.write_text("class,teacher\n1A,Smith\n", encoding="utf-8")
     storage.upsert_source(
         source_id=source_id,
         name="timetable.xlsx",
         kind="excel",
         rows=10,
         schema_json='{"columns":[{"name":"class"},{"name":"teacher"}],"row_count":10}',
-        origin={"type": "csv_memory", "path": "/tmp/test.csv"}
+        origin={"type": "csv_memory", "path": str(csv_path)}
     )
     
     storage.upsert_mcp_connector(

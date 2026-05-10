@@ -7,11 +7,7 @@ import re
 import time
 from typing import Any
 
-# Tracing imports
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from openinference.instrumentation.openai import OpenAIInstrumentor
 
 from .logging_config import log_event
@@ -21,17 +17,26 @@ from .prompting import build_answer_prompt, build_intent_prompt, build_mcp_agent
 def setup_phoenix(api_key: str | None, project_name: str, endpoint: str = "https://app.phoenix.arize.com/v1/traces") -> None:
     if not api_key:
         return
-        
-    tracer_provider = TracerProvider()
-    headers = {"api_key": api_key}
-    exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
-    span_processor = BatchSpanProcessor(exporter)
-    tracer_provider.add_span_processor(span_processor)
-    trace.set_tracer_provider(tracer_provider)
-    
-    # Instrument OpenAI-compatible calls (OpenRouter)
-    OpenAIInstrumentor().instrument()
-    logging.info(f"Arize Phoenix Cloud tracing initialized for project: {project_name}")
+
+    try:
+        from phoenix.otel import register
+
+        register(
+            endpoint=endpoint,
+            project_name=project_name,
+            api_key=api_key,
+            auto_instrument=False,
+            verbose=False,
+        )
+    except Exception as exc:
+        logging.warning("Phoenix register() failed; tracing disabled: %s", exc)
+        return
+
+    try:
+        OpenAIInstrumentor().instrument()
+    except Exception as exc:
+        logging.debug("OpenAI instrumentation was not installed: %s", exc)
+    logging.info("Arize Phoenix Cloud tracing initialized for project: %s", project_name)
 
 
 MAX_TOOL_ROUNDS = 8

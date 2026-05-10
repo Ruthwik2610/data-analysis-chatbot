@@ -10,7 +10,6 @@ import { MessageList } from "@/components/MessageList";
 import { InputBar } from "@/components/InputBar";
 import { StreamingBar } from "@/components/StreamingBar";
 import { SourcePreviewDrawer } from "@/components/SourcePreviewDrawer";
-import ChatFeedback from "@/components/ChatFeedback";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, clearAuthToken, getAuthToken, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
@@ -35,8 +34,7 @@ export default function Home() {
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [showFeedback, setShowFeedback] = useState(false);
-  const [interactionCount, setInteractionCount] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
@@ -405,17 +403,8 @@ export default function Home() {
             } else if (ev.event === "notice") {
               updateMessage(assistantId, { notice: ev.data });
             } else if (ev.event === "done") {
-              updateMessage(assistantId, { streaming: false, thinking: null });
+              updateMessage(assistantId, { id: ev.data.message_id || assistantId, streaming: false, thinking: null });
               if (ev.data.chat_id) setCurrentChatId(ev.data.chat_id);
-              
-              setInteractionCount(prev => {
-                const next = prev + 1;
-                // Trigger every 5 interactions
-                if (next > 0 && next % 5 === 0) {
-                  setShowFeedback(true);
-                }
-                return next;
-              });
             }
           });
           if (ev.event === "done") refreshChats();
@@ -572,6 +561,14 @@ export default function Home() {
     } catch {}
   }, [abortInFlight, refreshSources]);
 
+  useEffect(() => {
+    if (!user) return;
+    const chatId = new URLSearchParams(window.location.search).get("chat_id");
+    if (chatId && chatId !== currentChatId) {
+      handleSelectChat(chatId);
+    }
+  }, [user, currentChatId, handleSelectChat]);
+
   const handleDeleteChat = useCallback(async (id: string) => {
     await api.deleteChat(id);
     if (id === currentChatId) {
@@ -628,6 +625,31 @@ export default function Home() {
       });
     }
   }, [currentProjectId, addMessage]);
+
+  const handleFeedback = useCallback(async (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => {
+    const comment = category === "bug" ? window.prompt("What went wrong with this answer?") || "" : "";
+    try {
+      await api.postFeedback({
+        chat_id: currentChatId,
+        message_id: message.id,
+        rating,
+        category,
+        comment: comment.trim() || undefined,
+      });
+      addMessage({
+        id: `local_feedback_${Date.now()}`,
+        role: "assistant",
+        content: category === "bug" ? "Reported. I added this to the admin review inbox." : "Feedback saved.",
+      });
+    } catch (e: any) {
+      addMessage({
+        id: `local_feedback_err_${Date.now()}`,
+        role: "assistant",
+        content: `Couldn't save feedback: ${e?.message || "unknown error"}`,
+        error: true,
+      });
+    }
+  }, [currentChatId, addMessage]);
 
   useEffect(() => {
     if (!currentChatId) {
@@ -718,6 +740,7 @@ export default function Home() {
           onLogout={handleLogout}
           onOpenSidebar={() => setSidebarOpen(true)}
           sidebarOpen={sidebarOpen}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
         <MessageList
           messages={messages}
@@ -728,6 +751,7 @@ export default function Home() {
           currentProjectId={currentProjectId}
           onSaveProjectNote={handleSaveProjectNote}
           onAskFollowUp={(prompt) => handleSend(prompt)}
+          onFeedback={handleFeedback}
         />
         <InputBar
           onSend={handleSend}
@@ -759,13 +783,58 @@ export default function Home() {
         data={previewData}
         loading={previewLoading}
       />
-      {showFeedback && (
-        <ChatFeedback 
-          chatId={currentChatId} 
-          messageId={messages.filter(m => m.role === "assistant").slice(-1)[0]?.id || null} 
-          onClose={() => setShowFeedback(false)} 
+      {settingsOpen && (
+        <SettingsPanel
+          modelMode={modelMode}
+          onModelModeChange={setModelMode}
+          onClose={() => setSettingsOpen(false)}
+          onClearChat={handleNewChat}
         />
       )}
+    </div>
+  );
+}
+
+function SettingsPanel({
+  modelMode,
+  onModelModeChange,
+  onClose,
+  onClearChat,
+}: {
+  modelMode: ModelMode;
+  onModelModeChange: (mode: ModelMode) => void;
+  onClose: () => void;
+  onClearChat: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4" role="dialog" aria-modal="true" aria-label="Workspace settings">
+      <div className="w-full max-w-md rounded-[18px] p-5 glass shadow-2xl" style={{ background: "var(--color-background-elevated)" }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold" style={{ color: "var(--color-text-primary)" }}>Settings</h2>
+          <button type="button" onClick={onClose} className="rounded-[8px] px-2 py-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>Close</button>
+        </div>
+        <div className="mt-5 flex flex-col gap-4">
+          <label className="flex items-center justify-between gap-4 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+            Default query model
+            <select
+              aria-label="Default query model"
+              value={modelMode}
+              onChange={(e) => onModelModeChange(e.target.value as ModelMode)}
+              className="rounded-[10px] px-3 py-2"
+              style={{ background: "var(--color-background-secondary)", color: "var(--color-text-primary)", border: "1px solid var(--color-border-secondary)" }}
+            >
+              <option value="flash">Flash</option>
+              <option value="pro">Pro</option>
+            </select>
+          </label>
+          <button type="button" onClick={() => { onClearChat(); onClose(); }} className="rounded-[10px] px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--color-border-secondary)", color: "var(--color-text-primary)" }}>
+            Clear current screen
+          </button>
+          <a href="/admin/feedback" className="rounded-[10px] px-3 py-2 text-sm" style={{ border: "1px solid var(--color-border-secondary)", color: "var(--color-text-primary)" }}>
+            Open feedback inbox
+          </a>
+        </div>
+      </div>
     </div>
   );
 }
