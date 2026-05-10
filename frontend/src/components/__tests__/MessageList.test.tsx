@@ -95,7 +95,9 @@ describe("MessageList markdown rendering", () => {
       />,
     );
 
-    expect(screen.getByTestId("empty-action-grid")).toHaveClass("flex-col", "sm:flex-row");
+    // The component uses flex-wrap justify-center gap-4 for the action buttons
+    const actionContainer = screen.getByText("Upload Source").closest("div");
+    expect(actionContainer).toHaveClass("flex", "flex-wrap", "justify-center");
   });
 
   it("renders the premium Unipro empty-state hero", () => {
@@ -109,9 +111,9 @@ describe("MessageList markdown rendering", () => {
       />,
     );
 
-    expect(screen.getByRole("heading", { name: /Analyze your business data with AI/i })).toBeInTheDocument();
-    expect(screen.getByText("Upload files, connect APIs, and generate intelligent insights instantly.")).toBeInTheDocument();
-    expect(screen.getByText("Powered by advanced AI • Secure • Private")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /The intelligent layer for your business data/i })).toBeInTheDocument();
+    expect(screen.getByText(/Connect your CSVs, Databases, or APIs and start chatting/i)).toBeInTheDocument();
+    expect(screen.getByText(/Enterprise Grade • Secure • 100% Grounded/i)).toBeInTheDocument();
   });
 
   it("shows answer actions for assistant text and project saves", () => {

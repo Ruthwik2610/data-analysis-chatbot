@@ -56,8 +56,8 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
   }
 
   return (
-    <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col justify-end">
-      <div className="flex flex-col gap-6">
+    <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col">
+      <div className="flex flex-col gap-6 mt-auto">
         {messages.map((msg, idx) => {
             const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
             return (
@@ -97,20 +97,21 @@ function Bubble({
 }) {
   if (message.role === "user") {
     return (
-      <div className="group self-end max-w-[640px] fade-in flex flex-col items-end">
+      <div className="group self-end max-w-[640px] animate-in slide-in-from-right-2 duration-300 flex flex-col items-end">
         <div
-          className="px-3.5 py-2.5 text-[13px] leading-[1.6] whitespace-pre-wrap"
+          className="px-4 py-2.5 text-[14px] leading-[1.6] whitespace-pre-wrap glass shadow-lg"
           style={{
-            background: "var(--color-background-secondary)",
+            background: "rgba(37, 99, 235, 0.15)",
             color: "var(--color-text-primary)",
-            borderRadius: "14px 14px 4px 14px",
+            borderRadius: "18px 18px 4px 18px",
+            borderColor: "rgba(37, 99, 235, 0.2)",
           }}
         >
           {message.content}
         </div>
         {message.created_at && (
           <time
-            className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] mt-0.5 pr-1"
+            className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] mt-1 pr-1 font-bold uppercase tracking-widest"
             style={{ color: "var(--color-text-tertiary)" }}
             title={new Date(message.created_at * 1000).toISOString()}
           >
@@ -125,11 +126,17 @@ function Bubble({
     message.thinking && !message.content && !message.result && !message.pending;
 
   return (
-    <div className="self-start max-w-[680px] w-full fade-in">
-      <div className="text-[13px] leading-[1.65]" style={{ color: "var(--color-text-primary)" }}>
+    <div className="self-start max-w-[720px] w-full animate-in slide-in-from-left-2 duration-500">
+      <div className="text-[14px] leading-[1.7]" style={{ color: "var(--color-text-primary)" }}>
         {showThinking && <ThinkingIndicator step={message.thinking} progress={message.progress} />}
         {message.content && !message.error && (
-          <div className="whitespace-pre-wrap">
+          <div className="whitespace-pre-wrap flex flex-col gap-2">
+            <div className="flex items-center gap-2 mb-1">
+                <div className="p-1 rounded-lg bg-blue-500/10 text-blue-400">
+                    <Sparkles size={14} strokeWidth={2} />
+                </div>
+                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/30">Intelligence Engine</span>
+            </div>
             <AssistantMarkdown content={message.content} streaming={!!message.streaming} />
             {message.streaming && (
               <span
@@ -149,23 +156,27 @@ function Bubble({
         )}
         {message.result && <ResultBlock result={message.result} />}
         {message.pending && !message.resolved && (
-          <InlineQuestion
-            label={message.pending.hint || "Pick one:"}
-            options={message.pending.options}
-            onChoose={onChoose}
-            allowCustom={message.pending.resolver === "clarify_text"}
-          />
+          <div className="mt-4 p-6 rounded-[24px] glass border-blue-500/10 bg-blue-500/[0.02]">
+            <InlineQuestion
+                label={message.pending.hint || "Strategic Input Required"}
+                options={message.pending.options}
+                onChoose={onChoose}
+                allowCustom={message.pending.resolver === "clarify_text"}
+            />
+          </div>
         )}
         {message.error && (
           <div
-            className="mt-2 text-[12px] px-3 py-2 rounded-[10px]"
+            className="mt-2 text-[12px] px-4 py-3 rounded-xl glass border-red-500/20 bg-red-500/[0.02] flex items-start gap-3"
             style={{
-              background: "rgba(217, 119, 6, 0.06)",
               color: "var(--color-text-warning)",
-              border: "0.5px solid rgba(217, 119, 6, 0.2)",
             }}
           >
-            {message.content}
+            <AlertTriangle size={16} className="text-red-500 mt-0.5" />
+            <div className="flex flex-col gap-1">
+                <span className="font-bold uppercase tracking-widest text-[10px]">Processing Fault</span>
+                <span className="opacity-80">{message.content}</span>
+            </div>
           </div>
         )}
         {message.notice && <FallbackNotice notice={message.notice} />}
