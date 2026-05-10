@@ -19,6 +19,7 @@ export default function Home() {
   const [sources, setSources] = useState<Source[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const messagesRef = useRef<Message[]>([]);
   const [chatTitle, setChatTitle] = useState("New chat");
   const [loading, setLoading] = useState(false);
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
@@ -41,6 +42,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => { refreshSources(); refreshChats(); refreshProjects(); }, [refreshSources, refreshChats, refreshProjects]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     setSelectedSourceIds((prev) => {
@@ -189,7 +194,7 @@ export default function Home() {
   // -------- pending choice: resolve via backend --------
   const handlePendingChoice = useCallback(
     async (messageId: string, value: string) => {
-      const msg = messages.find((m) => m.id === messageId);
+      const msg = messagesRef.current.find((m) => m.id === messageId);
       if (!msg || msg.role !== "assistant" || !msg.pending) return;
       const pending = msg.pending;
 
@@ -275,7 +280,7 @@ export default function Home() {
         updateMessage(messageId, { thinking: null, content: `Couldn't finish loading: ${e?.message || "unknown"}`, error: true });
       }
     },
-    [messages, updateMessage, refreshSources],
+    [updateMessage, refreshSources],
   );
 
   // -------- send: NL detection, then SSE query --------
