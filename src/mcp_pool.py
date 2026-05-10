@@ -206,6 +206,31 @@ class MCPPool:
         self.connectors[cid] = state
         return cid
 
+    async def connect_excel_workbook(
+        self,
+        db_path: str,
+        table_names: list[str],
+        display_name: str,
+        *,
+        connector_id: str | None = None,
+        dedup_key: str | None = None,
+    ) -> str:
+        from src.excel_mcp_context import WorkbookMCPConnector, build_tool_name
+        if dedup_key:
+            for cid, s in self.connectors.items():
+                if getattr(s, "_dedup_key", None) == dedup_key:
+                    return cid
+        slug = build_tool_name(display_name).replace("query_", "", 1)
+        exc = WorkbookMCPConnector(slug=slug, db_path=db_path, table_names=table_names, display_name=display_name)
+        cid = connector_id or _generate_id()
+        state = ConnectorState(id=cid, name=f"{display_name} workbook", url=None, command=None, status="connected")
+        state.tools = exc.list_tools()
+        state._excel_connector = exc           # type: ignore[attr-defined]
+        if dedup_key:
+            state._dedup_key = dedup_key       # type: ignore[attr-defined]
+        self.connectors[cid] = state
+        return cid
+
     async def call_tool(self, connector_id: str, tool_name: str, arguments: dict[str, Any]) -> Any:
         state = self.connectors.get(connector_id)
         if not state or state.status != "connected":

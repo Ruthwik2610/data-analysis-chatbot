@@ -167,7 +167,7 @@ class QueryRequest(BaseModel):
 
 class ResolvePending(BaseModel):
     upload_id: str
-    value: str  # sheet name, table name, or "direct" / "sql"
+    value: str | list[str]  # sheet name(s), table name, or "direct" / "sql"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -184,6 +184,7 @@ from src.data_sources import (
     prepare_csv_source,
     prepare_duckdb_source,
     prepare_excel_source,
+    prepare_excel_workbook_duckdb_sources,
     prepare_local_file_source,
     prepare_pdf_source,
 )
@@ -1789,6 +1790,7 @@ async def upload_source(request: Request, file: UploadFile = File(...)) -> dict[
                     "upload_id": upload_id,
                     "file_name": file_name,
                     "sheets": sheets,
+                    "multi_select": True,
                 }}
             sheet = sheets[0] if sheets else None
             source = await asyncio.to_thread(prepare_excel_source, dest, sheet, LOGGERS["cache"])
@@ -1850,7 +1852,7 @@ async def upload_source(request: Request, file: UploadFile = File(...)) -> dict[
 
 
 @app.post("/sources/resolve_pending")
-def resolve_pending(body: ResolvePending, request: Request) -> dict[str, Any]:
+async def resolve_pending(body: ResolvePending, request: Request) -> dict[str, Any]:
     record = PENDING.get(body.upload_id)
     if not record:
         raise HTTPException(status_code=404, detail="Pending upload not found or already resolved")
@@ -1860,14 +1862,40 @@ def resolve_pending(body: ResolvePending, request: Request) -> dict[str, Any]:
     path = Path(record["path"])
     try:
         if record["kind"] == "xlsx":
-            source = prepare_excel_source(path, body.value, LOGGERS["cache"])
-            origin = {"type": "excel", "path": str(path), "sheet": body.value, "ingest": "direct"}
-            result = _source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin, owner_id=owner_id), source)
+            if isinstance(body.value, list):
+                sources = prepare_excel_workbook_duckdb_sources(path, body.value, CONFIG.cache_dir, LOGGERS["cache"])
+                persisted = []
+                for source, sheet in zip(sources, body.value):
+                    origin = {
+                        "type": "duckdb",
+                        "path": source.db_path,
+                        "table": source.table_name,
+                        "source_excel_path": str(path),
+                        "sheet": sheet,
+                    }
+                    persisted.append(_source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin, owner_id=owner_id), source))
+                cid = await get_pool().connect_excel_workbook(
+                    db_path=sources[0].db_path or "",
+                    table_names=[source.table_name for source in sources],
+                    display_name=path.name,
+                    dedup_key=f"excel-workbook::{path.resolve()}::{path.stat().st_mtime_ns}::{json.dumps(body.value)}",
+                )
+                state = get_pool().connectors[cid]
+                _persist_mcp_state(state, scope="global")
+                result = {"sources": persisted, "mcp_connector": _serialize_mcp_connector(state)}
+            else:
+                source = prepare_excel_source(path, body.value, LOGGERS["cache"])
+                origin = {"type": "excel", "path": str(path), "sheet": body.value, "ingest": "direct"}
+                result = _source_with_clarifications(_persist_source(_make_id(), source, "xlsx", origin, owner_id=owner_id), source)
         elif record["kind"] == "duckdb":
+            if not isinstance(body.value, str):
+                raise HTTPException(status_code=400, detail="Pick one table")
             source = prepare_duckdb_source(path, body.value, logger=LOGGERS["cache"])
             origin = {"type": "duckdb", "path": str(path), "table": body.value}
             result = _source_with_clarifications(_persist_source(_make_id(), source, "duckdb", origin, owner_id=owner_id), source)
         elif record["kind"] == "csv":
+            if not isinstance(body.value, str):
+                raise HTTPException(status_code=400, detail="Pick one ingest mode")
             ingest = body.value if body.value in ("direct", "sql") else "direct"
             if ingest == "sql":
                 source = prepare_csv_source(path, CONFIG.cache_dir, logger=LOGGERS["cache"], force=False)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -530,6 +531,75 @@ def dataframe_to_duckdb_source(df: pd.DataFrame, cache_dir: Path, logger: Any, d
         con.close()
     log_event(logger, "dataframe_converted_to_duckdb", rows=len(df), columns=len(df.columns), path=str(db_path))
     return DataSource(source_kind=source_kind, schema=schema, display_name=display_name, db_path=str(db_path), table_name="orders")
+
+
+def _safe_table_name(sheet_name: str, seen: dict[str, int]) -> str:
+    base = re.sub(r"[^0-9A-Za-z]+", "_", sheet_name.strip()).strip("_").lower() or "sheet"
+    if base[0].isdigit():
+        base = f"t_{base}"
+    count = seen.get(base, 0) + 1
+    seen[base] = count
+    return base if count == 1 else f"{base}_{count}"
+
+
+def prepare_excel_workbook_duckdb_sources(
+    excel_path: Path,
+    sheet_names: list[str],
+    cache_dir: Path,
+    logger: Any,
+) -> list[DataSource]:
+    if not excel_path.exists():
+        raise FileNotFoundError(f"Excel file not found: {excel_path}")
+    selected = [str(sheet).strip() for sheet in sheet_names if str(sheet).strip()]
+    if not selected:
+        raise ValueError("Select at least one sheet")
+
+    available = list(pd.ExcelFile(excel_path).sheet_names)
+    missing = [sheet for sheet in selected if sheet not in available]
+    if missing:
+        raise ValueError(f"Sheet not found: {', '.join(missing)}")
+
+    sql_dir = cache_dir / "sql_sources"
+    sql_dir.mkdir(parents=True, exist_ok=True)
+    safe_stem = re.sub(r"[^0-9A-Za-z_-]+", "_", excel_path.stem).strip("_") or "workbook"
+    digest = hashlib.sha256(
+        f"{excel_path.resolve()}::{excel_path.stat().st_mtime_ns}::{json.dumps(selected)}".encode("utf-8")
+    ).hexdigest()[:12]
+    db_path = sql_dir / f"{safe_stem}_{digest}.duckdb"
+    if db_path.exists():
+        db_path.unlink()
+
+    import duckdb
+
+    seen: dict[str, int] = {}
+    sources: list[DataSource] = []
+    con = duckdb.connect(str(db_path))
+    try:
+        for sheet in selected:
+            if excel_path.suffix.lower() == ".xlsx":
+                df = _read_xlsx_via_duckdb(excel_path, sheet)
+            else:
+                df = pd.read_excel(excel_path, sheet_name=sheet)
+            df = coerce_date_columns(normalize_dataframe_columns(df))
+            table_name = _safe_table_name(sheet, seen)
+            con.register("sheet_df", df)
+            con.execute(f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM sheet_df')
+            con.unregister("sheet_df")
+            schema = schema_from_duckdb(con, table_name=table_name)
+            sources.append(
+                DataSource(
+                    source_kind="Excel workbook table",
+                    schema=schema,
+                    display_name=f"{excel_path.name} - {sheet}",
+                    db_path=str(db_path),
+                    table_name=table_name,
+                )
+            )
+    finally:
+        con.close()
+    if logger:
+        log_event(logger, "excel_workbook_converted_to_duckdb", sheets=len(sources), path=str(excel_path), db_path=str(db_path))
+    return sources
 
 
 def prepare_uploaded_source(

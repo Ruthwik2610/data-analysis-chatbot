@@ -101,6 +101,7 @@ export interface Pending {
   options: { label: string; value: string }[];
   args: Record<string, any>;
   hint?: string;
+  multiSelect?: boolean;
 }
 
 export interface ModelFallbackNotice {
@@ -173,6 +174,7 @@ export interface UploadResponse {
     sheets?: string[];
     tables?: string[];
     size_mb?: number;
+    multi_select?: boolean;
   };
   clarifications?: SourceClarification[];
 }

@@ -147,6 +147,7 @@ export default function Home() {
                 hint: "Pick a sheet",
                 options: p.sheets.map((s) => ({ label: s, value: s })),
                 args: { upload_id: p.upload_id },
+                multiSelect: p.multi_select,
               },
             });
           } else if (p.kind === "table_pick" && p.tables) {
@@ -230,7 +231,7 @@ export default function Home() {
 
   // -------- pending choice: resolve via backend --------
   const handlePendingChoice = useCallback(
-    async (messageId: string, value: string) => {
+    async (messageId: string, value: string | string[]) => {
       const msg = messages.find((m) => m.id === messageId);
       if (!msg || msg.role !== "assistant" || !msg.pending) return;
       const pending = msg.pending;
@@ -257,26 +258,29 @@ export default function Home() {
       }
 
       if (pending.resolver === "source_pick") {
-        const sourceMeta = (pending.args.sources as SourceMeta[]).find((s) => s.id === value);
+        const sourceId = Array.isArray(value) ? value[0] : value;
+        const sourceMeta = (pending.args.sources as SourceMeta[]).find((s) => s.id === sourceId);
         if (sourceMeta) {
-          setSelectedSourceIds([value]);
-          await api.activateSource(value).catch(() => {});
+          setSelectedSourceIds([sourceId]);
+          await api.activateSource(sourceId).catch(() => {});
           refreshSources();
         }
-        updateMessage(messageId, { resolved: true, content: `OK, using **${sourceMeta?.name ?? value}** for this conversation.`, pending: undefined });
+        updateMessage(messageId, { resolved: true, content: `OK, using **${sourceMeta?.name ?? sourceId}** for this conversation.`, pending: undefined });
         return;
       }
 
       if (pending.resolver === "clarify_text") {
-        updateMessage(messageId, { resolved: true, content: `${msg.content}\n\n${value}` });
-        handleSend(`${pending.args.original}\n\nClarification: ${value}`);
+        const textValue = Array.isArray(value) ? value.join(", ") : value;
+        updateMessage(messageId, { resolved: true, content: `${msg.content}\n\n${textValue}` });
+        handleSend(`${pending.args.original}\n\nClarification: ${textValue}`);
         return;
       }
 
       if (pending.resolver === "source_clarification") {
-        updateMessage(messageId, { resolved: true, thinking: "Saving file rules", content: `${msg.content}\n\n${value}` });
+        const textValue = Array.isArray(value) ? value.join(", ") : value;
+        updateMessage(messageId, { resolved: true, thinking: "Saving file rules", content: `${msg.content}\n\n${textValue}` });
         try {
-          await api.applySourceClarifications(pending.args.source_id, { [pending.args.clarification_id]: value });
+          await api.applySourceClarifications(pending.args.source_id, { [pending.args.clarification_id]: textValue });
           updateMessage(messageId, {
             thinking: null,
             content: `**${displaySourceName(pending.args.source_name)}** is ready. I saved that file meaning for more accurate answers.`,
@@ -291,7 +295,18 @@ export default function Home() {
       // sheet_pick / table_pick / ingest_pick → resolve_pending
       updateMessage(messageId, { resolved: true, thinking: "Loading", content: msg.content });
       try {
-        const src = await api.resolvePending(pending.args.upload_id, value);
+        const resolved = await api.resolvePending(pending.args.upload_id, value);
+        if ("sources" in resolved) {
+          const sources = resolved.sources;
+          setSelectedSourceIds((ids) => Array.from(new Set([...ids, ...sources.map((source) => source.id)])));
+          updateMessage(messageId, {
+            thinking: null,
+            content: `Loaded ${sources.length} sheets: ${sources.map((source) => `**${displaySourceName(source.name)}**`).join(", ")}. Ask me anything about them.`,
+          });
+          refreshSources();
+          return;
+        }
+        const src = resolved;
         setSelectedSourceIds((ids) => Array.from(new Set([...ids, src.id])));
         const firstClarification = src.clarifications?.[0];
         if (firstClarification) {

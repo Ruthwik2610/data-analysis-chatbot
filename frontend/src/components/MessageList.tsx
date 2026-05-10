@@ -14,7 +14,7 @@ import { FollowUpChips } from "./FollowUpChips";
 interface MessageListProps {
   messages: Message[];
   loading: boolean;
-  onPendingChoice: (messageId: string, value: string) => void;
+  onPendingChoice: (messageId: string, value: string | string[]) => void;
   onPickFile: (file: File) => void;
   onConnectClick: () => void;
   currentProjectId?: string | null;
@@ -93,7 +93,7 @@ function Bubble({
   onFeedback,
 }: {
   message: Message;
-  onChoose: (value: string) => void;
+  onChoose: (value: string | string[]) => void;
   currentProjectId?: string | null;
   onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
   onAskFollowUp?: (content: string) => void;
@@ -167,6 +167,7 @@ function Bubble({
                 options={message.pending.options}
                 onChoose={onChoose}
                 allowCustom={message.pending.resolver === "clarify_text"}
+                multiSelect={message.pending.multiSelect}
             />
           </div>
         )}
