@@ -16,9 +16,10 @@ interface TopbarProps {
   onOpenSidebar?: () => void;
   sidebarOpen?: boolean;
   onOpenSettings?: () => void;
+  isAdmin?: boolean;
 }
 
-export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar, sidebarOpen, onOpenSettings }: TopbarProps) {
+export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar, sidebarOpen, onOpenSettings, isAdmin = false }: TopbarProps) {
   const [theme, setThemeState] = useState<Theme>("light");
 
   useEffect(() => {
@@ -85,7 +86,7 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
       >
         {theme === "dark" ? <Sun size={13} strokeWidth={1.5} /> : <Moon size={13} strokeWidth={1.5} />}
       </button>
-      <LinkIcon title="Feedback inbox" href="/admin/feedback" icon={<Bell size={15} strokeWidth={1.7} />} />
+      {isAdmin && <LinkIcon title="Feedback inbox" href="/admin/feedback" icon={<Bell size={15} strokeWidth={1.7} />} />}
       <IconOnly title="Settings" icon={<Settings size={15} strokeWidth={1.7} />} onClick={onOpenSettings} />
       <div className="group relative">
         <button
@@ -102,7 +103,7 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
         </button>
         <div className="pointer-events-none absolute right-0 top-10 z-20 w-[220px] rounded-[12px] p-2 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100" style={{ background: "var(--color-background-elevated)", border: "1px solid var(--color-border-secondary)", boxShadow: "var(--shadow-lg)" }}>
           <div className="truncate px-2 py-2 text-[12px]" style={{ color: "var(--color-text-secondary)" }}>{userEmail}</div>
-          {typeof window !== "undefined" && typeof localStorage !== "undefined" && localStorage.getItem?.("datachat_admin_token") && (
+          {isAdmin && (
             <a href="/admin" className="flex w-full items-center gap-2 rounded-[8px] px-2 py-2 text-left text-[12px] font-medium" style={{ color: "var(--color-text-primary)" }}>
               <Zap size={13} className="text-amber-500" /> Admin Dashboard
             </a>

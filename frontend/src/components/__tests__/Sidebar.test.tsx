@@ -74,4 +74,34 @@ describe("Sidebar", () => {
     expect(onNewChat).toHaveBeenCalledTimes(1);
     expect(onDeleteChat).not.toHaveBeenCalled();
   });
+
+  it("does not show admin navigation to regular users", () => {
+    renderSidebar();
+
+    expect(screen.queryByRole("link", { name: "Admin Control Center" })).not.toBeInTheDocument();
+  });
+
+  it("shows admin navigation only when admin access is verified", () => {
+    render(
+      <Sidebar
+        chats={chats}
+        currentChatId="c1"
+        sources={sources}
+        selectedSourceIds={["s1"]}
+        onNewChat={vi.fn()}
+        onSelectChat={vi.fn()}
+        onDeleteChat={vi.fn()}
+        onToggleSource={vi.fn()}
+        onDeleteSource={vi.fn()}
+        projects={projects}
+        currentProjectId={null}
+        onSelectProject={vi.fn()}
+        onNewProject={vi.fn()}
+        onDeleteProject={vi.fn()}
+        isAdmin
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "Admin Control Center" })).toHaveAttribute("href", "/admin");
+  });
 });

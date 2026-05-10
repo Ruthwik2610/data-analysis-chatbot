@@ -38,7 +38,7 @@ describe("Topbar", () => {
     expect(screen.queryByLabelText("Query model")).not.toBeInTheDocument();
   });
 
-  it("wires settings and feedback buttons to real actions", () => {
+  it("wires settings without exposing admin feedback to regular users", () => {
     const onOpenSettings = vi.fn();
     render(
       <Topbar
@@ -52,6 +52,20 @@ describe("Topbar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("link", { name: "Feedback inbox" })).not.toBeInTheDocument();
+  });
+
+  it("shows admin feedback navigation only when admin access is verified", () => {
+    render(
+      <Topbar
+        title="Pizza analysis"
+        activeSource={sources[0]}
+        selectedSources={sources}
+        projectName="Restaurant ops"
+        isAdmin
+      />,
+    );
+
     expect(screen.getByRole("link", { name: "Feedback inbox" })).toHaveAttribute("href", "/admin/feedback");
   });
 });

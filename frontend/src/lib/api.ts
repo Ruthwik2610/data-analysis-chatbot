@@ -59,6 +59,7 @@ export const api = {
   register: (email: string, password: string) => jpost<{ access_token: string; user: { id: string; email: string } }>("/auth/register", { email, password }),
   me: () => jget<{ user: { id: string; email: string } }>("/auth/me"),
   adminLogin: (password: string) => jpost<{ token: string; user_token: string; user: { id: string; email: string } }>("/admin/login", { password }),
+  getAdminSession: () => jget<{ ok: boolean; role: "admin" }>("/admin/session"),
   getAdminStats: () => jget<any>("/admin/stats"),
   getHallucinations: () => jget<any[]>("/admin/hallucinations"),
   getTraces: (limit?: number) => jget<any[]>(limit ? `/admin/traces?limit=${limit}` : "/admin/traces"),

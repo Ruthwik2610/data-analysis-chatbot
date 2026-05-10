@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import Link from "next/link";
+import { api } from "@/lib/api";
 
 export default function AdminLayout({
   children,
@@ -21,12 +22,18 @@ export default function AdminLayout({
         return;
     }
 
-    const token = localStorage.getItem("datachat_admin_token");
-    if (!token) {
+    setAuthorized(false);
+    if (!localStorage.getItem("datachat_admin_token")) {
       router.replace("/admin/login");
-    } else {
-      setAuthorized(true);
+      return;
     }
+
+    api.getAdminSession()
+      .then(() => setAuthorized(true))
+      .catch(() => {
+        localStorage.removeItem("datachat_admin_token");
+        router.replace("/admin/login");
+      });
   }, [router, pathname]);
 
   if (!authorized) return (

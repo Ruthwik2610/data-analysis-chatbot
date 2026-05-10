@@ -27,6 +27,7 @@ interface SidebarProps {
   onPreviewSource?: (id: string) => void;
   userEmail?: string;
   onToggleCollapse?: () => void;
+  isAdmin?: boolean;
 }
 
 const KIND_COLOR: Record<string, string> = {
@@ -182,24 +183,26 @@ export function Sidebar(p: SidebarProps) {
             <div className="text-[11.5px]" style={{ color: "var(--color-text-tertiary)" }}>Private workspace</div>
           </div>
         </div>
-        <Link
-          href="/admin"
-          className="flex items-center gap-2 w-full px-3 py-2 rounded-[10px] text-[13px] transition-colors"
-          style={{
-            color: "var(--color-text-secondary)",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = "var(--color-background-primary)";
-            e.currentTarget.style.color = "var(--color-text-primary)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = "transparent";
-            e.currentTarget.style.color = "var(--color-text-secondary)";
-          }}
-        >
-          <LayoutGrid size={13} strokeWidth={1.5} className="text-blue-500" />
-          Admin Control Center
-        </Link>
+        {p.isAdmin && (
+          <Link
+            href="/admin"
+            className="flex items-center gap-2 w-full px-3 py-2 rounded-[10px] text-[13px] transition-colors"
+            style={{
+              color: "var(--color-text-secondary)",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--color-background-primary)";
+              e.currentTarget.style.color = "var(--color-text-primary)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "var(--color-text-secondary)";
+            }}
+          >
+            <LayoutGrid size={13} strokeWidth={1.5} className="text-blue-500" />
+            Admin Control Center
+          </Link>
+        )}
       </div>
     </aside>
   );

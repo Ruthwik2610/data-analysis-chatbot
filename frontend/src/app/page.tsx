@@ -35,6 +35,7 @@ export default function Home() {
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
@@ -65,6 +66,21 @@ export default function Home() {
       .catch(() => clearAuthToken())
       .finally(() => setAuthReady(true));
   }, []);
+
+  useEffect(() => {
+    if (!authReady || !user) return;
+    const adminToken = localStorage.getItem("datachat_admin_token");
+    if (!adminToken) {
+      setIsAdmin(false);
+      return;
+    }
+    api.getAdminSession()
+      .then(() => setIsAdmin(true))
+      .catch(() => {
+        localStorage.removeItem("datachat_admin_token");
+        setIsAdmin(false);
+      });
+  }, [authReady, user]);
 
   useEffect(() => { refreshSources(); refreshChats(); refreshProjects(); }, [refreshSources, refreshChats, refreshProjects]);
 
@@ -441,6 +457,8 @@ export default function Home() {
   const handleLogout = useCallback(() => {
     abortInFlight();
     clearAuthToken();
+    localStorage.removeItem("datachat_admin_token");
+    setIsAdmin(false);
     setUser(null);
     setChats([]);
     setSources([]);
@@ -727,6 +745,7 @@ export default function Home() {
           chatLoading={!chatsReady}
           userEmail={user.email}
           onToggleCollapse={() => setSidebarOpen(false)}
+          isAdmin={isAdmin}
         />
       </div>
       <main className="flex flex-col flex-1 min-w-0 min-h-0 relative" style={{ background: "var(--color-background-primary)" }}>
@@ -741,6 +760,7 @@ export default function Home() {
           onOpenSidebar={() => setSidebarOpen(true)}
           sidebarOpen={sidebarOpen}
           onOpenSettings={() => setSettingsOpen(true)}
+          isAdmin={isAdmin}
         />
         <MessageList
           messages={messages}
@@ -789,6 +809,7 @@ export default function Home() {
           onModelModeChange={setModelMode}
           onClose={() => setSettingsOpen(false)}
           onClearChat={handleNewChat}
+          isAdmin={isAdmin}
         />
       )}
     </div>
@@ -800,11 +821,13 @@ function SettingsPanel({
   onModelModeChange,
   onClose,
   onClearChat,
+  isAdmin,
 }: {
   modelMode: ModelMode;
   onModelModeChange: (mode: ModelMode) => void;
   onClose: () => void;
   onClearChat: () => void;
+  isAdmin: boolean;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4" role="dialog" aria-modal="true" aria-label="Workspace settings">
@@ -830,9 +853,11 @@ function SettingsPanel({
           <button type="button" onClick={() => { onClearChat(); onClose(); }} className="rounded-[10px] px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--color-border-secondary)", color: "var(--color-text-primary)" }}>
             Clear current screen
           </button>
-          <a href="/admin/feedback" className="rounded-[10px] px-3 py-2 text-sm" style={{ border: "1px solid var(--color-border-secondary)", color: "var(--color-text-primary)" }}>
-            Open feedback inbox
-          </a>
+          {isAdmin && (
+            <a href="/admin/feedback" className="rounded-[10px] px-3 py-2 text-sm" style={{ border: "1px solid var(--color-border-secondary)", color: "var(--color-text-primary)" }}>
+              Open feedback inbox
+            </a>
+          )}
         </div>
       </div>
     </div>

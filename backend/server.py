@@ -787,6 +787,12 @@ def _verify_admin(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+@app.get("/admin/session")
+async def admin_session(request: Request) -> dict[str, Any]:
+    _verify_admin(request)
+    return {"ok": True, "role": "admin"}
+
+
 @app.post("/admin/login")
 async def admin_login(payload: AdminLogin, request: Request) -> dict[str, Any]:
     if not CONFIG.admin_password:
