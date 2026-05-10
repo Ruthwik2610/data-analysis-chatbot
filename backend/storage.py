@@ -308,7 +308,7 @@ class Storage:
             con.execute("UPDATE user_sessions SET revoked_at = ? WHERE token_jti = ?", (time.time(), jti))
 
     # -- chats ---------------------------------------------------------------
-    def create_chat(self, title: str | None = None, project_id: str | None = None, owner_id: str = "legacy") -> str:
+    def create_chat(self, title: str | None = None, project_id: str | None = None, owner_id: str = "legacy") -> dict[str, Any]:
         chat_id = f"chat_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
@@ -316,19 +316,26 @@ class Storage:
                 "INSERT INTO chats (id, owner_id, title, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (chat_id, owner_id, title, project_id, now, now),
             )
-        return chat_id
+        return {"id": chat_id}
 
     def list_chats(self, project_id: str | None = None, owner_id: str = "legacy") -> list[dict[str, Any]]:
         with self._conn() as con:
-            if project_id:
+            # Authenticated users can see their own chats AND legacy chats
+            owners = [owner_id]
+            if owner_id != "legacy":
+                owners.append("legacy")
+            
+            placeholders = ",".join(["?"] * len(owners))
+            
+            if project_id and project_id != "none":
                 rows = con.execute(
-                    "SELECT * FROM chats WHERE owner_id = ? AND project_id = ? ORDER BY updated_at DESC",
-                    (owner_id, project_id),
+                    f"SELECT * FROM chats WHERE owner_id IN ({placeholders}) AND project_id = ? ORDER BY updated_at DESC",
+                    (*owners, project_id),
                 ).fetchall()
             else:
                 rows = con.execute(
-                    "SELECT * FROM chats WHERE owner_id = ? AND project_id IS NULL ORDER BY updated_at DESC",
-                    (owner_id,),
+                    f"SELECT * FROM chats WHERE owner_id IN ({placeholders}) AND project_id IS NULL ORDER BY updated_at DESC",
+                    owners,
                 ).fetchall()
         return [dict(r) for r in rows]
 
@@ -337,7 +344,12 @@ class Storage:
             if owner_id is None:
                 row = con.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
             else:
-                row = con.execute("SELECT * FROM chats WHERE id = ? AND owner_id = ?", (chat_id, owner_id)).fetchone()
+                # Authenticated users can access legacy chats
+                owners = [owner_id]
+                if owner_id != "legacy":
+                    owners.append("legacy")
+                placeholders = ",".join(["?"] * len(owners))
+                row = con.execute(f"SELECT * FROM chats WHERE id = ? AND owner_id IN ({placeholders})", (chat_id, *owners)).fetchone()
             if not row:
                 return None
             msg_rows = con.execute(
