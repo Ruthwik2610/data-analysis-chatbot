@@ -4,8 +4,10 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import hmac
 import collections
 import collections.abc
+import ipaddress
 import json
 import logging
 import math
@@ -849,6 +851,16 @@ async def admin_stats(request: Request) -> dict[str, Any]:
         if row:
             stats["system_metrics"]["hallucination_count"] = row["c"]
 
+        # Calculate robust latencies from test_evaluations (benchmarks)
+        row = con.execute("SELECT AVG(latency_ms) as avg_l FROM test_evaluations WHERE latency_ms IS NOT NULL").fetchone()
+        if row and row["avg_l"]:
+            stats["system_metrics"]["avg_query_latency_ms"] = int(row["avg_l"])
+
+        # For LLM latency, we look at the last 100 benchmark evaluations
+        row = con.execute("SELECT AVG(latency_ms) as avg_l FROM (SELECT latency_ms FROM test_evaluations WHERE latency_ms IS NOT NULL ORDER BY created_at DESC LIMIT 100)").fetchone()
+        if row and row["avg_l"]:
+            stats["system_metrics"]["avg_llm_latency_ms"] = int(row["avg_l"])
+
         proj_rows = con.execute('''
             SELECT p.title, COUNT(m.id) as msg_count
             FROM projects p
@@ -889,48 +901,6 @@ async def admin_stats(request: Request) -> dict[str, Any]:
             stats["openrouter"]["label"] = d.get("label", "Key")
         except Exception as e:
             logging.error(f"Failed to fetch OpenRouter stats: {e}")
-
-    try:
-        import collections
-        query_log_path = REPO_ROOT / "logs" / "query.log"
-        if query_log_path.exists():
-            with open(query_log_path, "r", encoding="utf-8") as f:
-                tail = collections.deque(f, maxlen=1000)
-            latencies = []
-            for line in tail:
-                try:
-                    parts = line.split(" query_executed ", 1)
-                    if len(parts) > 1:
-                        data = json.loads(parts[1])
-                        if "elapsed_ms" in data:
-                            latencies.append(data["elapsed_ms"])
-                except Exception:
-                    pass
-            if latencies:
-                stats["system_metrics"]["avg_query_latency_ms"] = round(sum(latencies) / len(latencies), 2)
-    except Exception:
-        pass
-
-    try:
-        import collections
-        llm_log_path = REPO_ROOT / "logs" / "llm.log"
-        if llm_log_path.exists():
-            with open(llm_log_path, "r", encoding="utf-8") as f:
-                tail = collections.deque(f, maxlen=1000)
-            latencies = []
-            for line in tail:
-                try:
-                    parts = line.split(" llm_generate_completed ", 1)
-                    if len(parts) > 1:
-                        data = json.loads(parts[1])
-                        if "elapsed_ms" in data:
-                            latencies.append(data["elapsed_ms"])
-                except Exception:
-                    pass
-            if latencies:
-                stats["system_metrics"]["avg_llm_latency_ms"] = round(sum(latencies) / len(latencies), 2)
-    except Exception:
-        pass
 
     return stats
 
@@ -1008,6 +978,29 @@ async def list_traces(request: Request, limit: int = 100):
             "trace_volume": len(traces)
         }
     }
+
+
+@app.post("/admin/maintenance/clear-cache")
+async def clear_cache_endpoint(request: Request):
+    _verify_admin(request)
+    freed_mb = 0
+    try:
+        cache_dir = CONFIG.cache_dir
+        if cache_dir.exists():
+            # Calculate size before deletion
+            total_size = sum(f.stat().st_size for f in cache_dir.glob('**/*') if f.is_file())
+            freed_mb = round(total_size / (1024 * 1024), 2)
+            
+            # Delete contents but keep the folder
+            for item in cache_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+                    
+        return {"status": "success", "freed_mb": freed_mb, "message": f"Cleared {freed_mb}MB from cache."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
 
 
 @app.post("/admin/testing/suites")
@@ -3147,13 +3140,14 @@ async def query_endpoint(body: QueryRequest, request: Request):
                                 instruction_context=instruction_context,
                             ),
                         )
-                        DB.add_token_usage(
-                            project_id=chat.get("project_id"),
-                            user_id=owner_id,
-                            model=model_used,
-                            prompt_tokens=usage.get("prompt_tokens", 0),
-                            completion_tokens=usage.get("completion_tokens", 0)
-                        )
+                        if usage:
+                            DB.add_token_usage(
+                                project_id=chat.get("project_id") if chat else None,
+                                user_id=owner_id,
+                                model=model_used,
+                                prompt_tokens=usage.get("prompt_tokens", 0),
+                                completion_tokens=usage.get("completion_tokens", 0)
+                            )
                     else:
                         intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
                     if model_used != "offline-heuristic":

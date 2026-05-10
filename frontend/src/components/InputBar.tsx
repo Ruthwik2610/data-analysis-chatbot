@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, Paperclip, Plug, Square } from "lucide-react";
+import { ArrowUp, Mic, Paperclip, Plug, Square } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { FilePickButton } from "./FilePickButton";
 import { ConnectorPopover } from "./ConnectorPopover";
@@ -38,8 +38,10 @@ export function InputBar({
   const [value, setValue] = useState("");
   const [popOpen, setPopOpen] = useState(false);
   const [sourceDrawerOpen, setSourceDrawerOpen] = useState(false);
+  const [listening, setListening] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const plugRef = useRef<HTMLButtonElement>(null);
+  const recognitionRef = useRef<any>(null);
   const firstSource = selectedSources[0];
   const sourceOverflow = Math.max(0, selectedSources.length - 1);
 
@@ -61,6 +63,36 @@ export function InputBar({
     window.addEventListener("data-chat:focus-input", handler as EventListener);
     return () => window.removeEventListener("data-chat:focus-input", handler as EventListener);
   }, []);
+
+  const toggleListening = () => {
+    if (listening) {
+      recognitionRef.current?.stop();
+      setListening(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Voice input is not supported in this browser.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+
+    recognition.onstart = () => setListening(true);
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setValue((prev) => (prev ? `${prev} ${transcript}` : transcript));
+    };
+    recognition.onerror = () => setListening(false);
+    recognition.onend = () => setListening(false);
+
+    recognitionRef.current = recognition;
+    recognition.start();
+  };
 
   const submit = () => {
     const trimmed = value.trim();
@@ -111,6 +143,19 @@ export function InputBar({
             anchorRef={plugRef}
             currentProjectId={currentProjectId}
           />
+          <button
+            type="button"
+            onClick={toggleListening}
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[8px] text-[11.5px] transition-colors"
+            style={{
+              color: listening ? "#ef4444" : "var(--color-text-secondary)",
+              background: listening ? "rgba(239, 68, 68, 0.1)" : "transparent",
+            }}
+            title={listening ? "Stop listening" : "Voice to chat"}
+          >
+            <Mic size={13} strokeWidth={1.5} className={listening ? "animate-pulse" : ""} />
+            <span className="hidden sm:inline">{listening ? "Listening…" : "Voice"}</span>
+          </button>
           <label
             className="ml-auto inline-flex items-center gap-1.5 rounded-[8px] px-1.5 py-1 text-[11.5px]"
             style={{

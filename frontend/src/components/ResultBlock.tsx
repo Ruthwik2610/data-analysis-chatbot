@@ -44,23 +44,21 @@ export function ResultBlock({ result }: ResultBlockProps) {
 
   return (
     <div
-      className="mt-2 fade-in"
+      className="mt-2 fade-in glass"
       style={{
-        background: "var(--color-background-elevated)",
-        border: "1px solid var(--color-border-secondary)",
-        borderRadius: 18,
-        padding: 16,
-        boxShadow: "var(--shadow-md)",
+        borderRadius: 22,
+        padding: 20,
+        boxShadow: "var(--shadow-xl)",
       }}
     >
-      <div className="flex items-center justify-between mb-2.5">
-        <div className="text-[11px]" style={{ color: "var(--color-text-tertiary)" }}>
-          {result.title} · {result.row_count.toLocaleString()} rows · queried in {result.elapsed_ms} ms
+      <div className="flex items-center justify-between mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: "var(--color-text-tertiary)" }}>
+          {result.title} · {result.row_count.toLocaleString()} rows
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-2">
           {hasChartControls && result.view_type !== "timetable" && (
-            <label className="flex items-center gap-1 text-[11px]" style={{ color: "var(--color-text-secondary)" }}>
-              <span className="hidden sm:inline">Chart</span>
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-secondary border border-tertiary">
+              <span className="text-[9px] font-bold uppercase tracking-widest text-tertiary ml-1">Viz</span>
               <select
                 aria-label="Chart type"
                 value={chartType}
@@ -68,28 +66,25 @@ export function ResultBlock({ result }: ResultBlockProps) {
                   setShowTable(false);
                   setChartType(e.target.value as ResultPayload["viz"]);
                 }}
-                className="rounded-md px-1.5 py-[3px] text-[11px] outline-none"
-                style={{
-                  background: "var(--color-background-primary)",
-                  border: "0.5px solid var(--color-border-tertiary)",
-                  color: "var(--color-text-secondary)",
-                }}
+                className="bg-transparent text-[10px] font-bold text-primary outline-none cursor-pointer pr-1"
               >
-                <option value="bar">Bar</option>
-                <option value="line">Line</option>
-                <option value="pie">Pie</option>
-                <option value="table">Table</option>
+                <option value="bar" className="bg-secondary">Bar</option>
+                <option value="line" className="bg-secondary">Line</option>
+                <option value="pie" className="bg-secondary">Pie</option>
+                <option value="table" className="bg-secondary">Table</option>
               </select>
-            </label>
+            </div>
           )}
-          <IconBtn onClick={() => downloadCsv(result)} title="Download CSV" icon={<Download size={11} strokeWidth={1.4} />} label="CSV" />
-          <IconBtn onClick={() => downloadXlsx(result)} title="Download Excel" icon={<FileSpreadsheet size={11} strokeWidth={1.4} />} label="XLSX" />
+          <div className="h-4 w-[1px] bg-tertiary mx-1" />
+          <IconBtn onClick={() => downloadCsv(result)} title="Download CSV" icon={<Download size={12} strokeWidth={2} />} label="CSV" />
+          <IconBtn onClick={() => downloadXlsx(result)} title="Download Excel" icon={<FileSpreadsheet size={12} strokeWidth={2} />} label="XLSX" />
           {hasChartControls && result.view_type !== "timetable" && (
             <IconBtn
               onClick={() => setShowTable((s) => !s)}
               title={showTable ? "Show chart" : "Show table"}
-              icon={showTable ? <BarChart3 size={11} strokeWidth={1.4} /> : <TableIcon size={11} strokeWidth={1.4} />}
+              icon={showTable ? <BarChart3 size={12} strokeWidth={2} /> : <TableIcon size={12} strokeWidth={2} />}
               label={showTable ? "Chart" : "Table"}
+              active={showTable}
             />
           )}
         </div>
@@ -115,17 +110,12 @@ export function ResultBlock({ result }: ResultBlockProps) {
   );
 }
 
-function IconBtn({ onClick, title, icon, label }: { onClick: () => void; title: string; icon: React.ReactNode; label: string }) {
+function IconBtn({ onClick, title, icon, label, active }: { onClick: () => void; title: string; icon: React.ReactNode; label: string; active?: boolean }) {
   return (
     <button
       onClick={onClick}
       title={title}
-      className="flex items-center gap-1 text-[11px] px-2 py-[3px] rounded-md transition-colors hover:opacity-80"
-      style={{
-        color: "var(--color-text-secondary)",
-        border: "0.5px solid var(--color-border-tertiary)",
-        background: "var(--color-background-primary)",
-      }}
+      className={`flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg transition-all border ${active ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-500/20' : 'bg-secondary text-secondary border-tertiary hover:bg-tertiary hover:text-primary'}`}
     >
       {icon}
       {label}
@@ -436,19 +426,18 @@ function DataTable({ result }: { result: ResultPayload }) {
 
   const isPeriodCol = (j: number) => periodColIdx.includes(j);
   return (
-    <div className="overflow-x-auto rounded-[8px]" style={{ border: "0.5px solid var(--color-border-tertiary)", background: "var(--color-background-primary)" }}>
+    <div className="overflow-x-auto rounded-xl border border-secondary bg-primary">
       {result.rows.length > 10 && (
-        <div style={{ padding: "6px 12px", borderBottom: "0.5px solid var(--color-border-tertiary)" }} className="flex items-center justify-between">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-tertiary bg-secondary">
           <input 
             value={filter} 
             onChange={e => setFilter(e.target.value)}
-            placeholder="Search rows…"
-            className="w-full text-[12px] bg-transparent outline-none"
-            style={{ color: "var(--color-text-primary)" }} 
+            placeholder="Search result set..."
+            className="w-full text-xs bg-transparent outline-none text-primary placeholder:text-tertiary"
           />
           {filter && (
-            <span className="text-[10px] ml-2 whitespace-nowrap" style={{ color: "var(--color-text-tertiary)" }}>
-              {filteredRows.length} / {result.rows.length}
+            <span className="text-[9px] font-bold uppercase tracking-widest ml-2 whitespace-nowrap text-tertiary">
+              {filteredRows.length} / {result.rows.length} matches
             </span>
           )}
         </div>
@@ -459,10 +448,10 @@ function DataTable({ result }: { result: ResultPayload }) {
             {result.columns.map((c) => (
               <th
                 key={c}
-                className="text-left py-1.5 px-2 font-medium"
+                className="text-left py-2.5 px-4 font-bold uppercase tracking-wider text-[10px] bg-secondary"
                 style={{
                   color: "var(--color-text-tertiary)",
-                  borderBottom: "0.5px solid var(--color-border-tertiary)",
+                  borderBottom: "1px solid var(--color-border-tertiary)",
                 }}
               >
                 {prettyLabel(c)}
@@ -474,15 +463,15 @@ function DataTable({ result }: { result: ResultPayload }) {
           {filteredRows.map((row, i) => (
             <tr
               key={i}
-              style={{ background: i % 2 === 1 ? "var(--color-background-primary)" : "transparent" }}
+              className="hover:bg-tertiary transition-colors"
+              style={{ background: i % 2 === 1 ? "var(--color-background-secondary)" : "transparent" }}
             >
               {row.map((v, j) => (
                 <td
                   key={j}
-                  className="py-[5px] px-2 tabular-nums"
+                  className="py-2 px-4 tabular-nums text-secondary"
                   style={{
-                    color: "var(--color-text-primary)",
-                    borderBottom: i === filteredRows.length - 1 ? "none" : "0.5px solid var(--color-border-tertiary)",
+                    borderBottom: i === filteredRows.length - 1 ? "none" : "1px solid var(--color-border-tertiary)",
                   }}
                 >
                   {isPeriodCol(j) ? formatPeriod(v) : formatCell(v)}

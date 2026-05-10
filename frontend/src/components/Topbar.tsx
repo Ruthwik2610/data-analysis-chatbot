@@ -14,9 +14,10 @@ interface TopbarProps {
   userEmail?: string;
   onLogout?: () => void;
   onOpenSidebar?: () => void;
+  sidebarOpen?: boolean;
 }
 
-export function Topbar({ title, activeSource, selectedSources, projectName, userEmail, onLogout, onOpenSidebar }: TopbarProps) {
+export function Topbar({ title, activeSource, selectedSources, projectName, userEmail, onLogout, onOpenSidebar, sidebarOpen }: TopbarProps) {
   const sources = selectedSources?.length ? selectedSources : activeSource ? [activeSource] : [];
   const firstSource = sources[0];
   const overflow = Math.max(0, sources.length - 1);
@@ -42,31 +43,17 @@ export function Topbar({ title, activeSource, selectedSources, projectName, user
       }}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <button
-          onClick={onOpenSidebar}
-          title="Open sidebar"
-          aria-label="Open sidebar"
-          className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[10px] lg:hidden"
-          style={{ border: "1px solid var(--color-border-secondary)", color: "var(--color-text-secondary)" }}
-        >
-          <Menu size={17} strokeWidth={1.8} />
-        </button>
-        <label
-          className="flex h-10 w-full max-w-[576px] items-center gap-2 rounded-[14px] px-3"
-          style={{
-            background: "var(--color-background-secondary)",
-            border: "1px solid var(--color-border-secondary)",
-            color: "var(--color-text-tertiary)",
-          }}
-        >
-          <Search size={16} strokeWidth={1.7} />
-          <input
-            type="search"
-            placeholder="Search conversations..."
-            className="min-w-0 flex-1 bg-transparent text-[14px] outline-none"
-            style={{ color: "var(--color-text-primary)" }}
-          />
-        </label>
+        {!sidebarOpen && (
+          <button
+            onClick={onOpenSidebar}
+            title="Open sidebar"
+            aria-label="Open sidebar"
+            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[10px]"
+            style={{ border: "1px solid var(--color-border-secondary)", color: "var(--color-text-secondary)" }}
+          >
+            <Menu size={17} strokeWidth={1.8} />
+          </button>
+        )}
         <span className="hidden text-[13px] font-medium truncate xl:inline" style={{ color: "var(--color-text-primary)" }}>
           {title}
         </span>

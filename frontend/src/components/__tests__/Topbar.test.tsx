@@ -9,19 +9,6 @@ const sources: Source[] = [
 ];
 
 describe("Topbar", () => {
-  it("shows the premium search field", () => {
-    render(
-      <Topbar
-        title="Pizza analysis"
-        activeSource={sources[0]}
-        selectedSources={sources}
-        projectName="Restaurant ops"
-      />,
-    );
-
-    expect(screen.getByPlaceholderText("Search conversations...")).toBeInTheDocument();
-  });
-
   it("shows title, project, first selected source, and overflow count", () => {
     render(
       <Topbar

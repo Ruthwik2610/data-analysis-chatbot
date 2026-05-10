@@ -9,31 +9,48 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { Activity, AlertTriangle, Clock, Database, MessageSquare, Zap, ExternalLink, Folder, TrendingUp, LayoutGrid, FileText, Cpu, HardDrive } from "lucide-react";
+import { Activity, AlertTriangle, Clock, Database, MessageSquare, Zap, ExternalLink, Folder, TrendingUp, LayoutGrid, FileText, Cpu, HardDrive, Trash2 } from "lucide-react";
 
 export function AdminDashboard() {
   const [stats, setStats] = useState<any>(null);
   const [hallucinations, setHallucinations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [maintenanceMsg, setMaintenanceMsg] = useState("");
 
-  useEffect(() => {
-    let mounted = true;
+  const loadData = () => {
     Promise.all([
       api.getAdminStats(),
       api.getHallucinations()
     ])
       .then(([statsData, halData]) => {
-        if (mounted) {
-          setStats(statsData);
-          setHallucinations(halData);
-        }
+        setStats(statsData);
+        setHallucinations(halData);
       })
       .catch(console.error)
       .finally(() => {
-        if (mounted) setLoading(false);
+        setLoading(false);
       });
-    return () => { mounted = false; };
+  };
+
+  useEffect(() => {
+    loadData();
   }, []);
+
+  const handleClearCache = async () => {
+    if (!confirm("Are you sure you want to clear all cached files? This will free up space but may slow down initial queries.")) return;
+    setClearingCache(true);
+    try {
+        const res = await api.clearCache();
+        setMaintenanceMsg(res.message);
+        loadData();
+        setTimeout(() => setMaintenanceMsg(""), 5000);
+    } catch (err) {
+        alert("Failed to clear cache");
+    } finally {
+        setClearingCache(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -111,6 +128,7 @@ export function AdminDashboard() {
                     percent={stats.system_health?.cpu_percent || 0}
                     icon={<Cpu size={16} />}
                     color="blue"
+                    warning={stats.system_health?.cpu_percent > 80}
                 />
                 <HealthMetric 
                     label="RAM Usage" 
@@ -126,7 +144,36 @@ export function AdminDashboard() {
                     percent={100 - (stats.system_health?.disk_percent || 0)}
                     icon={<HardDrive size={16} />}
                     color="indigo"
+                    warning={stats.system_health?.disk_percent > 90}
                 />
+            </div>
+        </div>
+
+        {/* Maintenance (New) */}
+        <div className="flex flex-col gap-4">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
+                <LayoutGrid size={12} /> System Maintenance
+            </h3>
+            <div className="p-8 rounded-[32px] bg-white/[0.03] border border-white/5 flex flex-col gap-6">
+                <div className="flex items-center justify-between">
+                    <div className="flex flex-col gap-1">
+                        <div className="text-sm font-semibold text-white">System Cache</div>
+                        <div className="text-[10px] text-white/30 font-medium uppercase tracking-widest">Clear temporary files and free up disk space</div>
+                    </div>
+                    <button 
+                        onClick={handleClearCache}
+                        disabled={clearingCache}
+                        className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all ${clearingCache ? 'bg-white/5 text-white/20' : 'bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white border border-red-500/20'}`}
+                    >
+                        {clearingCache ? <div className="w-3 h-3 border-2 border-white/10 border-t-white rounded-full animate-spin" /> : <Trash2 size={14} />}
+                        {clearingCache ? 'Clearing...' : 'Clear Cache'}
+                    </button>
+                </div>
+                {maintenanceMsg && (
+                    <div className="text-[10px] font-bold text-green-500 uppercase tracking-widest animate-in fade-in slide-in-from-left-2">
+                        {maintenanceMsg}
+                    </div>
+                )}
             </div>
         </div>
 

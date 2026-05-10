@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import { Lock } from "lucide-react";
+import { Lock, Sparkles } from "lucide-react";
 
 export default function LoginPage() {
   const [password, setPassword] = useState("");
@@ -46,11 +46,26 @@ export default function LoginPage() {
             <Lock size={32} />
           </div>
           <h1 className="text-2xl font-bold" style={{ color: "var(--color-text-primary)" }}>
-            Admin Login
+            Unipro Control Center
           </h1>
           <p className="text-sm mt-2" style={{ color: "var(--color-text-tertiary)" }}>
             Enter your passcode to access insights
           </p>
+        </div>
+
+        <div 
+          className="mb-8 p-4 rounded-xl border flex flex-col gap-1.5 animate-pulse"
+          style={{ 
+            background: "rgba(37, 99, 235, 0.05)", 
+            borderColor: "rgba(37, 99, 235, 0.15)" 
+          }}
+        >
+          <div className="text-[10px] font-bold uppercase tracking-widest text-blue-500 flex items-center gap-1.5">
+            <Sparkles size={12} /> Testing Mode Active
+          </div>
+          <div className="text-xs text-white/50">
+            Use passcode: <span className="font-mono text-blue-400 font-bold">admin123</span>
+          </div>
         </div>
 
         <form onSubmit={handleLogin} className="space-y-6">

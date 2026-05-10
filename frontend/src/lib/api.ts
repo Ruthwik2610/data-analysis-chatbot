@@ -62,6 +62,7 @@ export const api = {
   getAdminStats: () => jget<any>("/admin/stats"),
   getHallucinations: () => jget<any[]>("/admin/hallucinations"),
   getTraces: (limit?: number) => jget<any[]>(limit ? `/admin/traces?limit=${limit}` : "/admin/traces"),
+  clearCache: () => jpost<any>("/admin/maintenance/clear-cache", {}),
 
   listSources: (projectId?: string | null) =>
     jget<Source[]>(projectId ? `/sources?project_id=${encodeURIComponent(projectId)}` : "/sources"),

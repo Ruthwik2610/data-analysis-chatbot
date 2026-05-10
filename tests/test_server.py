@@ -646,8 +646,7 @@ def test_unsupported_local_table_query_does_not_fall_through_to_mcp(isolated_ser
     class DummyRouter:
         available = True
         def classify_intent(self, **kwargs):
-            return {"intent_type": "unsupported", "route": "ambiguous"}, "dummy"
-            
+            return {"intent_type": "unsupported", "route": "ambiguous"}, "dummy", {}            
     import backend.server
     backend.server.LLMRouter = lambda *a, **kw: DummyRouter()
     

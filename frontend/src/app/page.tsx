@@ -34,7 +34,7 @@ export default function Home() {
   const [chatsReady, setChatsReady] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showFeedback, setShowFeedback] = useState(false);
   const [interactionCount, setInteractionCount] = useState(0);
 
@@ -685,25 +685,26 @@ export default function Home() {
   return (
     <div className="flex h-[100dvh] w-screen overflow-hidden relative">
       {sidebarOpen && <button className="fixed inset-0 z-30 bg-black/20 lg:hidden" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)} />}
-      <div className={`fixed inset-y-0 left-0 z-40 transition-transform duration-200 lg:static lg:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
+      <div className={`fixed inset-y-0 left-0 z-40 transition-transform duration-200 lg:static lg:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:hidden"}`}>
         <Sidebar
           chats={chats}
           currentChatId={currentChatId}
           sources={sources}
           selectedSourceIds={selectedSourceIds}
-          onNewChat={() => { handleNewChat(); setSidebarOpen(false); }}
-          onSelectChat={(id) => { handleSelectChat(id); setSidebarOpen(false); }}
+          onNewChat={() => { handleNewChat(); }}
+          onSelectChat={(id) => { handleSelectChat(id); }}
           onDeleteChat={handleDeleteChat}
           onToggleSource={handleToggleSource}
           onDeleteSource={handleDeleteSource}
           onPreviewSource={handlePreviewSource}
           projects={projects}
           currentProjectId={currentProjectId}
-          onSelectProject={(id) => { handleSelectProject(id); setSidebarOpen(false); }}
+          onSelectProject={(id) => { handleSelectProject(id); }}
           onNewProject={handleNewProject}
           onDeleteProject={handleDeleteProject}
           chatLoading={!chatsReady}
           userEmail={user.email}
+          onToggleCollapse={() => setSidebarOpen(false)}
         />
       </div>
       <main className="flex flex-col flex-1 min-w-0 relative" style={{ background: "var(--color-background-primary)" }}>
@@ -716,6 +717,7 @@ export default function Home() {
           userEmail={user.email}
           onLogout={handleLogout}
           onOpenSidebar={() => setSidebarOpen(true)}
+          sidebarOpen={sidebarOpen}
         />
         <MessageList
           messages={messages}

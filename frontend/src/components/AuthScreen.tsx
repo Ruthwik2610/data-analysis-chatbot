@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Lock, LogIn, UserPlus } from "lucide-react";
+import { Lock, LogIn, UserPlus, Sparkles } from "lucide-react";
 import { api, setAuthToken } from "@/lib/api";
 
 interface AuthScreenProps {
@@ -46,6 +46,22 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             <p className="mt-1 text-[13px]" style={{ color: "var(--color-text-tertiary)" }}>
               Projects, files, and chat history stay tied to your account.
             </p>
+          </div>
+        </div>
+
+        <div 
+          className="mb-5 p-4 rounded-xl border flex flex-col gap-1.5 animate-pulse"
+          style={{ 
+            background: "rgba(37, 99, 235, 0.05)", 
+            borderColor: "rgba(37, 99, 235, 0.15)" 
+          }}
+        >
+          <div className="text-[10px] font-bold uppercase tracking-widest text-blue-500 flex items-center gap-1.5">
+            <Sparkles size={12} /> Testing Mode Active
+          </div>
+          <div className="text-xs text-white/50 leading-relaxed">
+            User: <span className="font-mono text-blue-400 font-bold">test@example.com</span><br/>
+            Pass: <span className="font-mono text-blue-400 font-bold">password123</span>
           </div>
         </div>
 
