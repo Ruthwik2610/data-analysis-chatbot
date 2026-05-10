@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Database, Folder, MessageSquare, Plus, X, Eye, ChevronLeft, UserRound } from "lucide-react";
+import { Database, Folder, MessageSquare, Plus, X, Eye, ChevronLeft, UserRound, LayoutGrid } from "lucide-react";
 import type { ChatSummary, Source, Project } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
 import { SkeletonChatList } from "./SkeletonLoader";
@@ -26,6 +26,7 @@ interface SidebarProps {
   chatLoading?: boolean;
   onPreviewSource?: (id: string) => void;
   userEmail?: string;
+  onToggleCollapse?: () => void;
 }
 
 const KIND_COLOR: Record<string, string> = {
@@ -43,7 +44,7 @@ export function Sidebar(p: SidebarProps) {
   const [clearConfirm, setClearConfirm] = useState(false);
   return (
     <aside
-      className="flex flex-col flex-shrink-0 relative z-20"
+      className="flex flex-col h-full flex-shrink-0 relative z-20"
       style={{
         width: 280,
         background: "var(--glass-background)",
@@ -61,6 +62,7 @@ export function Sidebar(p: SidebarProps) {
           <img src="/unipro-full-logo-dark.svg" alt="Unipro" className="logo-dark" style={{ width: 126, height: "auto", objectFit: "contain" }} />
         </Link>
         <button
+          onClick={p.onToggleCollapse}
           className="h-8 w-8 rounded-full flex items-center justify-center transition-colors"
           title="Collapse sidebar"
           aria-label="Collapse sidebar"
@@ -101,7 +103,7 @@ export function Sidebar(p: SidebarProps) {
         )}
       </div>
 
-      <div className="flex flex-col flex-1 overflow-y-auto scrollbar-thin pb-3">
+      <div className="flex flex-col flex-1 overflow-y-auto min-h-0 scrollbar-thin pb-3">
         <div className="flex items-center justify-between pr-3">
           <SectionLabel>Today</SectionLabel>
           <button
@@ -195,8 +197,8 @@ export function Sidebar(p: SidebarProps) {
             e.currentTarget.style.color = "var(--color-text-secondary)";
           }}
         >
-          <Database size={13} strokeWidth={1.5} />
-          Insights & Usage
+          <LayoutGrid size={13} strokeWidth={1.5} className="text-blue-500" />
+          Admin Control Center
         </Link>
       </div>
     </aside>
