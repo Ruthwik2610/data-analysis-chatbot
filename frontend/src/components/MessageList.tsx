@@ -56,8 +56,8 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
   }
 
   return (
-    <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col">
-      <div className="flex flex-col gap-6 mt-auto">
+    <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col min-h-0">
+      <div className="flex flex-col gap-6">
         {messages.map((msg, idx) => {
             const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
             return (
@@ -135,7 +135,7 @@ function Bubble({
                 <div className="p-1 rounded-lg bg-blue-500/10 text-blue-400">
                     <Sparkles size={14} strokeWidth={2} />
                 </div>
-                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/30">Intelligence Engine</span>
+                <span className="text-[10px] font-bold uppercase tracking-[0.2em] opacity-40" style={{ color: "var(--color-text-tertiary)" }}>Intelligence Engine</span>
             </div>
             <AssistantMarkdown content={message.content} streaming={!!message.streaming} />
             {message.streaming && (

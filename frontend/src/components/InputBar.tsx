@@ -250,9 +250,9 @@ export function InputBar({
             <button
               onClick={submit}
               disabled={disabled || !value.trim()}
-              className="w-9 h-9 rounded-[12px] flex items-center justify-center flex-shrink-0 transition-all duration-200 ease-in-out hover:scale-105 active:scale-95"
+              className="w-9 h-9 rounded-[12px] flex items-center justify-center flex-shrink-0 transition-all duration-200 ease-in-out hover:scale-105 active:scale-95 shadow-lg shadow-blue-500/20"
               style={{
-                background: "#2563eb",
+                background: "var(--color-text-info)",
                 color: "#ffffff",
                 opacity: !value.trim() || disabled ? 0.3 : 1,
                 cursor: !value.trim() || disabled ? "default" : "pointer",

@@ -707,7 +707,7 @@ export default function Home() {
           onToggleCollapse={() => setSidebarOpen(false)}
         />
       </div>
-      <main className="flex flex-col flex-1 min-w-0 relative" style={{ background: "var(--color-background-primary)" }}>
+      <main className="flex flex-col flex-1 min-w-0 min-h-0 relative" style={{ background: "var(--color-background-primary)" }}>
         <StreamingBar visible={loading} />
         <Topbar  
           title={chatTitle} 

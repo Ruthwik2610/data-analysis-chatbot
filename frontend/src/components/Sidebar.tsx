@@ -254,8 +254,8 @@ function ProjectRow({
     <div
       className={clsx("group mx-3 mb-1 flex items-center pr-1 transition-colors")}
       style={{
-        background: isActive ? "#eef4ff" : "transparent",
-        border: `1px solid ${isActive ? "rgba(37, 99, 235, 0.18)" : "transparent"}`,
+        background: isActive ? "var(--color-background-info)" : "transparent",
+        border: `1px solid ${isActive ? "var(--color-border-info)" : "transparent"}`,
         borderRadius: 12,
         boxShadow: isActive ? "var(--shadow-sm)" : "none",
       }}
@@ -309,8 +309,8 @@ function ChatRow({
     <div
       className={clsx("group mx-3 mb-1 flex items-center pr-1 transition-colors")}
       style={{
-        background: isActive ? "#eef4ff" : "transparent",
-        border: `1px solid ${isActive ? "rgba(37, 99, 235, 0.18)" : "transparent"}`,
+        background: isActive ? "var(--color-background-info)" : "transparent",
+        border: `1px solid ${isActive ? "var(--color-border-info)" : "transparent"}`,
         borderRadius: 12,
         boxShadow: isActive ? "var(--shadow-sm)" : "none",
       }}
