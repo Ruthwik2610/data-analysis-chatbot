@@ -95,6 +95,37 @@ html, body {
 
 button { font-family: inherit; cursor: pointer; }
 
+.admin-theme-scope .text-white {
+  color: var(--color-text-primary) !important;
+}
+
+.admin-theme-scope .text-white\/70,
+.admin-theme-scope .text-white\/60 {
+  color: var(--color-text-secondary) !important;
+}
+
+.admin-theme-scope .text-white\/40,
+.admin-theme-scope .text-white\/30,
+.admin-theme-scope .text-white\/20,
+.admin-theme-scope .text-white\/10 {
+  color: var(--color-text-tertiary) !important;
+}
+
+.admin-theme-scope .bg-white\/\[0\.03\],
+.admin-theme-scope .bg-white\/\[0\.02\],
+.admin-theme-scope .bg-white\/5 {
+  background: var(--color-background-elevated) !important;
+}
+
+.admin-theme-scope .border-white\/10,
+.admin-theme-scope .border-white\/5 {
+  border-color: var(--color-border-secondary) !important;
+}
+
+.admin-theme-scope .bg-white\/10 {
+  background: var(--color-background-secondary) !important;
+}
+
 @keyframes typingDots {
   0%, 80%, 100% { opacity: 0.2; }
   40% { opacity: 1; }

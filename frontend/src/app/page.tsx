@@ -710,6 +710,10 @@ export default function Home() {
     };
   }, []);
 
+  const handleConnectClick = useCallback(() => {
+    connectorClickRef.current();
+  }, []);
+
   const [previewSourceId, setPreviewSourceId] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<any>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -787,10 +791,10 @@ export default function Home() {
           loading={loading}
           onPendingChoice={handlePendingChoice}
           onPickFile={handlePickFile}
-          onConnectClick={() => connectorClickRef.current()}
+          onConnectClick={handleConnectClick}
           currentProjectId={currentProjectId}
           onSaveProjectNote={handleSaveProjectNote}
-          onAskFollowUp={(prompt) => handleSend(prompt)}
+          onAskFollowUp={handleSend}
           onFeedback={handleFeedback}
         />
         <InputBar

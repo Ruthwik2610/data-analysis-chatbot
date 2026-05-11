@@ -140,6 +140,7 @@ export function InputBar({
             open={popOpen}
             onClose={() => setPopOpen(false)}
             onAttached={onAttached}
+            onPickFile={onPickFile}
             anchorRef={plugRef}
             currentProjectId={currentProjectId}
           />

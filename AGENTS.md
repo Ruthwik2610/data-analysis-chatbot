@@ -22,6 +22,16 @@ ssh datachat-vps systemctl status datachat-backend.service --no-pager
 
 For frontend (Next.js) changes also restart `datachat-frontend.service`. `mcp_connectors.json` is excluded from rsync so the server's connected MCP bridges (BigQuery, etc.) survive deploys.
 
+# Frontend UI Guardrails
+
+Light mode must be treated as a first-class production surface. Do not hardcode white/black text or low-opacity white borders/backgrounds in admin or chat UI unless the component is explicitly on a fixed dark brand surface. Prefer theme tokens such as `var(--color-text-primary)`, `var(--color-text-secondary)`, `var(--color-background-elevated)`, and `var(--color-border-secondary)`.
+
+When touching admin navigation, dashboards, cards, or shell layout:
+- Verify the route in light mode and dark mode.
+- Keep a visible theme toggle in the top shell.
+- Add or update a focused frontend test if the change affects navigation, shell controls, visibility, or theme behavior.
+- Avoid hardcoded `text-white`, `text-white/*`, `bg-white/*`, and `border-white/*` classes in admin components unless paired with a scoped theme-safe override.
+
 # Model Routing
 
 This project intentionally uses DeepSeek models through OpenRouter:

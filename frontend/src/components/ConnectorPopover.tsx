@@ -1,9 +1,10 @@
 "use client";
 
-import { AlertCircle, Plug, RefreshCw, Trash2, X } from "lucide-react";
+import { AlertCircle, FileSpreadsheet, Plug, RefreshCw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type { Connector, MCPConnector, Source } from "@/lib/types";
+import { FilePickButton } from "./FilePickButton";
 
 const MCP_STORAGE_KEY = "datachat_saved_mcp_connectors";
 
@@ -33,11 +34,12 @@ interface ConnectorPopoverProps {
   open: boolean;
   onClose: () => void;
   onAttached: (source: Source) => void;
+  onPickFile?: (file: File) => void;
   anchorRef: React.RefObject<HTMLElement | null>;
   currentProjectId?: string | null;
 }
 
-export function ConnectorPopover({ open, onClose, onAttached, anchorRef, currentProjectId }: ConnectorPopoverProps) {
+export function ConnectorPopover({ open, onClose, onAttached, onPickFile, anchorRef, currentProjectId }: ConnectorPopoverProps) {
   const [tab, setTab] = useState<"api" | "mcp" | "excel">("api");
   const [url, setUrl] = useState("");
   const [auth, setAuth] = useState("");
@@ -260,7 +262,7 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef, current
       <div role="tablist" aria-label="Source type" className="px-3 pt-3 grid grid-cols-3 gap-1">
         <TabButton label="API" selected={tab === "api"} onClick={() => setTab("api")} />
         <TabButton label="Database/MCP" selected={tab === "mcp"} onClick={() => setTab("mcp")} />
-        <TabButton label="Excel" selected={tab === "excel"} onClick={() => setTab("excel")} />
+        <TabButton label="Auto MCP" selected={tab === "excel"} onClick={() => setTab("excel")} />
       </div>
 
       <div className="p-3 space-y-2">
@@ -363,6 +365,36 @@ export function ConnectorPopover({ open, onClose, onAttached, anchorRef, current
           </>
         ) : (
           <>
+            <div
+              className="rounded-[10px] p-3"
+              style={{
+                background: "var(--color-background-secondary)",
+                border: "0.5px solid var(--color-border-tertiary)",
+              }}
+            >
+              <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold" style={{ color: "var(--color-text-primary)" }}>
+                <FileSpreadsheet size={14} /> Auto MCP workbook
+              </div>
+              <p className="mb-3 text-[11px] leading-relaxed" style={{ color: "var(--color-text-tertiary)" }}>
+                Attach an Excel workbook, select the sheets to expose, then manage workbook views from project settings.
+              </p>
+              <FilePickButton
+                onPick={(file) => {
+                  onPickFile?.(file);
+                  onClose();
+                }}
+                disabled={!onPickFile || busy}
+                title="Attach workbook"
+                variant="card"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-[8px] px-3 py-2 text-[12px] font-medium"
+              >
+                <FileSpreadsheet size={14} />
+                Attach workbook
+              </FilePickButton>
+            </div>
+            <div className="pt-2 text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: "var(--color-text-tertiary)" }}>
+              Server-local file path
+            </div>
             <input
               id="excel-mcp-path"
               autoFocus

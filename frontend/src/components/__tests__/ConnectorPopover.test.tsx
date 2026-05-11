@@ -32,11 +32,12 @@ describe("ConnectorPopover", () => {
 
     expect(screen.getByRole("tab", { name: "API" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "Database/MCP" })).toHaveAttribute("aria-selected", "false");
-    expect(screen.getByRole("tab", { name: "Excel" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("tab", { name: "Auto MCP" })).toHaveAttribute("aria-selected", "false");
 
-    fireEvent.click(screen.getByRole("tab", { name: "Excel" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Auto MCP" }));
 
-    expect(screen.getByRole("tab", { name: "Excel" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Auto MCP" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "Attach workbook" })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Local path to .xlsx file")).toBeInTheDocument();
   });
 
