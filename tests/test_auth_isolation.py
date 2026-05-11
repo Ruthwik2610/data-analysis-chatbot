@@ -79,19 +79,55 @@ def test_user_jwt_scopes_projects_chats_and_sources(isolated_server, monkeypatch
     assert client.get("/projects", headers={"Authorization": "Bearer shared-api-key"}).status_code == 401
 
 
-def test_authenticated_user_can_see_legacy_chats(isolated_server, monkeypatch):
+def test_regular_authenticated_user_cannot_see_legacy_chats(isolated_server, monkeypatch):
     server, storage, _pool = isolated_server
     monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
     monkeypatch.setattr(server, "API_KEY", "shared-api-key")
     monkeypatch.setattr(server, "JWT_SECRET", "test-secret")
     client = TestClient(server.app)
-    token = _register(client, "tester@example.com")
+    token = _register(client, "alice@example.com")
+    legacy_chat = storage.create_chat("Legacy chat", owner_id="legacy")
+
+    response = client.get("/chats?project_id=none", headers=_headers(token))
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert client.get(f"/chats/{legacy_chat['id']}", headers=_headers(token)).status_code == 404
+
+
+def test_configured_test_user_can_see_legacy_chats(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
+    monkeypatch.setattr(server, "API_KEY", "shared-api-key")
+    monkeypatch.setattr(server, "JWT_SECRET", "test-secret")
+    monkeypatch.setattr(server, "TEST_USER_EMAIL", "sample-test-user@example.com")
+    client = TestClient(server.app)
+    token = _register(client, "sample-test-user@example.com")
     legacy_chat = storage.create_chat("Legacy chat", owner_id="legacy")
 
     response = client.get("/chats?project_id=none", headers=_headers(token))
 
     assert response.status_code == 200
     assert [chat["id"] for chat in response.json()] == [legacy_chat["id"]]
+    assert client.get(f"/chats/{legacy_chat['id']}", headers=_headers(token)).status_code == 200
+
+
+def test_displayed_test_user_credentials_can_login_and_see_legacy_chats(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
+    monkeypatch.setattr(server, "API_KEY", "shared-api-key")
+    monkeypatch.setattr(server, "JWT_SECRET", "test-secret")
+    monkeypatch.setattr(server, "TEST_USER_EMAIL", "sample-test-user@example.com")
+    monkeypatch.setattr(server, "TEST_USER_PASSWORD", "sample-public-test-password")
+    client = TestClient(server.app)
+    legacy_chat = storage.create_chat("Legacy chat", owner_id="legacy")
+
+    login = client.post("/auth/login", json={"email": "sample-test-user@example.com", "password": "sample-public-test-password"})
+
+    assert login.status_code == 200
+    assert login.json()["user"]["email"] == "sample-test-user@example.com"
+    chats = client.get("/chats?project_id=none", headers=_headers(login.json()["access_token"]))
+    assert [chat["id"] for chat in chats.json()] == [legacy_chat["id"]]
 
 
 def test_regular_user_token_does_not_open_admin_session(isolated_server, monkeypatch):

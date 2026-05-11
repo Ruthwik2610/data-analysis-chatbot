@@ -345,6 +345,18 @@ class Storage:
             row = con.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
         return dict(row) if row else None
 
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_user_password(self, user_id: str, password_hash: str) -> None:
+        with self._conn() as con:
+            con.execute(
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                (password_hash, time.time(), user_id),
+            )
+
     def create_session(self, user_id: str, jti: str, ip: str | None, ua: str | None, expires_at: float) -> dict[str, Any]:
         session_id = f"sess_{uuid.uuid4().hex[:12]}"
         now = time.time()
@@ -382,11 +394,15 @@ class Storage:
             )
         return {"id": chat_id}
 
-    def list_chats(self, project_id: str | None = None, owner_id: str = "legacy") -> list[dict[str, Any]]:
+    def list_chats(
+        self,
+        project_id: str | None = None,
+        owner_id: str = "legacy",
+        include_legacy: bool = False,
+    ) -> list[dict[str, Any]]:
         with self._conn() as con:
-            # Authenticated users can see their own chats AND legacy chats
             owners = [owner_id]
-            if owner_id != "legacy":
+            if include_legacy and owner_id != "legacy":
                 owners.append("legacy")
             
             placeholders = ",".join(["?"] * len(owners))
@@ -403,14 +419,18 @@ class Storage:
                 ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_chat(self, chat_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+    def get_chat(
+        self,
+        chat_id: str,
+        owner_id: str | None = None,
+        include_legacy: bool = False,
+    ) -> dict[str, Any] | None:
         with self._conn() as con:
             if owner_id is None:
                 row = con.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
             else:
-                # Authenticated users can access legacy chats
                 owners = [owner_id]
-                if owner_id != "legacy":
+                if include_legacy and owner_id != "legacy":
                     owners.append("legacy")
                 placeholders = ",".join(["?"] * len(owners))
                 row = con.execute(f"SELECT * FROM chats WHERE id = ? AND owner_id IN ({placeholders})", (chat_id, *owners)).fetchone()

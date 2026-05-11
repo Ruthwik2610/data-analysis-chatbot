@@ -245,6 +245,8 @@ PENDING_TTL_SECONDS = 1800
 ARCHIVE_PDF_MAX_BYTES = int(float(os.getenv("ARCHIVE_PDF_MAX_MB", "0")) * 1024 * 1024)
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "2GB")
 DUCKDB_THREADS = max(1, int(os.getenv("DUCKDB_THREADS", "1")))
+TEST_USER_EMAIL = os.getenv("TEST_USER_EMAIL", "").strip().lower()
+TEST_USER_PASSWORD = os.getenv("TEST_USER_PASSWORD", "").strip()
 
 
 def _cleanup_pending(max_age_seconds: int = PENDING_TTL_SECONDS) -> None:
@@ -460,6 +462,14 @@ def _client_ip(request: Request) -> str | None:
 
 def _current_user_id(request: Request) -> str:
     return str(getattr(request.state, "user_id", "legacy") or "legacy")
+
+
+def _is_test_user(request: Request) -> bool:
+    user_id = _current_user_id(request)
+    if user_id == "legacy" or not TEST_USER_EMAIL:
+        return False
+    user = DB.get_user(user_id)
+    return bool(user and str(user.get("email", "")).strip().lower() == TEST_USER_EMAIL)
 
 
 def _make_id(prefix: str = "src") -> str:
@@ -1641,6 +1651,17 @@ def _clean_email(email: str) -> str:
     return clean
 
 
+def _ensure_test_user() -> dict[str, Any] | None:
+    if not TEST_USER_EMAIL or not TEST_USER_PASSWORD:
+        return None
+    password_hash = _hash_password(TEST_USER_PASSWORD)
+    user = DB.get_user_by_email(TEST_USER_EMAIL)
+    if user:
+        DB.update_user_password(user["id"], password_hash)
+        return DB.get_user_by_email(TEST_USER_EMAIL)
+    return DB.create_user(TEST_USER_EMAIL, password_hash)
+
+
 @app.post("/auth/register")
 def register_user(body: UserAuth, request: Request) -> dict[str, Any]:
     email = _clean_email(body.email)
@@ -1655,6 +1676,8 @@ def register_user(body: UserAuth, request: Request) -> dict[str, Any]:
 @app.post("/auth/login")
 def login_user(body: UserAuth, request: Request) -> dict[str, Any]:
     email = _clean_email(body.email)
+    if email == TEST_USER_EMAIL:
+        _ensure_test_user()
     user = DB.get_user_by_email(email)
     if not user or not _verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -2149,7 +2172,11 @@ def apply_source_clarifications(source_id: str, body: SourceClarificationUpdate,
 # -- chats -----------------------------------------------------------------
 @app.get("/chats")
 def list_chats(request: Request, project_id: str | None = None) -> list[dict[str, Any]]:
-    return DB.list_chats(project_id=project_id, owner_id=_current_user_id(request))
+    return DB.list_chats(
+        project_id=project_id,
+        owner_id=_current_user_id(request),
+        include_legacy=_is_test_user(request),
+    )
 
 
 async def ensure_project_context(project_id: str):
@@ -2191,7 +2218,7 @@ async def ensure_project_context(project_id: str):
 @app.get("/chats/{chat_id}")
 async def get_chat(chat_id: str, request: Request) -> dict[str, Any]:
     owner_id = _current_user_id(request)
-    chat = DB.get_chat(chat_id, owner_id=owner_id)
+    chat = DB.get_chat(chat_id, owner_id=owner_id, include_legacy=_is_test_user(request))
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -3470,10 +3497,10 @@ async def _run_multi_source_agent(
         span.end()
 
 
-def _load_history(chat_id: str | None, owner_id: str = "legacy") -> list[dict[str, Any]]:
+def _load_history(chat_id: str | None, owner_id: str = "legacy", include_legacy: bool = False) -> list[dict[str, Any]]:
     if not chat_id:
         return []
-    chat = DB.get_chat(chat_id, owner_id=owner_id)
+    chat = DB.get_chat(chat_id, owner_id=owner_id, include_legacy=include_legacy)
     if not chat:
         return []
     return [{"role": m["role"], "content": m["content"]} for m in chat["messages"]]
@@ -3513,7 +3540,8 @@ async def query_endpoint(body: QueryRequest, request: Request):
     with TRACER.start_as_current_span("query") as span:
         trace_id = format(span.get_span_context().trace_id, '032x')
         owner_id = _current_user_id(request)
-        if body.chat_id and not DB.get_chat(body.chat_id, owner_id=owner_id):
+        include_legacy = _is_test_user(request)
+        if body.chat_id and not DB.get_chat(body.chat_id, owner_id=owner_id, include_legacy=include_legacy):
             raise HTTPException(status_code=404, detail="Chat not found")
         chat_id = body.chat_id or DB.create_chat(owner_id=owner_id)["id"]
         llm_router = _router_for_model_mode(body.model_mode)
@@ -3522,7 +3550,7 @@ async def query_endpoint(body: QueryRequest, request: Request):
             if not DB.get_project(body.project_id, owner_id=owner_id):
                 raise HTTPException(status_code=404, detail="Project not found")
             DB.update_chat_project(chat_id, body.project_id, owner_id=owner_id)
-        chat = DB.get_chat(chat_id, owner_id=owner_id)
+        chat = DB.get_chat(chat_id, owner_id=owner_id, include_legacy=include_legacy)
         if chat and chat.get("project_id"):
             await ensure_project_context(chat["project_id"])
 
@@ -3553,11 +3581,11 @@ async def query_endpoint(body: QueryRequest, request: Request):
         # Store source_ids in user message payload so we can restore them when loading chat history
         user_payload: dict[str, Any] = {"source_ids": [row["id"] for row, _ in selected_sources]}
         user_msg = DB.add_message(chat_id, "user", question, payload=user_payload, trace_id=trace_id)
-        chat = DB.get_chat(chat_id, owner_id=owner_id)
+        chat = DB.get_chat(chat_id, owner_id=owner_id, include_legacy=include_legacy)
         if chat and (not chat.get("title") or chat["title"] == "New chat"):
             DB.update_chat_title(chat_id, question[:60], owner_id=owner_id)
 
-        history = _load_history(chat_id, owner_id=owner_id)
+        history = _load_history(chat_id, owner_id=owner_id, include_legacy=include_legacy)
         project_instructions: dict[str, Any] | None = None
         source_instructions: dict[str, Any] | None = None
         memory_snippets: list[dict[str, Any]] = []

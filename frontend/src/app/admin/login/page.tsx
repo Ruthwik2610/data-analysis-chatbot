@@ -4,12 +4,15 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { Lock } from "lucide-react";
+import { getLoginCredentials } from "@/lib/loginCredentials";
 
 export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const credentials = getLoginCredentials();
+  const adminCredential = credentials.admin;
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -88,6 +91,23 @@ export default function LoginPage() {
             {loading ? "Verifying..." : "Unlock Dashboard"}
           </button>
         </form>
+
+        {adminCredential && (
+          <div className="mt-5 rounded-xl p-3 text-xs" style={{ background: "var(--color-background-primary)", border: "1px solid var(--color-border-tertiary)", color: "var(--color-text-secondary)" }}>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="font-semibold" style={{ color: "var(--color-text-primary)" }}>{adminCredential.label}</span>
+              <button
+                type="button"
+                onClick={() => setPassword(adminCredential.password)}
+                className="rounded-lg px-2 py-1 text-[11px] font-medium"
+                style={{ background: "var(--color-background-elevated)", color: "var(--color-text-primary)" }}
+              >
+                Use
+              </button>
+            </div>
+            <code>{adminCredential.password}</code>
+          </div>
+        )}
 
         <div className="mt-8 text-center">
           <button 

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Lock, LogIn, UserPlus } from "lucide-react";
 import { api, setAuthToken } from "@/lib/api";
+import { getLoginCredentials } from "@/lib/loginCredentials";
 
 interface AuthScreenProps {
   onAuthenticated: (user: { id: string; email: string }) => void;
@@ -15,6 +16,8 @@ export function AuthScreen({ onAuthenticated, initialMode = "login" }: AuthScree
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const credentials = getLoginCredentials();
+  const testCredential = credentials.testUser;
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -92,6 +95,35 @@ export function AuthScreen({ onAuthenticated, initialMode = "login" }: AuthScree
             {loading ? "Please wait..." : mode === "login" ? "Login" : "Create account"}
           </button>
         </form>
+
+        {mode === "login" && testCredential && (
+          <div className="mt-5 rounded-[10px] p-3 text-[12px]" style={{ background: "var(--color-background-secondary)", border: "1px solid var(--color-border-tertiary)", color: "var(--color-text-secondary)" }}>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="font-semibold" style={{ color: "var(--color-text-primary)" }}>{testCredential.label}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail(testCredential.email);
+                  setPassword(testCredential.password);
+                }}
+                className="rounded-[7px] px-2 py-1 text-[11px] font-medium"
+                style={{ background: "var(--color-background-elevated)", color: "var(--color-text-primary)" }}
+              >
+                Use
+              </button>
+            </div>
+            <div className="grid gap-1">
+              <div className="flex items-center justify-between gap-3">
+                <span style={{ color: "var(--color-text-tertiary)" }}>Email</span>
+                <code>{testCredential.email}</code>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span style={{ color: "var(--color-text-tertiary)" }}>Password</span>
+                <code>{testCredential.password}</code>
+              </div>
+            </div>
+          </div>
+        )}
       </section>
     </main>
   );
