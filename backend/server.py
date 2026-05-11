@@ -187,6 +187,7 @@ class QueryRequest(BaseModel):
 class ResolvePending(BaseModel):
     upload_id: str
     value: str | list[str]  # sheet name(s), table name, or "direct" / "sql"
+    public_base_url: str | None = None
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -956,6 +957,27 @@ def deploy_cloudflare_workbook_worker(*, script_name: str, backend_rpc_url: str,
         timeout=15,
     )
     return f"https://{script_name}.{subdomain}.workers.dev/mcp"
+
+
+async def _deploy_workbook_mcp_cloudflare(connector_id: str, public_base_url: str | None, worker_name: str | None = None) -> dict[str, Any]:
+    public_base = (public_base_url or "").rstrip("/")
+    if not public_base:
+        raise RuntimeError("Public base URL is required")
+    safe_worker_name = _safe_worker_name(worker_name or f"unipro-{connector_id}-mcp")
+    public_token = secrets.token_urlsafe(32)
+    backend_rpc_url = f"{public_base}/mcp/workbooks/{connector_id}/rpc"
+    worker_url = await asyncio.to_thread(
+        deploy_cloudflare_workbook_worker,
+        script_name=safe_worker_name,
+        backend_rpc_url=backend_rpc_url,
+        public_token=public_token,
+    )
+    return DB.upsert_workbook_mcp_deployment(
+        connector_id=connector_id,
+        worker_name=safe_worker_name,
+        worker_url=worker_url,
+        public_token=public_token,
+    )
 
 
 def _verify_admin(request: Request):
@@ -2091,7 +2113,17 @@ async def resolve_pending(body: ResolvePending, request: Request) -> dict[str, A
                     table_names=[source.table_name for source in sources],
                     display_name=path.name,
                 )
-                result = {"sources": persisted, "mcp_connector": _serialize_mcp_connector(state)}
+                connector = _serialize_mcp_connector(state)
+                deploy_error = None
+                if body.public_base_url:
+                    try:
+                        connector["cloudflare"] = await _deploy_workbook_mcp_cloudflare(cid, body.public_base_url)
+                    except Exception as exc:
+                        deploy_error = str(exc)
+                        connector["cloudflare_error"] = deploy_error
+                result = {"sources": persisted, "mcp_connector": connector}
+                if deploy_error:
+                    result["mcp_deploy_error"] = deploy_error
             else:
                 source = prepare_excel_source(path, body.value, LOGGERS["cache"])
                 origin = {"type": "excel", "path": str(path), "sheet": body.value, "ingest": "direct"}
@@ -2570,23 +2602,7 @@ async def workbook_mcp_rpc(connector_id: str, request: Request, payload: dict[st
 async def deploy_workbook_mcp_to_cloudflare(connector_id: str, request: Request, body: CloudflareWorkbookDeploy) -> dict[str, Any]:
     _verify_admin(request)
     _get_workbook_connector_state(connector_id)
-    public_base = (body.public_base_url or str(request.base_url)).rstrip("/")
-    worker_name = _safe_worker_name(body.worker_name or f"unipro-{connector_id}-mcp")
-    public_token = secrets.token_urlsafe(32)
-    backend_rpc_url = f"{public_base}/mcp/workbooks/{connector_id}/rpc"
-    worker_url = await asyncio.to_thread(
-        deploy_cloudflare_workbook_worker,
-        script_name=worker_name,
-        backend_rpc_url=backend_rpc_url,
-        public_token=public_token,
-    )
-    deployment = DB.upsert_workbook_mcp_deployment(
-        connector_id=connector_id,
-        worker_name=worker_name,
-        worker_url=worker_url,
-        public_token=public_token,
-    )
-    return deployment
+    return await _deploy_workbook_mcp_cloudflare(connector_id, body.public_base_url or str(request.base_url), body.worker_name)
 
 
 @app.get("/mcp/connectors/{connector_id}/views")

@@ -123,8 +123,16 @@ def test_workbook_mcp_connector_lists_and_queries_selected_tables(tmp_path):
     assert '"total":30' in result_payload
 
 
-def test_pending_excel_upload_resolves_multiple_selected_sheets(isolated_server):
+def test_pending_excel_upload_resolves_multiple_selected_sheets(isolated_server, monkeypatch):
     _server, _storage, _pool = isolated_server
+    captured = {}
+
+    def fake_deploy(*, script_name, backend_rpc_url, public_token):
+        captured["backend_rpc_url"] = backend_rpc_url
+        captured["public_token"] = public_token
+        return "https://unipro-workbook-mcp.workers.dev/mcp"
+
+    monkeypatch.setattr(_server, "deploy_cloudflare_workbook_worker", fake_deploy)
     client = TestClient(_server.app)
     payload = BytesIO()
     with pd.ExcelWriter(payload, engine="openpyxl") as writer:
@@ -143,7 +151,7 @@ def test_pending_excel_upload_resolves_multiple_selected_sheets(isolated_server)
 
     resolved = client.post(
         "/sources/resolve_pending",
-        json={"upload_id": pending["upload_id"], "value": ["Orders", "Inventory"]},
+        json={"upload_id": pending["upload_id"], "value": ["Orders", "Inventory"], "public_base_url": "https://unipro.share.zrok.io"},
     )
 
     assert resolved.status_code == 200
@@ -154,6 +162,9 @@ def test_pending_excel_upload_resolves_multiple_selected_sheets(isolated_server)
     ]
     assert {source["kind"] for source in body["sources"]} == {"xlsx"}
     assert body["mcp_connector"]["status"] == "connected"
+    assert body["mcp_connector"]["cloudflare"]["worker_url"] == "https://unipro-workbook-mcp.workers.dev/mcp"
+    assert captured["backend_rpc_url"].startswith("https://unipro.share.zrok.io/mcp/workbooks/")
+    assert captured["public_token"]
     assert [tool["name"] for tool in body["mcp_connector"]["tools"]] == [
         "list_operations_tables",
         "query_operations",

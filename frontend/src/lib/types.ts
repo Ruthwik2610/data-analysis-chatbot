@@ -220,5 +220,7 @@ export interface UploadResponse {
     size_mb?: number;
     multi_select?: boolean;
   };
+  mcp_connector?: MCPConnector;
+  mcp_deploy_error?: string;
   clarifications?: SourceClarification[];
 }

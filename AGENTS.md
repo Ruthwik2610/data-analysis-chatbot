@@ -34,6 +34,8 @@ When touching admin navigation, dashboards, cards, or shell layout:
 
 Admin workflows that require data sources must never dead-end at a backend “attach a source first” error. The UI must provide a path to select existing uploaded sources and a path to upload or attach a new source, with a focused regression test for that flow.
 
+Auto MCP means more than ingesting workbook sheets as local sources. When a workbook Auto MCP flow succeeds, it must create the workbook MCP connector, expose a public MCP URL when Cloudflare credentials are configured, show that URL in chat, and select the MCP context for the active conversation. Add regression coverage for both the backend URL exposure and the frontend chat message/selection behavior.
+
 # Model Routing
 
 This project intentionally uses DeepSeek models through OpenRouter:

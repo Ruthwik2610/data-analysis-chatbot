@@ -40,6 +40,7 @@ export default function TestingPage() {
   const [pendingUpload, setPendingUpload] = useState<PendingAutoSourceUpload | null>(null);
 
   const selectedSuite = suites.find(s => s.id === selectedSuiteId);
+  const testableSources = sources.filter((source) => source.kind !== "mcp");
 
   useEffect(() => {
     loadSuites();
@@ -126,13 +127,14 @@ export default function TestingPage() {
   };
 
   const handleGenerateFromSelectedSources = async () => {
-    if (selectedSourceIds.length === 0) {
+    const sourceIds = selectedSourceIds.filter((id) => testableSources.some((source) => source.id === id));
+    if (sourceIds.length === 0) {
       setAutoError("Choose at least one uploaded source or upload a new source first.");
       return;
     }
     setIsAutoGenerating(true);
     try {
-      const suite = await api.createAutoTestSuite({ source_ids: selectedSourceIds });
+      const suite = await api.createAutoTestSuite({ source_ids: sourceIds });
       await loadSuites();
       setSelectedSuiteId(suite.id);
       setShowDashboard(false);
@@ -553,13 +555,13 @@ export default function TestingPage() {
                     <div className="max-h-72 overflow-y-auto pr-1">
                         {sourcesLoading ? (
                             <div className="py-8 text-center text-sm" style={{ color: "var(--color-text-tertiary)" }}>Loading uploaded sources...</div>
-                        ) : sources.length === 0 ? (
+                        ) : testableSources.length === 0 ? (
                             <div className="rounded-2xl border border-dashed p-8 text-center" style={{ borderColor: "var(--color-border-tertiary)", color: "var(--color-text-tertiary)" }}>
                                 No uploaded sources yet.
                             </div>
                         ) : (
                             <div className="grid gap-2">
-                                {sources.map((source) => (
+                                {testableSources.map((source) => (
                                     <label
                                         key={source.id}
                                         className="flex cursor-pointer items-center justify-between gap-4 rounded-2xl border p-4 transition-colors"

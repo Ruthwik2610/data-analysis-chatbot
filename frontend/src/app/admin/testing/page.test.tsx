@@ -67,4 +67,18 @@ describe("TestingPage auto suite generation", () => {
     expect(await screen.findByText("No uploaded sources yet.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Upload a source/i })).toBeInTheDocument();
   });
+
+  it("does not offer the aggregate MCP pseudo-source for generated table tests", async () => {
+    (api.listSources as any).mockResolvedValue([
+      { id: "mcp", name: "Workbook MCP", kind: "mcp", rows: 2, active: false },
+      { id: "src_orders", name: "orders.csv", kind: "csv", rows: 120, active: true },
+    ]);
+
+    render(<TestingPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Auto-create Tests/i }));
+
+    expect(await screen.findByLabelText("orders.csv")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Workbook MCP")).not.toBeInTheDocument();
+  });
 });

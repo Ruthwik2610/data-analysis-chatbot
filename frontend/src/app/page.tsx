@@ -13,7 +13,7 @@ import { SourcePreviewDrawer } from "@/components/SourcePreviewDrawer";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, clearAuthToken, getAuthToken, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
-import { formatArchiveSkippedNote } from "@/lib/uploadMessages";
+import { formatArchiveSkippedNote, formatWorkbookMCPConnectedMessage } from "@/lib/uploadMessages";
 import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
@@ -300,13 +300,17 @@ export default function Home() {
       // sheet_pick / table_pick / ingest_pick → resolve_pending
       updateMessage(messageId, { resolved: true, thinking: "Loading", content: msg.content });
       try {
-        const resolved = await api.resolvePending(pending.args.upload_id, value);
+        const resolved = await api.resolvePending(pending.args.upload_id, value, { publicBaseUrl: window.location.origin });
         if ("sources" in resolved) {
           const sources = resolved.sources;
-          setSelectedSourceIds((ids) => Array.from(new Set([...ids, ...sources.map((source) => source.id)])));
+          setSelectedSourceIds((ids) => Array.from(new Set([
+            ...ids,
+            ...sources.map((source) => source.id),
+            ...(resolved.mcp_connector ? ["mcp"] : []),
+          ])));
           updateMessage(messageId, {
             thinking: null,
-            content: `Loaded ${sources.length} sheets: ${sources.map((source) => `**${displaySourceName(source.name)}**`).join(", ")}. Ask me anything about them.`,
+            content: formatWorkbookMCPConnectedMessage(sources, resolved.mcp_connector, resolved.mcp_deploy_error),
           });
           refreshSources();
           return;

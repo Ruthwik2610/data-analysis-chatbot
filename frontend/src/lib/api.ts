@@ -113,8 +113,12 @@ export const api = {
       xhr.send(fd);
     });
   },
-  resolvePending: (upload_id: string, value: string | string[]) =>
-    jpost<Source | { sources: Source[] }>("/sources/resolve_pending", { upload_id, value }),
+  resolvePending: (upload_id: string, value: string | string[], options?: { publicBaseUrl?: string }) =>
+    jpost<Source | { sources: Source[]; mcp_connector?: MCPConnector; mcp_deploy_error?: string }>("/sources/resolve_pending", {
+      upload_id,
+      value,
+      public_base_url: options?.publicBaseUrl,
+    }),
   getSourceInstructions: (sourceId: string) =>
     jget<InstructionsResponse>(`/sources/${sourceId}/instructions`),
   updateSourceInstructions: (sourceId: string, instructions: Record<string, any>) =>
