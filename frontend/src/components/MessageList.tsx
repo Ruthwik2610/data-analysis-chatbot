@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import { AlertTriangle, ArrowRight, Paperclip, Plug, Sparkles } from "lucide-react";
 import type { Message, ModelFallbackNotice } from "@/lib/types";
 import { ResultBlock } from "./ResultBlock";
@@ -65,7 +65,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
             <div key={msg.id} className={`flex flex-col w-full ${isConsecutive ? "mt-1.5" : ""}`}>
                 <Bubble
                 message={msg}
-                onChoose={(v) => onPendingChoice(msg.id, v)}
+                onChoose={onPendingChoice}
                 currentProjectId={currentProjectId}
                 onSaveProjectNote={onSaveProjectNote}
                 onAskFollowUp={onAskFollowUp}
@@ -84,7 +84,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
   );
 }
 
-function Bubble({
+const Bubble = React.memo(function Bubble({
   message,
   onChoose,
   currentProjectId,
@@ -93,7 +93,7 @@ function Bubble({
   onFeedback,
 }: {
   message: Message;
-  onChoose: (value: string | string[]) => void;
+  onChoose: (messageId: string, value: string | string[]) => void;
   currentProjectId?: string | null;
   onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
   onAskFollowUp?: (content: string) => void;
@@ -165,7 +165,7 @@ function Bubble({
             <InlineQuestion
                 label={message.pending.hint || "Strategic Input Required"}
                 options={message.pending.options}
-                onChoose={onChoose}
+                onChoose={(v) => onChoose(message.id, v)}
                 allowCustom={message.pending.resolver === "clarify_text"}
                 multiSelect={message.pending.multiSelect}
             />
@@ -189,7 +189,7 @@ function Bubble({
       </div>
     </div>
   );
-}
+});
 
 function FallbackNotice({ notice }: { notice: ModelFallbackNotice }) {
   const reasonText =
