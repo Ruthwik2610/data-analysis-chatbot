@@ -293,6 +293,12 @@ def test_test_run_uses_live_query_path_with_suite_sources(isolated_server, monke
     assert evaluations[0]["trace_id"] == "trace_live"
 
 
+def test_query_endpoint_answer_prompt_builder_is_imported(isolated_server):
+    server, _storage, _pool = isolated_server
+
+    assert callable(server.build_answer_prompt)
+
+
 def test_admin_feedback_endpoint_lists_review_items(isolated_server, monkeypatch):
     server, storage, _pool = isolated_server
     from fastapi.testclient import TestClient
