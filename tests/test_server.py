@@ -216,6 +216,34 @@ def test_test_runs_expose_progress_fields(isolated_server):
     assert updated["stats"]["total"] == 1
 
 
+def test_admin_auto_suite_uses_selected_user_owned_source(isolated_server, monkeypatch):
+    import hashlib
+    import json
+    from dataclasses import replace
+    from fastapi.testclient import TestClient
+
+    server, storage, _pool = isolated_server
+    monkeypatch.setattr(server, "CONFIG", replace(server.CONFIG, admin_password="admin"))
+    storage.upsert_source(
+        source_id="src_user_orders",
+        owner_id="user_1",
+        name="orders.csv",
+        kind="csv",
+        rows=2,
+        schema_json=json.dumps({"columns": [{"name": "order_date"}, {"name": "revenue"}]}),
+        origin={"type": "csv"},
+    )
+
+    response = TestClient(server.app).post(
+        "/admin/testing/suites/auto",
+        headers={"x-admin-token": hashlib.sha256(b"admin").hexdigest()},
+        json={"source_ids": ["src_user_orders"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["query_count"] >= 3
+
+
 def test_admin_feedback_endpoint_lists_review_items(isolated_server, monkeypatch):
     server, storage, _pool = isolated_server
     from fastapi.testclient import TestClient

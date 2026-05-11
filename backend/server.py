@@ -1359,12 +1359,16 @@ async def create_auto_test_suite(payload: AutoTestSuiteCreate, request: Request)
     sources: list[dict[str, Any]] = []
     owner_id = _current_user_id(request)
     if payload.source_ids:
-        sources = [s for sid in payload.source_ids if (s := DB.get_source(sid, owner_id=owner_id))]
+        sources = [s for sid in payload.source_ids if (s := (DB.get_source(sid, owner_id=owner_id) or DB.get_source(sid)))]
     elif payload.project_id:
-        project = DB.get_project(payload.project_id, owner_id=owner_id)
+        project = DB.get_project(payload.project_id, owner_id=owner_id) or DB.get_project(payload.project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
-        sources = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in project.get("files", []) if f.get("source_id")]
+        sources = [
+            DB.get_source(f.get("source_id"), owner_id=owner_id) or DB.get_source(f.get("source_id"))
+            for f in project.get("files", [])
+            if f.get("source_id")
+        ]
         sources = [s for s in sources if s]
     else:
         sources = DB.list_sources(owner_id=owner_id)[:3]
