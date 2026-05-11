@@ -2,10 +2,20 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { FlaskConical, Play, Plus, History, CheckCircle, ListTodo, Activity, X, ChevronLeft, ChevronRight, BarChart3, LayoutGrid } from "lucide-react";
+import { FlaskConical, Play, Plus, History, CheckCircle, ListTodo, Activity, X, ChevronLeft, ChevronRight, BarChart3, LayoutGrid, UploadCloud } from "lucide-react";
 import TestInputPane from "@/components/admin/TestInputPane";
 import GradingInterface from "@/components/admin/GradingInterface";
 import TestingDashboard from "@/components/admin/TestingDashboard";
+import { FilePickButton } from "@/components/FilePickButton";
+import type { Source } from "@/lib/types";
+
+type PendingAutoSourceUpload = {
+  uploadId: string;
+  fileName: string;
+  options: { label: string; value: string }[];
+  selected: string[];
+  multiSelect: boolean;
+};
 
 export default function TestingPage() {
   const [suites, setSuites] = useState<any[]>([]);
@@ -21,11 +31,19 @@ export default function TestingPage() {
   const [runsLoading, setRunsLoading] = useState(false);
   const [isStartingRun, setIsStartingRun] = useState(false);
   const [isAutoGenerating, setIsAutoGenerating] = useState(false);
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(false);
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
+  const [autoError, setAutoError] = useState("");
+  const [uploadingSource, setUploadingSource] = useState(false);
+  const [pendingUpload, setPendingUpload] = useState<PendingAutoSourceUpload | null>(null);
 
   const selectedSuite = suites.find(s => s.id === selectedSuiteId);
 
   useEffect(() => {
     loadSuites();
+    loadSources();
   }, []);
 
   useEffect(() => {
@@ -54,6 +72,18 @@ export default function TestingPage() {
       console.error(err);
     } finally {
       setRunsLoading(false);
+    }
+  };
+
+  const loadSources = async () => {
+    setSourcesLoading(true);
+    try {
+      setSources(await api.listSources());
+    } catch (err) {
+      console.error(err);
+      setAutoError("Could not load uploaded sources.");
+    } finally {
+      setSourcesLoading(false);
     }
   };
 
@@ -89,18 +119,89 @@ export default function TestingPage() {
   };
 
   const handleAutoGenerate = async () => {
+    setAutoError("");
+    setPendingUpload(null);
+    setSourcePickerOpen(true);
+    await loadSources();
+  };
+
+  const handleGenerateFromSelectedSources = async () => {
+    if (selectedSourceIds.length === 0) {
+      setAutoError("Choose at least one uploaded source or upload a new source first.");
+      return;
+    }
     setIsAutoGenerating(true);
     try {
-      const suite = await api.createAutoTestSuite({});
+      const suite = await api.createAutoTestSuite({ source_ids: selectedSourceIds });
       await loadSuites();
       setSelectedSuiteId(suite.id);
       setShowDashboard(false);
       setSelectedRunId(null);
+      setSourcePickerOpen(false);
+      setSelectedSourceIds([]);
     } catch (err) {
       console.error(err);
-      alert("Failed to generate an auto test suite. Attach a source first.");
+      setAutoError("Failed to generate an auto test suite from the selected sources.");
     } finally {
       setIsAutoGenerating(false);
+    }
+  };
+
+  const mergeUploadedSources = (newSources: Source[]) => {
+    setSources((current) => {
+      const byId = new Map(current.map((source) => [source.id, source]));
+      newSources.forEach((source) => byId.set(source.id, source));
+      return Array.from(byId.values());
+    });
+    setSelectedSourceIds((current) => Array.from(new Set([...current, ...newSources.map((source) => source.id)])));
+  };
+
+  const handleUploadSource = async (file: File) => {
+    setUploadingSource(true);
+    setAutoError("");
+    try {
+      const result = await api.uploadFile(file);
+      if (result.pending) {
+        const pending = result.pending;
+        const options = (pending.sheets || pending.tables || ["direct", "sql"]).map((value) => ({
+          label: value === "direct" ? "Query directly" : value === "sql" ? "Build a cache" : value,
+          value,
+        }));
+        setPendingUpload({
+          uploadId: pending.upload_id,
+          fileName: pending.file_name,
+          options,
+          selected: pending.multi_select ? options.map((option) => option.value) : [options[0]?.value].filter(Boolean),
+          multiSelect: Boolean(pending.multi_select),
+        });
+      } else if (result.sources?.length) {
+        mergeUploadedSources(result.sources);
+      } else if (result.id) {
+        mergeUploadedSources([result as Source]);
+      }
+    } catch (err) {
+      console.error(err);
+      setAutoError("Upload failed. Try another file or use an existing source.");
+    } finally {
+      setUploadingSource(false);
+    }
+  };
+
+  const handleResolvePendingUpload = async () => {
+    if (!pendingUpload || pendingUpload.selected.length === 0) return;
+    setUploadingSource(true);
+    setAutoError("");
+    try {
+      const value = pendingUpload.multiSelect ? pendingUpload.selected : pendingUpload.selected[0];
+      const result = await api.resolvePending(pendingUpload.uploadId, value);
+      const resolvedSources = "sources" in result ? result.sources : [result as Source];
+      mergeUploadedSources(resolvedSources);
+      setPendingUpload(null);
+    } catch (err) {
+      console.error(err);
+      setAutoError("Could not finish loading that source.");
+    } finally {
+      setUploadingSource(false);
     }
   };
 
@@ -363,6 +464,159 @@ export default function TestingPage() {
                 )}
             </div>
          </div>
+         {sourcePickerOpen && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+                <div
+                    className="w-full max-w-2xl rounded-[28px] border p-6 shadow-2xl"
+                    style={{
+                        background: "var(--color-background-secondary)",
+                        borderColor: "var(--color-border-secondary)",
+                        color: "var(--color-text-primary)",
+                    }}
+                >
+                    <div className="mb-5 flex items-start justify-between gap-4">
+                        <div>
+                            <h2 className="text-xl font-bold">Choose sources to test</h2>
+                            <p className="mt-1 text-sm" style={{ color: "var(--color-text-tertiary)" }}>
+                                Auto-create test questions from existing uploaded sources, or upload a new workbook/table first.
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setSourcePickerOpen(false)}
+                            className="rounded-full p-2 transition-colors hover:bg-white/10"
+                            aria-label="Close source picker"
+                        >
+                            <X size={18} />
+                        </button>
+                    </div>
+
+                    <div className="mb-4 flex flex-wrap items-center gap-3">
+                        <FilePickButton
+                            onPick={handleUploadSource}
+                            disabled={uploadingSource}
+                            title="Upload a source"
+                            variant="card"
+                            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+                        >
+                            <UploadCloud size={16} />
+                            {uploadingSource ? "Uploading..." : "Upload a source"}
+                        </FilePickButton>
+                        <button
+                            type="button"
+                            onClick={loadSources}
+                            disabled={sourcesLoading}
+                            className="rounded-xl px-4 py-2 text-sm font-semibold transition-colors disabled:opacity-50"
+                            style={{ background: "var(--color-background-primary)", color: "var(--color-text-secondary)" }}
+                        >
+                            Refresh sources
+                        </button>
+                    </div>
+
+                    {pendingUpload && (
+                        <div className="mb-4 rounded-2xl border p-4" style={{ borderColor: "var(--color-border-tertiary)", background: "var(--color-background-primary)" }}>
+                            <div className="mb-3 text-sm font-semibold">Finish loading {pendingUpload.fileName}</div>
+                            <div className="mb-4 grid max-h-48 gap-2 overflow-y-auto pr-1">
+                                {pendingUpload.options.map((option) => (
+                                    <label key={option.value} className="flex cursor-pointer items-center gap-3 rounded-xl p-3 text-sm" style={{ background: "var(--color-background-elevated)" }}>
+                                        <input
+                                            type={pendingUpload.multiSelect ? "checkbox" : "radio"}
+                                            name="pending-auto-source"
+                                            checked={pendingUpload.selected.includes(option.value)}
+                                            onChange={() => {
+                                                setPendingUpload((current) => {
+                                                    if (!current) return current;
+                                                    const selected = current.multiSelect
+                                                        ? current.selected.includes(option.value)
+                                                            ? current.selected.filter((value) => value !== option.value)
+                                                            : [...current.selected, option.value]
+                                                        : [option.value];
+                                                    return { ...current, selected };
+                                                });
+                                            }}
+                                        />
+                                        {option.label}
+                                    </label>
+                                ))}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={handleResolvePendingUpload}
+                                disabled={uploadingSource || pendingUpload.selected.length === 0}
+                                className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                                Add selected source
+                            </button>
+                        </div>
+                    )}
+
+                    <div className="max-h-72 overflow-y-auto pr-1">
+                        {sourcesLoading ? (
+                            <div className="py-8 text-center text-sm" style={{ color: "var(--color-text-tertiary)" }}>Loading uploaded sources...</div>
+                        ) : sources.length === 0 ? (
+                            <div className="rounded-2xl border border-dashed p-8 text-center" style={{ borderColor: "var(--color-border-tertiary)", color: "var(--color-text-tertiary)" }}>
+                                No uploaded sources yet.
+                            </div>
+                        ) : (
+                            <div className="grid gap-2">
+                                {sources.map((source) => (
+                                    <label
+                                        key={source.id}
+                                        className="flex cursor-pointer items-center justify-between gap-4 rounded-2xl border p-4 transition-colors"
+                                        style={{
+                                            borderColor: selectedSourceIds.includes(source.id) ? "#3b82f6" : "var(--color-border-tertiary)",
+                                            background: selectedSourceIds.includes(source.id) ? "rgba(59,130,246,0.12)" : "var(--color-background-primary)",
+                                        }}
+                                    >
+                                        <span className="flex items-center gap-3">
+                                            <input
+                                                type="checkbox"
+                                                aria-label={source.name}
+                                                checked={selectedSourceIds.includes(source.id)}
+                                                onChange={() => {
+                                                    setSelectedSourceIds((current) =>
+                                                        current.includes(source.id)
+                                                            ? current.filter((id) => id !== source.id)
+                                                            : [...current, source.id],
+                                                    );
+                                                }}
+                                            />
+                                            <span>
+                                                <span className="block text-sm font-semibold">{source.name}</span>
+                                                <span className="text-xs uppercase tracking-widest" style={{ color: "var(--color-text-tertiary)" }}>
+                                                    {source.kind} • {source.rows?.toLocaleString?.() ?? source.rows ?? 0} rows
+                                                </span>
+                                            </span>
+                                        </span>
+                                    </label>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {autoError && <div className="mt-4 rounded-xl bg-red-500/10 p-3 text-sm text-red-500">{autoError}</div>}
+
+                    <div className="mt-6 flex justify-end gap-3">
+                        <button
+                            type="button"
+                            onClick={() => setSourcePickerOpen(false)}
+                            className="rounded-xl px-4 py-2 text-sm font-semibold"
+                            style={{ background: "var(--color-background-primary)", color: "var(--color-text-secondary)" }}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleGenerateFromSelectedSources}
+                            disabled={isAutoGenerating || selectedSourceIds.length === 0}
+                            className="rounded-xl bg-emerald-600 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+                        >
+                            {isAutoGenerating ? "Generating..." : "Generate from selected sources"}
+                        </button>
+                    </div>
+                </div>
+            </div>
+         )}
          
          <style jsx>{`
             .custom-scrollbar::-webkit-scrollbar {

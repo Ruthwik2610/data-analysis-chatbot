@@ -32,6 +32,8 @@ When touching admin navigation, dashboards, cards, or shell layout:
 - Add or update a focused frontend test if the change affects navigation, shell controls, visibility, or theme behavior.
 - Avoid hardcoded `text-white`, `text-white/*`, `bg-white/*`, and `border-white/*` classes in admin components unless paired with a scoped theme-safe override.
 
+Admin workflows that require data sources must never dead-end at a backend “attach a source first” error. The UI must provide a path to select existing uploaded sources and a path to upload or attach a new source, with a focused regression test for that flow.
+
 # Model Routing
 
 This project intentionally uses DeepSeek models through OpenRouter:
