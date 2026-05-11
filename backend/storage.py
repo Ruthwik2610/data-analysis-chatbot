@@ -179,6 +179,7 @@ CREATE INDEX IF NOT EXISTS idx_workbook_views_connector ON workbook_views(connec
 CREATE TABLE IF NOT EXISTS test_suites (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
   created_at REAL NOT NULL
 );
 
@@ -278,6 +279,7 @@ class Storage:
             self._ensure_column(con, "mcp_connectors", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
             self._ensure_column(con, "project_files", "source_id", "TEXT REFERENCES sources(id) ON DELETE SET NULL")
             self._ensure_column(con, "messages", "trace_id", "TEXT")
+            self._ensure_column(con, "test_suites", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(con, "test_queries", "expected_answer", "TEXT")
             self._ensure_column(con, "test_runs", "status", "TEXT NOT NULL DEFAULT 'running'")
             self._ensure_column(con, "test_runs", "total_count", "INTEGER NOT NULL DEFAULT 0")
@@ -1261,15 +1263,16 @@ class Storage:
                 con.execute("UPDATE chats SET project_id = ? WHERE id = ? AND owner_id = ?", (project_id, chat_id, owner_id))
 
     # -- testing -------------------------------------------------------------
-    def create_test_suite(self, name: str) -> dict[str, Any]:
+    def create_test_suite(self, name: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         suite_id = f"ts_{uuid.uuid4().hex[:10]}"
         now = time.time()
+        metadata = metadata or {}
         with self._conn() as con:
             con.execute(
-                "INSERT INTO test_suites (id, name, created_at) VALUES (?, ?, ?)",
-                (suite_id, name, now),
+                "INSERT INTO test_suites (id, name, metadata_json, created_at) VALUES (?, ?, ?, ?)",
+                (suite_id, name, json.dumps(metadata), now),
             )
-        return {"id": suite_id, "name": name, "created_at": now}
+        return {"id": suite_id, "name": name, "metadata": metadata, "created_at": now}
 
     def list_test_suites(self) -> list[dict[str, Any]]:
         with self._conn() as con:
@@ -1282,7 +1285,27 @@ class Storage:
                 ORDER BY ts.created_at DESC
                 """
             ).fetchall()
-        return [dict(r) for r in rows]
+        suites = []
+        for row in rows:
+            suite = dict(row)
+            try:
+                suite["metadata"] = json.loads(suite.pop("metadata_json") or "{}")
+            except json.JSONDecodeError:
+                suite["metadata"] = {}
+            suites.append(suite)
+        return suites
+
+    def get_test_suite(self, suite_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute("SELECT * FROM test_suites WHERE id = ?", (suite_id,)).fetchone()
+        if not row:
+            return None
+        suite = dict(row)
+        try:
+            suite["metadata"] = json.loads(suite.pop("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            suite["metadata"] = {}
+        return suite
 
     def add_test_queries(self, suite_id: str, queries: list[dict[str, Any]]) -> None:
         now = time.time()

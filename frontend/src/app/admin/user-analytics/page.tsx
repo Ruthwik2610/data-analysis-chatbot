@@ -36,6 +36,17 @@ export default function UserAnalyticsPage() {
           </div>
         </section>
         <section className="rounded-[28px] border border-white/5 bg-white/[0.03] p-6">
+          <h2 className="mb-4 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-white/40"><WholeWord size={13} /> Industry Glossary Candidates</h2>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {(data.industry_vocabulary || []).map((item: any) => (
+              <div key={`${item.industry}-${item.term}`} className="rounded-2xl bg-white/5 p-4 text-sm text-white/70">
+                <div className="font-semibold">{item.term} · {item.industry}</div>
+                <div className="mt-1 text-xs text-white/35">{item.project_count} projects{item.columns?.length ? ` · ${item.columns.join(", ")}` : ""}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section className="rounded-[28px] border border-white/5 bg-white/[0.03] p-6">
           <h2 className="mb-4 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-white/40"><MessageSquare size={13} /> Feedback Signals</h2>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {(data.feedback_summary || []).map((item: any, index: number) => (

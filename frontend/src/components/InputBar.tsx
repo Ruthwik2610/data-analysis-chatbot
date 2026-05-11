@@ -42,6 +42,8 @@ export function InputBar({
   const ref = useRef<HTMLTextAreaElement>(null);
   const plugRef = useRef<HTMLButtonElement>(null);
   const recognitionRef = useRef<any>(null);
+  const voiceBaseRef = useRef("");
+  const voiceFinalRef = useRef("");
   const firstSource = selectedSources[0];
   const sourceOverflow = Math.max(0, selectedSources.length - 1);
 
@@ -78,14 +80,32 @@ export function InputBar({
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true;
+    recognition.interimResults = true;
     recognition.lang = "en-US";
 
+    voiceBaseRef.current = value.trim();
+    voiceFinalRef.current = "";
     recognition.onstart = () => setListening(true);
     recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setValue((prev) => (prev ? `${prev} ${transcript}` : transcript));
+      let finalTranscript = voiceFinalRef.current;
+      let interimTranscript = "";
+      for (let i = event.resultIndex || 0; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result?.[0]?.transcript || "";
+        if (result?.isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+      voiceFinalRef.current = finalTranscript;
+      setValue(
+        [voiceBaseRef.current, finalTranscript, interimTranscript]
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .join(" "),
+      );
     };
     recognition.onerror = () => setListening(false);
     recognition.onend = () => setListening(false);
@@ -147,6 +167,7 @@ export function InputBar({
           <button
             type="button"
             onClick={toggleListening}
+            aria-label={listening ? "Stop listening" : "Voice to chat"}
             className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[8px] text-[11.5px] transition-colors"
             style={{
               color: listening ? "#ef4444" : "var(--color-text-secondary)",

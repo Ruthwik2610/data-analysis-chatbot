@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Database, Folder, MessageSquare, Plus, X, Eye, ChevronLeft, UserRound, LayoutGrid } from "lucide-react";
+import { Bug, Folder, MessageSquare, Plus, X, Eye, ChevronLeft, UserRound, LayoutGrid } from "lucide-react";
 import type { ChatSummary, Source, Project } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
 import { SkeletonChatList } from "./SkeletonLoader";
@@ -42,7 +42,6 @@ const KIND_COLOR: Record<string, string> = {
 };
 
 export function Sidebar(p: SidebarProps) {
-  const [clearConfirm, setClearConfirm] = useState(false);
   return (
     <aside
       className="flex flex-col h-full flex-shrink-0 relative z-20"
@@ -73,35 +72,6 @@ export function Sidebar(p: SidebarProps) {
         >
           <ChevronLeft size={16} strokeWidth={1.7} />
         </button>
-      </div>
-
-      <div className="relative px-3 pt-4 pb-3">
-        <button
-          onClick={() => setClearConfirm(true)}
-          className="w-full flex items-center justify-center gap-2 px-3 py-3 text-[15px] font-semibold rounded-[12px] transition-colors"
-          style={{
-            border: "1px solid #1d4ed8",
-            color: "#ffffff",
-            background: "#2563eb",
-            boxShadow: "0 16px 30px -22px rgba(37, 99, 235, 0.9)",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = "#1d4ed8")}
-          onMouseLeave={(e) => (e.currentTarget.style.background = "#2563eb")}
-        >
-          <Plus size={18} strokeWidth={1.9} />
-          <span>Clear screen</span>
-        </button>
-        {clearConfirm && (
-          <ConfirmPopover
-            title="Clear this screen?"
-            body="Your saved chat history stays available."
-            onCancel={() => setClearConfirm(false)}
-            onConfirm={() => {
-              setClearConfirm(false);
-              p.onNewChat();
-            }}
-          />
-        )}
       </div>
 
       <div className="flex flex-col flex-1 overflow-y-auto min-h-0 scrollbar-thin pb-3">
@@ -203,34 +173,28 @@ export function Sidebar(p: SidebarProps) {
             Admin Control Center
           </Link>
         )}
+        {p.isAdmin && (
+          <Link
+            href="/admin/feedback"
+            className="mt-1 flex items-center gap-2 w-full px-3 py-2 rounded-[10px] text-[13px] transition-colors"
+            style={{
+              color: "var(--color-text-secondary)",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--color-background-primary)";
+              e.currentTarget.style.color = "var(--color-text-primary)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "var(--color-text-secondary)";
+            }}
+          >
+            <Bug size={13} strokeWidth={1.5} className="text-amber-500" />
+            Debug review inbox
+          </Link>
+        )}
       </div>
     </aside>
-  );
-}
-
-function ConfirmPopover({
-  title,
-  body,
-  onCancel,
-  onConfirm,
-}: {
-  title: string;
-  body: string;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <div
-      className="absolute left-3 right-3 top-[76px] z-20 rounded-[12px] p-3 text-[12px]"
-      style={{ background: "var(--color-background-elevated)", border: "1px solid var(--color-border-secondary)", boxShadow: "var(--shadow-lg)" }}
-    >
-      <div className="font-semibold" style={{ color: "var(--color-text-primary)" }}>{title}</div>
-      <div className="mt-1" style={{ color: "var(--color-text-tertiary)" }}>{body}</div>
-      <div className="mt-3 flex justify-end gap-2">
-        <button type="button" onClick={onCancel} className="rounded-[8px] px-2.5 py-1.5" style={{ color: "var(--color-text-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Cancel</button>
-        <button type="button" onClick={onConfirm} className="rounded-[8px] px-2.5 py-1.5 font-medium" style={{ background: "#2563eb", color: "#ffffff" }}>Clear</button>
-      </div>
-    </div>
   );
 }
 

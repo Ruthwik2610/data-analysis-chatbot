@@ -242,6 +242,55 @@ def test_admin_auto_suite_uses_selected_user_owned_source(isolated_server, monke
 
     assert response.status_code == 200
     assert response.json()["query_count"] >= 3
+    suites = storage.list_test_suites()
+    assert suites[0]["metadata"]["source_ids"] == ["src_user_orders"]
+
+
+def test_test_run_uses_live_query_path_with_suite_sources(isolated_server, monkeypatch):
+    import asyncio
+
+    server, storage, _pool = isolated_server
+    suite = storage.create_test_suite("Live smoke", metadata={"source_ids": ["src_orders"], "model_mode": "flash"})
+    storage.add_test_queries(suite["id"], [{"question": "What is revenue?", "category": "Smoke"}])
+    run = storage.create_test_run(suite["id"], {
+        "source_ids": ["src_orders"],
+        "project_id": None,
+        "model_mode": "flash",
+        "owner_id": "legacy",
+    })
+    calls = []
+
+    async def fake_live_query(question, snapshot):
+        calls.append({"question": question, "snapshot": snapshot})
+        return {
+            "answer": "Revenue is 42 from the live query path.",
+            "latency_ms": 12.0,
+            "trace_id": "trace_live",
+            "grade": None,
+            "reason": None,
+        }
+
+    def raw_router_should_not_run(*_args, **_kwargs):
+        raise AssertionError("test runs must not bypass the query endpoint")
+
+    monkeypatch.setattr(server, "_collect_live_test_query", fake_live_query, raising=False)
+    monkeypatch.setattr(server.ROUTER, "_generate_text", raw_router_should_not_run)
+
+    asyncio.run(server.run_test_suite_background(run["id"], suite["id"], run["snapshot"]))
+
+    evaluations = storage.list_test_evaluations(run["id"])
+    assert calls == [{
+        "question": "What is revenue?",
+        "snapshot": {
+            "source_ids": ["src_orders"],
+            "project_id": None,
+            "model_mode": "flash",
+            "owner_id": "legacy",
+        },
+    }]
+    assert evaluations[0]["answer"] == "Revenue is 42 from the live query path."
+    assert evaluations[0]["latency_ms"] == 12.0
+    assert evaluations[0]["trace_id"] == "trace_live"
 
 
 def test_admin_feedback_endpoint_lists_review_items(isolated_server, monkeypatch):
@@ -460,6 +509,64 @@ def test_project_memory_search_is_project_scoped(isolated_server):
 
     assert any("order_id" in item["content"] for item in results)
     assert all("Invoices are bill numbers" not in item["content"] for item in results)
+
+
+def test_project_vocabulary_learning_is_project_scoped_and_limited(isolated_server):
+    server, storage, _pool = isolated_server
+
+    project = storage.create_project("Restaurant ops")
+    storage.upsert_project_instructions(project["id"], {"category": "general", "notes": "", "metrics": {}, "entities": {}})
+    storage.upsert_source(
+        source_id="src_orders",
+        name="orders.csv",
+        kind="csv",
+        rows=10,
+        schema_json='{"columns":[{"name":"order_id"},{"name":"gmv"},{"name":"customer_segment"}]}',
+        origin={"type": "csv"},
+    )
+    storage.add_file_to_project(project["id"], None, source_id="src_orders")
+
+    server._learn_project_vocabulary(
+        project["id"],
+        "legacy",
+        "Show gmv by customer segment and promo cohort for restaurant ops",
+    )
+
+    instructions = storage.get_project_instructions(project["id"])
+    assert instructions["category"] == "sales"
+    assert instructions["dynamic_vocabulary"]["gmv"]["count"] == 1
+    assert instructions["dynamic_vocabulary"]["gmv"]["columns"] == ["gmv"]
+    assert instructions["dynamic_vocabulary"]["segment"]["columns"] == ["customer_segment"]
+    assert "show" not in instructions["dynamic_vocabulary"]
+
+
+def test_user_analytics_surfaces_shared_industry_glossary_candidates(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server, "_verify_admin", lambda request: None)
+    for title in ("Restaurant east", "Restaurant west"):
+        project = storage.create_project(title)
+        storage.upsert_project_instructions(project["id"], {
+            "category": "sales",
+            "dynamic_vocabulary": {
+                "gmv": {"count": 2, "columns": ["gmv"]},
+                "promo": {"count": 1},
+            },
+        })
+    finance = storage.create_project("Finance")
+    storage.upsert_project_instructions(finance["id"], {
+        "category": "finance",
+        "dynamic_vocabulary": {"gmv": {"count": 1}},
+    })
+
+    response = TestClient(server.app).get("/admin/user-analytics")
+
+    assert response.status_code == 200
+    assert response.json()["industry_vocabulary"] == [
+        {"industry": "sales", "term": "gmv", "project_count": 2, "columns": ["gmv"]},
+        {"industry": "sales", "term": "promo", "project_count": 2, "columns": []},
+    ]
 
 
 def test_upload_response_includes_clarification_suggestions(isolated_server, monkeypatch, tmp_path):

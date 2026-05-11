@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MessageList } from "../MessageList";
 import type { Message } from "@/lib/types";
 
@@ -132,5 +132,28 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByRole("button", { name: "Copy answer" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save to project notes" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Ask follow-up" })).toBeInTheDocument();
+  });
+
+  it("lets users rerun the previous question without showing debug reporting in chat", () => {
+    const onRetryQuestion = vi.fn();
+    render(
+      <MessageList
+        messages={[
+          { id: "u1", role: "user", content: "Show revenue by month" },
+          { id: "a1", role: "assistant", content: "Revenue peaked in May." },
+        ]}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+        onRetryQuestion={onRetryQuestion}
+        onFeedback={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rerun answer" }));
+
+    expect(onRetryQuestion).toHaveBeenCalledWith("Show revenue by month");
+    expect(screen.queryByRole("button", { name: "Report answer bug" })).not.toBeInTheDocument();
   });
 });

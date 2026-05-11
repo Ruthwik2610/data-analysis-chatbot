@@ -14,6 +14,7 @@ import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, clearAuthToken, getAuthToken, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
 import { formatArchiveSkippedNote, formatWorkbookMCPConnectedMessage } from "@/lib/uploadMessages";
+import { buildCustomSheetQuestion, buildSheetModeQuestion } from "@/lib/uploadPending";
 import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
@@ -144,16 +145,15 @@ export default function Home() {
         if ("pending" in res && res.pending) {
           const p = res.pending;
           if (p.kind === "sheet_pick" && p.sheets) {
+            const sheetQuestion = buildSheetModeQuestion({
+              fileName: p.file_name,
+              uploadId: p.upload_id,
+              sheets: p.sheets,
+            });
             updateMessage(placeholderId, {
               thinking: null,
-              content: `Got **${displaySourceName(p.file_name)}**. It has ${p.sheets.length} sheets — which one should I read?`,
-              pending: {
-                resolver: "sheet_pick",
-                hint: "Pick a sheet",
-                options: p.sheets.map((s) => ({ label: s, value: s })),
-                args: { upload_id: p.upload_id },
-                multiSelect: p.multi_select,
-              },
+              content: sheetQuestion.content,
+              pending: sheetQuestion.pending,
             });
           } else if (p.kind === "table_pick" && p.tables) {
             updateMessage(placeholderId, {
@@ -293,6 +293,46 @@ export default function Home() {
           refreshSources();
         } catch (e: any) {
           updateMessage(messageId, { thinking: null, content: `I loaded the file, but couldn't save that rule: ${e?.message || "unknown"}`, error: true });
+        }
+        return;
+      }
+
+      if (pending.resolver === "sheet_pick_mode") {
+        const mode = Array.isArray(value) ? value[0] : value;
+        const sheets = (pending.args.sheets || []) as string[];
+        if (mode === "custom_sheets") {
+          const customQuestion = buildCustomSheetQuestion({
+            fileName: pending.args.file_name,
+            uploadId: pending.args.upload_id,
+            sheets,
+          });
+          updateMessage(messageId, {
+            resolved: false,
+            thinking: null,
+            content: customQuestion.content,
+            pending: customQuestion.pending,
+          });
+          return;
+        }
+        updateMessage(messageId, { resolved: true, thinking: "Loading", content: msg.content });
+        try {
+          const resolved = await api.resolvePending(pending.args.upload_id, sheets, { publicBaseUrl: window.location.origin });
+          if ("sources" in resolved) {
+            const sources = resolved.sources;
+            setSelectedSourceIds((ids) => Array.from(new Set([
+              ...ids,
+              ...sources.map((source) => source.id),
+              ...(resolved.mcp_connector ? ["mcp"] : []),
+            ])));
+            updateMessage(messageId, {
+              thinking: null,
+              content: formatWorkbookMCPConnectedMessage(sources, resolved.mcp_connector, resolved.mcp_deploy_error),
+            });
+            refreshSources();
+            return;
+          }
+        } catch (e: any) {
+          updateMessage(messageId, { thinking: null, content: `Couldn't finish loading: ${e?.message || "unknown"}`, error: true });
         }
         return;
       }
@@ -800,6 +840,7 @@ export default function Home() {
           onSaveProjectNote={handleSaveProjectNote}
           onAskFollowUp={handleSend}
           onFeedback={handleFeedback}
+          onRetryQuestion={handleSend}
         />
         <InputBar
           onSend={handleSend}

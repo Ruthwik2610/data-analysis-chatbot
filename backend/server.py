@@ -140,6 +140,9 @@ class AdminLogin(BaseModel):
 
 class TestSuiteCreate(BaseModel):
     name: str
+    source_ids: list[str] | None = None
+    project_id: str | None = None
+    model_mode: str | None = None
 
 
 class TestQueriesBulk(BaseModel):
@@ -152,6 +155,13 @@ class AutoTestSuiteCreate(BaseModel):
     name: str | None = None
     source_ids: list[str] | None = None
     project_id: str | None = None
+
+
+class TestRunCreate(BaseModel):
+    suite_id: str
+    source_ids: list[str] | None = None
+    project_id: str | None = None
+    model_mode: str | None = None
 
 
 class FeedbackRequest(BaseModel):
@@ -1244,6 +1254,9 @@ async def user_analytics(request: Request, limit: int = 100):
             """,
             (limit,),
         ).fetchall()
+        instruction_rows = con.execute(
+            "SELECT project_id, instructions_json FROM project_instructions"
+        ).fetchall()
 
     stop_words = {"the", "and", "for", "with", "from", "this", "that", "what", "show", "give", "how", "can", "you", "about", "please"}
     vocab: dict[str, int] = {}
@@ -1252,6 +1265,34 @@ async def user_analytics(request: Request, limit: int = 100):
             if word not in stop_words:
                 vocab[word] = vocab.get(word, 0) + 1
 
+    industry_terms: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in instruction_rows:
+        try:
+            instructions = json.loads(row["instructions_json"] or "{}")
+        except Exception:
+            continue
+        industry = str(instructions.get("category") or "general").strip().lower() or "general"
+        for term, meta in (instructions.get("dynamic_vocabulary") or {}).items():
+            clean_term = str(term).strip().lower()
+            if not clean_term:
+                continue
+            item = industry_terms.setdefault((industry, clean_term), {"project_ids": set(), "columns": set()})
+            item["project_ids"].add(row["project_id"])
+            if isinstance(meta, dict):
+                item["columns"].update(str(col) for col in meta.get("columns", []) if str(col).strip())
+
+    industry_vocabulary = [
+        {
+            "industry": industry,
+            "term": term,
+            "project_count": len(meta["project_ids"]),
+            "columns": sorted(meta["columns"]),
+        }
+        for (industry, term), meta in industry_terms.items()
+        if len(meta["project_ids"]) >= 2
+    ]
+    industry_vocabulary.sort(key=lambda item: (-item["project_count"], item["industry"], item["term"]))
+
     return {
         "feedback_summary": [dict(r) for r in feedback_rows],
         "recent_errors": [dict(r) for r in error_rows],
@@ -1259,6 +1300,7 @@ async def user_analytics(request: Request, limit: int = 100):
             {"term": term, "count": count}
             for term, count in sorted(vocab.items(), key=lambda item: item[1], reverse=True)[:30]
         ],
+        "industry_vocabulary": industry_vocabulary[:30],
         "message_sample_size": len(user_rows),
     }
 
@@ -1289,7 +1331,12 @@ async def clear_cache_endpoint(request: Request):
 @app.post("/admin/testing/suites")
 async def create_test_suite(payload: TestSuiteCreate, request: Request):
     _verify_admin(request)
-    return DB.create_test_suite(payload.name)
+    metadata = {
+        "source_ids": payload.source_ids or [],
+        "project_id": payload.project_id,
+        "model_mode": payload.model_mode or "flash",
+    }
+    return DB.create_test_suite(payload.name, metadata=metadata)
 
 
 @app.get("/admin/testing/suites")
@@ -1381,7 +1428,14 @@ async def create_auto_test_suite(payload: AutoTestSuiteCreate, request: Request)
         raise HTTPException(status_code=400, detail="No sources available for auto test generation")
 
     name = payload.name or f"Auto suite {time.strftime('%Y-%m-%d %H:%M')}"
-    suite = DB.create_test_suite(name)
+    suite = DB.create_test_suite(
+        name,
+        metadata={
+            "source_ids": [source["id"] for source in sources],
+            "project_id": payload.project_id,
+            "model_mode": "flash",
+        },
+    )
     DB.add_test_queries(suite["id"], queries)
     return {**suite, "query_count": len(queries), "queries": queries}
 
@@ -1428,18 +1482,28 @@ async def grade_evaluation(evaluation_id: str, payload: TestEvaluationGrade, req
 
 
 @app.post("/admin/testing/runs")
-async def start_test_run(request: Request, background_tasks: BackgroundTasks, payload: dict = Body(...)):
+async def start_test_run(request: Request, background_tasks: BackgroundTasks, payload: TestRunCreate):
     _verify_admin(request)
-    suite_id = payload.get("suite_id")
-    if not suite_id:
-        raise HTTPException(status_code=400, detail="suite_id required")
+    suite_id = payload.suite_id
+    suite = DB.get_test_suite(suite_id)
+    if not suite:
+        raise HTTPException(status_code=404, detail="Test suite not found")
     
-    active_row = DB.get_active_source()
+    owner_id = _current_user_id(request)
+    active_row = DB.get_active_source(owner_id=owner_id)
+    suite_metadata = suite.get("metadata") or {}
+    source_ids = payload.source_ids or suite_metadata.get("source_ids") or []
+    if not source_ids and active_row:
+        source_ids = [active_row["id"]]
     snapshot = {
         "model": CONFIG.model,
         "agent_model": CONFIG.agent_model,
         "active_source": active_row["name"] if active_row else None,
         "active_source_id": active_row["id"] if active_row else None,
+        "source_ids": source_ids,
+        "project_id": payload.project_id if payload.project_id is not None else suite_metadata.get("project_id"),
+        "model_mode": payload.model_mode or suite_metadata.get("model_mode") or "flash",
+        "owner_id": owner_id,
     }
     run = DB.create_test_run(suite_id, snapshot)
     background_tasks.add_task(run_test_suite_background, run["id"], suite_id, snapshot)
@@ -1464,6 +1528,98 @@ async def list_test_evaluations(run_id: str, request: Request):
     }
 
 
+def _internal_test_request(owner_id: str) -> Request:
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/query",
+        "headers": [],
+        "client": ("127.0.0.1", 0),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+    request = Request(scope)
+    request.state.user_id = owner_id or "legacy"
+    return request
+
+
+def _json_event_data(data: Any) -> dict[str, Any]:
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            return parsed if isinstance(parsed, dict) else {"value": parsed}
+        except json.JSONDecodeError:
+            return {"raw": data}
+    return {}
+
+
+def _format_test_answer(answer: str, result_payload: dict[str, Any] | None) -> str:
+    clean_answer = answer.strip()
+    if not result_payload:
+        return clean_answer or "(no answer)"
+
+    if not clean_answer or clean_answer == "(no answer)":
+        clean_answer = _result_grounded_answer("", result_payload)
+
+    columns = result_payload.get("columns") or []
+    title = result_payload.get("title") or "Result"
+    rows = result_payload.get("row_count")
+    viz = result_payload.get("viz") or "table"
+    summary = f"Result card: {title}; rows={rows}; viz={viz}; columns={', '.join(map(str, columns[:8]))}"
+    return f"{clean_answer}\n\n{summary}".strip()
+
+
+async def _collect_live_test_query(question: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    started = time.time()
+    owner_id = str(snapshot.get("owner_id") or "legacy")
+    body = QueryRequest(
+        chat_id=None,
+        question=question,
+        source_ids=snapshot.get("source_ids") or None,
+        project_id=snapshot.get("project_id"),
+        model_mode=snapshot.get("model_mode") or "flash",
+    )
+    response = await query_endpoint(body, _internal_test_request(owner_id), BackgroundTasks())
+
+    answer_parts: list[str] = []
+    result_payload: dict[str, Any] | None = None
+    error_message = ""
+    done_payload: dict[str, Any] = {}
+
+    async for item in response.body_iterator:
+        if not isinstance(item, dict):
+            continue
+        event = item.get("event") or "message"
+        data = _json_event_data(item.get("data"))
+        if event == "text":
+            answer_parts.append(str(data.get("delta") or ""))
+        elif event == "result":
+            result_payload = data
+        elif event == "error":
+            error_message = str(data.get("message") or data.get("detail") or "Query failed")
+        elif event == "done":
+            done_payload = data
+
+    latency_ms = (time.time() - started) * 1000
+    if error_message:
+        return {
+            "answer": error_message,
+            "latency_ms": latency_ms,
+            "grade": "Error",
+            "reason": error_message,
+            "trace_id": done_payload.get("trace_id"),
+        }
+    return {
+        "answer": _format_test_answer("".join(answer_parts), result_payload),
+        "latency_ms": latency_ms,
+        "grade": None,
+        "reason": None,
+        "trace_id": done_payload.get("trace_id"),
+    }
+
+
 async def run_test_suite_background(run_id: str, suite_id: str, snapshot: dict):
     queries = DB.list_test_queries(suite_id)
     for q in queries:
@@ -1475,34 +1631,28 @@ async def run_test_suite_background(run_id: str, suite_id: str, snapshot: dict):
             
             start_time = time.time()
             try:
-                # For now, we use a simple text generation to simulate the test
-                # In Phase 5+, we should integrate the full query_engine pipeline.
-                prompt = f"Answer this data question: {q['question']}"
-                answer, usage = await asyncio.to_thread(ROUTER._generate_text, prompt, f"test_{run_id}_{q['id']}")
-                latency = (time.time() - start_time) * 1000
-                eval_id = DB.add_test_evaluation(run_id, q["id"], answer, latency, trace_id=trace_id)
+                result = await _collect_live_test_query(q["question"], snapshot)
+                eval_id = DB.add_test_evaluation(
+                    run_id,
+                    q["id"],
+                    result["answer"],
+                    result.get("latency_ms") or ((time.time() - start_time) * 1000),
+                    grade=result.get("grade"),
+                    reason=result.get("reason"),
+                    trace_id=result.get("trace_id") or trace_id,
+                )
                 
                 # Trigger AI auto-grading inside this background run.
-                if ROUTER.available:
+                if ROUTER.available and result.get("grade") != "Error":
                     from opentelemetry.trace import set_span_in_context
                     bg_context = set_span_in_context(span)
                     await evaluate_test_evaluation_background(
                         eval_id,
                         q["question"],
-                        answer,
+                        result["answer"],
                         q.get("expected_answer"),
                         parent_context=bg_context
                     )
-                
-                # Log token usage for test evaluation
-                DB.add_token_usage(
-                    project_id=None,
-                    user_id="system_test",
-                    model=ROUTER.model,
-                    prompt_tokens=usage.get("prompt_tokens", 0),
-                    completion_tokens=usage.get("completion_tokens", 0),
-                    purpose="testing",
-                )
             except Exception as e:
                 logging.error(f"Test run evaluation failed for query {q['id']}: {e}")
                 span.record_exception(e)
@@ -2205,6 +2355,52 @@ def apply_source_clarifications(source_id: str, body: SourceClarificationUpdate,
     return DB.upsert_source_instructions(source_id, normalized)
 
 
+VOCAB_STOP_WORDS = {
+    "the", "and", "for", "with", "from", "this", "that", "what", "show", "give", "how",
+    "can", "you", "about", "please", "tell", "need", "want", "all", "are", "was", "were",
+    "have", "has", "into", "over", "under", "when", "where", "which", "should", "would",
+}
+
+
+def _learn_project_vocabulary(project_id: str, owner_id: str, question: str) -> None:
+    project = DB.get_project(project_id, owner_id=owner_id)
+    if not project:
+        return
+
+    source_rows = [DB.get_source(f.get("source_id"), owner_id=owner_id) for f in project.get("files", []) if f.get("source_id")]
+    clean_rows = [row for row in source_rows if row]
+    instructions = DB.get_project_instructions(project_id) or {"category": "general", "notes": "", "metrics": {}, "entities": {}}
+    detected_category = detect_project_category(project, clean_rows)
+    if detected_category != "general" and instructions.get("category") in {None, "", "general"}:
+        instructions["category"] = detected_category
+
+    columns: set[str] = set()
+    for row in clean_rows:
+        columns.update(_source_allowed_columns_from_row(row))
+
+    dynamic = dict(instructions.get("dynamic_vocabulary") or {})
+    for term in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", question.lower()):
+        if term in VOCAB_STOP_WORDS:
+            continue
+        matched_columns = sorted(
+            column for column in columns
+            if term == column.lower() or term in column.lower().split("_")
+        )
+        if not matched_columns and len(term) < 4:
+            continue
+        entry = dict(dynamic.get(term) or {})
+        entry["count"] = min(int(entry.get("count") or 0) + 1, 1000)
+        if matched_columns:
+            entry["columns"] = matched_columns[:5]
+        dynamic[term] = entry
+
+    if len(dynamic) > 40:
+        dynamic = dict(sorted(dynamic.items(), key=lambda item: int(item[1].get("count") or 0), reverse=True)[:40])
+    instructions["dynamic_vocabulary"] = dynamic
+    DB.upsert_project_instructions(project_id, instructions)
+    DB.rebuild_project_memory(project_id)
+
+
 # -- chats -----------------------------------------------------------------
 @app.get("/chats")
 def list_chats(request: Request, project_id: str | None = None) -> list[dict[str, Any]]:
@@ -2782,9 +2978,67 @@ def _format_period_for_llm(value: Any) -> Any:
     return ts.strftime("%b %d, %Y %H:%M")
 
 
+class _DSMLStreamFilter:
+    _START = "<｜｜DSML"
+    _END = "</｜｜DSML｜｜tool_calls>"
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._in_dsml = False
+
+    @staticmethod
+    def _held_prefix_len(text: str, marker: str) -> int:
+        max_len = min(len(text), len(marker) - 1)
+        for size in range(max_len, 0, -1):
+            if marker.startswith(text[-size:]):
+                return size
+        return 0
+
+    def feed(self, chunk: str) -> str:
+        self._buffer += chunk
+        visible: list[str] = []
+        while self._buffer:
+            if self._in_dsml:
+                end_idx = self._buffer.find(self._END)
+                if end_idx < 0:
+                    keep = self._held_prefix_len(self._buffer, self._END)
+                    self._buffer = self._buffer[-keep:] if keep else ""
+                    return "".join(visible)
+                self._buffer = self._buffer[end_idx + len(self._END):]
+                self._in_dsml = False
+                continue
+
+            start_idx = self._buffer.find(self._START)
+            if start_idx >= 0:
+                visible.append(self._buffer[:start_idx])
+                self._buffer = self._buffer[start_idx:]
+                self._in_dsml = True
+                continue
+
+            keep = self._held_prefix_len(self._buffer, self._START)
+            if keep:
+                visible.append(self._buffer[:-keep])
+                self._buffer = self._buffer[-keep:]
+            else:
+                visible.append(self._buffer)
+                self._buffer = ""
+            return "".join(visible)
+        return "".join(visible)
+
+    def finish(self) -> str:
+        if self._in_dsml:
+            self._buffer = ""
+            self._in_dsml = False
+            return ""
+        tail = self._buffer
+        self._buffer = ""
+        return tail
+
+
 def _sanitize_assistant_text(text: str) -> str:
-    # 1. Remove DSML tool call markup
-    text = re.sub(r"<｜｜DSML｜｜tool_calls>.*?</｜｜DSML｜｜tool_calls>", "", text, flags=re.DOTALL)
+    stream_filter = _DSMLStreamFilter()
+    text = stream_filter.feed(text) + stream_filter.finish()
+    text = re.sub(r"<｜｜DSML.*?</｜｜DSML｜｜tool_calls>", "", text, flags=re.DOTALL)
     text = text.strip()
 
     # 2. Cap long bulleted lists to 5 items
@@ -2805,6 +3059,17 @@ def _sanitize_assistant_text(text: str) -> str:
         text = "\n".join(new_lines)
 
     return text.strip()
+
+
+def _finalize_visible_answer(raw_text: str, question: str, result_payload: dict[str, Any] | None = None) -> str:
+    text = _sanitize_assistant_text(raw_text)
+    if text and text != "(no answer)":
+        return text
+    if result_payload:
+        grounded = _result_grounded_answer(question, result_payload)
+        if grounded:
+            return grounded
+    return text or "(no answer)"
 
 
 def _result_grounded_answer(question: str, payload: dict[str, Any]) -> str:
@@ -3077,6 +3342,7 @@ async def _run_mcp_agent(
                 return "", str(exc), connector_id
 
         full_text_parts: list[str] = []
+        stream_filter = _DSMLStreamFilter()
         loop_metrics = {"round_count": 0, "tool_call_count": 0, "tool_error_count": 0, "thinking_event_count": 0}
         last_tool_call: dict[str, Any] | None = None
         agent = _get_domain_agent(chat_id)
@@ -3116,13 +3382,10 @@ async def _run_mcp_agent(
                         yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
                 elif kind == "text":
                     delta = ev.get("delta") or ""
-                    # Prevent raw DSML from hitting the UI
-                    if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
-                        full_text_parts.append(delta)
-                        pass
-                    else:
-                        full_text_parts.append(delta)
-                        yield {"event": "text", "data": json.dumps({"delta": delta})}
+                    full_text_parts.append(delta)
+                    visible_delta = stream_filter.feed(delta)
+                    if visible_delta:
+                        yield {"event": "text", "data": json.dumps({"delta": visible_delta})}
         except LLMUnavailable as exc:
             err_text = "All language models are unavailable right now. Try again in a moment."
             msg = DB.add_message(chat_id, "assistant", err_text, payload={"kind": "error", "detail": str(exc)})
@@ -3130,6 +3393,9 @@ async def _run_mcp_agent(
             yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
             return
 
+        final_visible_delta = stream_filter.finish()
+        if final_visible_delta:
+            yield {"event": "text", "data": json.dumps({"delta": final_visible_delta})}
         full_text = "".join(full_text_parts).strip() or "(no answer)"
 
         # Pick the LAST tabular tool result for charting (see docstring for rationale).
@@ -3150,7 +3416,7 @@ async def _run_mcp_agent(
             }
             yield {"event": "result", "data": json.dumps(result_payload, default=str)}
 
-        full_text = _sanitize_assistant_text(full_text)
+        full_text = _finalize_visible_answer(full_text, question, result_payload)
         assistant_payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "agent"}
         if result_payload:
             assistant_payload["result"] = result_payload
@@ -3252,6 +3518,7 @@ async def _run_local_agent(
             return text, None, "local"
 
         full_text_parts: list[str] = []
+        stream_filter = _DSMLStreamFilter()
         loop_metrics = {"round_count": 0, "tool_call_count": 0, "tool_error_count": 0, "thinking_event_count": 0}
 
         try:
@@ -3282,11 +3549,10 @@ async def _run_local_agent(
                         yield {"event": "thinking", "data": json.dumps({"step": "Got data"})}
                 elif kind == "text":
                     delta = ev.get("delta") or ""
-                    if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
-                        full_text_parts.append(delta)
-                    else:
-                        full_text_parts.append(delta)
-                        yield {"event": "text", "data": json.dumps({"delta": delta})}
+                    full_text_parts.append(delta)
+                    visible_delta = stream_filter.feed(delta)
+                    if visible_delta:
+                        yield {"event": "text", "data": json.dumps({"delta": visible_delta})}
         except LLMUnavailable as exc:
             err_msg = "All language models are rate-limited right now. Wait a minute and retry."
             DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
@@ -3294,6 +3560,9 @@ async def _run_local_agent(
             yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
             return
 
+        final_visible_delta = stream_filter.finish()
+        if final_visible_delta:
+            yield {"event": "text", "data": json.dumps({"delta": final_visible_delta})}
         full_text = "".join(full_text_parts).strip() or "(no answer)"
 
         # The last successful query's result is the chart card.
@@ -3312,7 +3581,7 @@ async def _run_local_agent(
             }
             yield {"event": "result", "data": json.dumps(result_payload, default=str)}
 
-        full_text = _sanitize_assistant_text(full_text)
+        full_text = _finalize_visible_answer(full_text, question, result_payload)
         payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": model_used}
         if result_payload:
             payload["result"] = result_payload
@@ -3431,6 +3700,7 @@ async def _run_multi_source_agent(
                 return "", str(exc), connector_id
 
         full_text_parts: list[str] = []
+        stream_filter = _DSMLStreamFilter()
         loop_metrics = {"round_count": 0, "tool_call_count": 0, "tool_error_count": 0, "thinking_event_count": 0}
         try:
             async for ev in router.agent_loop_stream(
@@ -3464,15 +3734,10 @@ async def _run_multi_source_agent(
                         yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
                 elif kind == "text":
                     delta = ev.get("delta") or ""
-                    # Prevent raw DSML from hitting the UI
-                    if "<｜｜DSML" in delta or "</｜｜DSML" in delta:
-                        full_text_parts.append(delta)
-                        # We still append the raw delta to the buffer so the agent can parse tool calls,
-                        # but we don't emit it to the user.
-                        pass
-                    else:
-                        full_text_parts.append(delta)
-                        yield {"event": "text", "data": json.dumps({"delta": delta})}
+                    full_text_parts.append(delta)
+                    visible_delta = stream_filter.feed(delta)
+                    if visible_delta:
+                        yield {"event": "text", "data": json.dumps({"delta": visible_delta})}
         except LLMUnavailable as exc:
             err_msg = "The language model is unavailable, so I can't run a multi-source agent query right now."
             msg = DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
@@ -3482,6 +3747,9 @@ async def _run_multi_source_agent(
         finally:
             span.end()
 
+        final_visible_delta = stream_filter.finish()
+        if final_visible_delta:
+            yield {"event": "text", "data": json.dumps({"delta": final_visible_delta})}
         full_text = "".join(full_text_parts).strip() or "(no answer)"
         result_payload: dict[str, Any] | None = None
         if collected:
@@ -3500,7 +3768,7 @@ async def _run_multi_source_agent(
         elif source_summaries:
             full_text = full_text if full_text != "(no answer)" else "I fetched data, but did not get a final table to show."
 
-        full_text = _sanitize_assistant_text(full_text)
+        full_text = _finalize_visible_answer(full_text, question, result_payload)
         payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "multi-source-agent"}
         if result_payload:
             payload["result"] = result_payload
@@ -3556,7 +3824,7 @@ async def _load_query_sources(
 
 
 @app.post("/query")
-async def query_endpoint(body: QueryRequest, request: Request):
+async def query_endpoint(body: QueryRequest, request: Request, background_tasks: BackgroundTasks):
     with TRACER.start_as_current_span("query") as span:
         trace_id = format(span.get_span_context().trace_id, '032x')
         owner_id = _current_user_id(request)
@@ -3577,6 +3845,8 @@ async def query_endpoint(body: QueryRequest, request: Request):
         question = body.question.strip()
         if not question:
             raise HTTPException(status_code=400, detail="Question is required")
+        if body.project_id:
+            _learn_project_vocabulary(body.project_id, owner_id, question)
 
         active_row = DB.get_active_source(owner_id=owner_id)
         pool = get_pool()
@@ -3808,6 +4078,7 @@ async def query_endpoint(body: QueryRequest, request: Request):
                             sample_df[col] = sample_df[col].apply(_format_period_for_llm)
                     sample = sample_df.to_dict(orient="records")
                     full_text_parts: list[str] = []
+                    stream_filter = _DSMLStreamFilter()
 
                     # Always compute the grand total for multi-row breakdowns so the answer can quote it
                     # without summing the (possibly truncated) sample. ~50ms extra DuckDB query.
@@ -3849,7 +4120,9 @@ async def query_endpoint(body: QueryRequest, request: Request):
                                 if chunk is None:
                                     break
                                 full_text_parts.append(chunk)
-                                yield {"event": "text", "data": json.dumps({"delta": chunk})}
+                                visible_chunk = stream_filter.feed(chunk)
+                                if visible_chunk:
+                                    yield {"event": "text", "data": json.dumps({"delta": visible_chunk})}
                         except LLMUnavailable as exc:
                             text = deterministic_summary(question, df, len(df))
                             full_text_parts = [text]
@@ -3859,7 +4132,10 @@ async def query_endpoint(body: QueryRequest, request: Request):
                         full_text_parts = [text]
                         yield {"event": "text", "data": json.dumps({"delta": text})}
 
-                    full_text = "".join(full_text_parts) or "(no answer)"
+                    final_visible_delta = stream_filter.finish()
+                    if final_visible_delta and llm_router.available:
+                        yield {"event": "text", "data": json.dumps({"delta": final_visible_delta})}
+                    full_text = _finalize_visible_answer("".join(full_text_parts) or "(no answer)", question, result_payload)
                     
                     # Log tokens for the answer (estimated for stream)
                     if llm_router.available:

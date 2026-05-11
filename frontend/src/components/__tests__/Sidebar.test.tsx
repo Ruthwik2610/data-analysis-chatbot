@@ -46,7 +46,7 @@ describe("Sidebar", () => {
     expect(screen.queryByText("pizza_sales.csv")).not.toBeInTheDocument();
   });
 
-  it("calls clear screen without deleting the current chat", () => {
+  it("keeps clear screen out of the sidebar", () => {
     const onNewChat = vi.fn();
     const onDeleteChat = vi.fn();
     render(
@@ -68,10 +68,8 @@ describe("Sidebar", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Clear screen" }));
-    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
-
-    expect(onNewChat).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Clear screen" })).not.toBeInTheDocument();
+    expect(onNewChat).not.toHaveBeenCalled();
     expect(onDeleteChat).not.toHaveBeenCalled();
   });
 
@@ -103,5 +101,6 @@ describe("Sidebar", () => {
     );
 
     expect(screen.getByRole("link", { name: "Admin Control Center" })).toHaveAttribute("href", "/admin");
+    expect(screen.getByRole("link", { name: "Debug review inbox" })).toHaveAttribute("href", "/admin/feedback");
   });
 });

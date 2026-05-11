@@ -20,6 +20,7 @@ interface MessageListProps {
   currentProjectId?: string | null;
   onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
   onAskFollowUp?: (content: string) => void;
+  onRetryQuestion?: (content: string) => void;
   onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
 }
 
@@ -32,7 +33,7 @@ function formatRelative(ts?: number): string {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
-export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentProjectId, onSaveProjectNote, onAskFollowUp, onFeedback }: MessageListProps) {
+export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback }: MessageListProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isStreaming = messages.some((m) => m.role === "assistant" && m.streaming);
 
@@ -61,6 +62,9 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
       <div className="flex flex-col gap-6">
         {messages.map((msg, idx) => {
             const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
+            const previousUserMessage = msg.role === "assistant"
+              ? [...messages.slice(0, idx)].reverse().find((item) => item.role === "user")
+              : undefined;
             return (
             <div key={msg.id} className={`flex flex-col w-full ${isConsecutive ? "mt-1.5" : ""}`}>
                 <Bubble
@@ -69,6 +73,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
                 currentProjectId={currentProjectId}
                 onSaveProjectNote={onSaveProjectNote}
                 onAskFollowUp={onAskFollowUp}
+                onRetryQuestion={previousUserMessage && onRetryQuestion ? () => onRetryQuestion(previousUserMessage.content) : undefined}
                 onFeedback={onFeedback}
                 />
                 {idx === lastResultIdx && onAskFollowUp && (
@@ -90,6 +95,7 @@ const Bubble = React.memo(function Bubble({
   currentProjectId,
   onSaveProjectNote,
   onAskFollowUp,
+  onRetryQuestion,
   onFeedback,
 }: {
   message: Message;
@@ -97,6 +103,7 @@ const Bubble = React.memo(function Bubble({
   currentProjectId?: string | null;
   onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
   onAskFollowUp?: (content: string) => void;
+  onRetryQuestion?: () => void;
   onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
 }) {
   if (message.role === "user") {
@@ -156,6 +163,7 @@ const Bubble = React.memo(function Bubble({
             canSave={!!currentProjectId}
             onSave={() => onSaveProjectNote?.(message)}
             onFollowUp={() => onAskFollowUp?.(`Follow up on this: ${message.content.slice(0, 240)}`)}
+            onRetry={onRetryQuestion}
             onFeedback={(rating, category) => onFeedback?.(message, rating, category)}
           />
         )}

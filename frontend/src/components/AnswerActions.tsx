@@ -1,16 +1,17 @@
 "use client";
 
-import { Bug, Copy, CornerDownRight, Save, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Copy, CornerDownRight, RotateCcw, Save, ThumbsDown, ThumbsUp } from "lucide-react";
 
 interface AnswerActionsProps {
   content?: string;
   canSave?: boolean;
   onSave?: () => void;
   onFollowUp?: () => void;
+  onRetry?: () => void;
   onFeedback?: (rating: number, category: string) => void;
 }
 
-export function AnswerActions({ content, canSave, onSave, onFollowUp, onFeedback }: AnswerActionsProps) {
+export function AnswerActions({ content, canSave, onSave, onFollowUp, onRetry, onFeedback }: AnswerActionsProps) {
   return (
     <div className="mt-2 flex flex-wrap items-center gap-1">
       {content && (
@@ -37,6 +38,19 @@ export function AnswerActions({ content, canSave, onSave, onFollowUp, onFeedback
         >
           <CornerDownRight size={12} />
           Follow-up
+        </button>
+      )}
+      {onRetry && (
+        <button
+          type="button"
+          aria-label="Rerun answer"
+          title="Rerun answer"
+          onClick={onRetry}
+          className="inline-flex items-center gap-1 rounded-[8px] px-2 py-1 text-[11.5px] hover:bg-black/5"
+          style={{ color: "var(--color-text-secondary)" }}
+        >
+          <RotateCcw size={12} />
+          Rerun
         </button>
       )}
       {canSave && onSave && (
@@ -75,17 +89,6 @@ export function AnswerActions({ content, canSave, onSave, onFollowUp, onFeedback
           >
             <ThumbsDown size={12} />
             Not helpful
-          </button>
-          <button
-            type="button"
-            aria-label="Report answer bug"
-            title="Report answer bug"
-            onClick={() => onFeedback(-1, "bug")}
-            className="inline-flex items-center gap-1 rounded-[8px] px-2 py-1 text-[11.5px] hover:bg-black/5"
-            style={{ color: "var(--color-text-secondary)" }}
-          >
-            <Bug size={12} />
-            Report
           </button>
         </>
       )}

@@ -88,6 +88,7 @@ export interface ResultPayload {
 }
 
 export type PendingResolver =
+  | "sheet_pick_mode"
   | "sheet_pick"
   | "table_pick"
   | "ingest_pick"

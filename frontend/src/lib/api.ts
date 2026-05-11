@@ -239,7 +239,8 @@ export const api = {
   listTestQueries: (suiteId: string) => jget<any[]>(`/admin/testing/suites/${suiteId}/queries`),
   addTestQueriesBulk: (suiteId: string, queries: any[], queriesText?: string) => 
     jpost<any>("/admin/testing/queries/bulk", { suite_id: suiteId, queries, queries_text: queriesText }),
-  startTestRun: (suiteId: string) => jpost<any>("/admin/testing/runs", { suite_id: suiteId }),
+  startTestRun: (suiteId: string, options?: { source_ids?: string[]; project_id?: string | null; model_mode?: ModelMode }) =>
+    jpost<any>("/admin/testing/runs", { suite_id: suiteId, ...(options || {}) }),
   createAutoTestSuite: (body: { name?: string; source_ids?: string[]; project_id?: string | null }) =>
     jpost<any>("/admin/testing/suites/auto", body),
   listTestRuns: (suiteId?: string) => jget<any[]>(suiteId ? `/admin/testing/runs?suite_id=${suiteId}` : "/admin/testing/runs"),

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { InputBar } from "../InputBar";
 import type { Source } from "@/lib/types";
 
@@ -135,5 +135,64 @@ describe("InputBar", () => {
 
     expect(onSend).not.toHaveBeenCalled();
     expect((textarea as HTMLTextAreaElement).value).toBe("top customers");
+  });
+
+  it("keeps voice recognition open and updates from later interim and final results", () => {
+    let recognition: any;
+    class MockSpeechRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = "";
+      onstart: (() => void) | null = null;
+      onresult: ((event: any) => void) | null = null;
+      onend: (() => void) | null = null;
+      start = vi.fn(() => this.onstart?.());
+      stop = vi.fn(() => this.onend?.());
+      constructor() {
+        recognition = this;
+      }
+    }
+    (window as any).SpeechRecognition = MockSpeechRecognition;
+
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onPickFile={vi.fn()}
+        onAttached={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Voice to chat" }));
+
+    expect(recognition.continuous).toBe(true);
+    expect(recognition.interimResults).toBe(true);
+
+    act(() => {
+      recognition.onresult({
+        resultIndex: 0,
+        results: [
+          { isFinal: true, 0: { transcript: "show revenue " } },
+          { isFinal: false, 0: { transcript: "by month" } },
+        ],
+      });
+    });
+
+    const textarea = screen.getByPlaceholderText(
+      "Ask about your data, drop a file, or paste a URL…",
+    ) as HTMLTextAreaElement;
+    expect(textarea.value).toBe("show revenue by month");
+
+    act(() => {
+      recognition.onresult({
+        resultIndex: 1,
+        results: [
+          { isFinal: true, 0: { transcript: "show revenue " } },
+          { isFinal: true, 0: { transcript: "by month for east" } },
+        ],
+      });
+    });
+
+    expect(textarea.value).toBe("show revenue by month for east");
   });
 });

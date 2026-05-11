@@ -34,6 +34,8 @@ export default function GradingInterface({ runId, onClose }: GradingInterfacePro
 
   useEffect(() => {
     loadEvaluations();
+    const timer = window.setInterval(loadEvaluations, 2500);
+    return () => window.clearInterval(timer);
   }, [runId]);
 
   const loadEvaluations = async () => {

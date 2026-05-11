@@ -7,7 +7,7 @@ vi.mock("@/components/admin/TestInputPane", () => ({
 }));
 
 vi.mock("@/components/admin/GradingInterface", () => ({
-  default: () => <div>Grading interface</div>,
+  default: ({ runId }: { runId: string }) => <div>Grading interface {runId}</div>,
 }));
 
 vi.mock("@/components/admin/TestingDashboard", () => ({
@@ -18,6 +18,7 @@ vi.mock("@/lib/api", () => ({
   api: {
     listTestSuites: vi.fn(),
     listTestRuns: vi.fn(),
+    startTestRun: vi.fn(),
     createAutoTestSuite: vi.fn(),
     listSources: vi.fn(),
     uploadFile: vi.fn(),
@@ -29,6 +30,7 @@ describe("TestingPage auto suite generation", () => {
   beforeEach(() => {
     (api.listTestSuites as any).mockResolvedValue([]);
     (api.listTestRuns as any).mockResolvedValue([]);
+    (api.startTestRun as any).mockResolvedValue({ id: "run_started", status: "running" });
     (api.createAutoTestSuite as any).mockResolvedValue({
       id: "suite_auto",
       name: "Auto suite",
@@ -80,5 +82,22 @@ describe("TestingPage auto suite generation", () => {
 
     expect(await screen.findByLabelText("orders.csv")).toBeInTheDocument();
     expect(screen.queryByLabelText("Workbook MCP")).not.toBeInTheDocument();
+  });
+
+  it("opens the live grading view after triggering a run", async () => {
+    (api.listTestSuites as any).mockResolvedValue([
+      { id: "suite_smoke", name: "Smoke suite", query_count: 6 },
+    ]);
+    (api.startTestRun as any).mockResolvedValue({ id: "run_live", status: "running" });
+
+    render(<TestingPage />);
+
+    fireEvent.click(await screen.findByText("Smoke suite"));
+    fireEvent.click(screen.getByRole("button", { name: /Trigger Run/i }));
+
+    await waitFor(() => {
+      expect(api.startTestRun).toHaveBeenCalledWith("suite_smoke");
+    });
+    expect(await screen.findByText("Grading interface run_live")).toBeInTheDocument();
   });
 });

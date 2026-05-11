@@ -108,9 +108,10 @@ export default function TestingPage() {
     if (!selectedSuiteId) return;
     setIsStartingRun(true);
     try {
-      await api.startTestRun(selectedSuiteId);
-      // Give it a moment then refresh runs
-      setTimeout(() => loadRuns(selectedSuiteId), 1000);
+      const run = await api.startTestRun(selectedSuiteId);
+      setSelectedRunId(run.id);
+      setShowDashboard(false);
+      await loadRuns(selectedSuiteId);
     } catch (err) {
       console.error(err);
       alert("Failed to start run.");
