@@ -154,6 +154,50 @@ export interface MCPConnector {
   description_status?: "metadata" | "generated" | string;
   scope?: "global" | "project" | string;
   project_ids?: string[];
+  cloudflare?: WorkbookMCPDeployment | null;
+}
+
+export interface WorkbookMCPDeployment {
+  connector_id: string;
+  worker_name: string;
+  worker_url: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkbookView {
+  id: string;
+  connector_id?: string;
+  name: string;
+  sql: string;
+  columns: string[];
+  row_count: number;
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface QueryLoopMetricsResponse {
+  summary: {
+    total_queries: number;
+    high_loop_queries: number;
+    avg_tool_calls: number;
+    avg_rounds: number;
+    total_tool_errors: number;
+  };
+  queries: Array<{
+    id: string;
+    question: string;
+    route: string;
+    round_count: number;
+    tool_call_count: number;
+    tool_error_count: number;
+    thinking_event_count: number;
+    created_at: number;
+    chat_id?: string | null;
+    chat_title?: string | null;
+    project_name?: string | null;
+    trace_id?: string | null;
+  }>;
 }
 
 export interface UploadResponse {

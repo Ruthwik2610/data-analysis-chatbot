@@ -443,6 +443,8 @@ def parse_tool_result_to_dataframe(text: str):
 
 def extract_text_content(result: Any) -> str:
     """Pulls a plain string out of an MCP CallToolResult."""
+    if isinstance(result, str):
+        return result
     content = getattr(result, "content", None)
     if content is None:
         return ""

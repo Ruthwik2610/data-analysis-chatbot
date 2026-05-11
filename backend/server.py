@@ -78,6 +78,25 @@ class MCPUpdate(BaseModel):
     url: str | None = None
 
 
+class CloudflareWorkbookDeploy(BaseModel):
+    public_base_url: str | None = None
+    worker_name: str | None = None
+
+
+class WorkbookViewUpsert(BaseModel):
+    name: str | None = None
+    sql: str
+
+
+class WorkbookViewMerge(BaseModel):
+    name: str
+    left_table: str
+    right_table: str
+    left_key: str
+    right_key: str
+    join_type: str = "inner"
+
+
 class AttachExcelMCP(BaseModel):
     path: str
     sheet: str | None = None
@@ -348,7 +367,12 @@ async def auth_middleware(request: Request, call_next):
     # CORS preflight is handled by CORSMiddleware before this runs.
     request.state.user_id = "legacy"
     path = request.url.path
-    if request.method == "OPTIONS" or path in PUBLIC_PATHS or path.startswith("/admin/"):
+    if (
+        request.method == "OPTIONS"
+        or path in PUBLIC_PATHS
+        or path.startswith("/admin/")
+        or path.startswith("/mcp/workbooks/")
+    ):
         return await call_next(request)
     if not USER_AUTH_REQUIRED or not API_KEY:
         return await call_next(request)
@@ -761,6 +785,7 @@ def _serialize_mcp_connector(state: Any) -> dict[str, Any]:
     record = DB.get_mcp_connector(state.id)
     if record is None:
         record = _persist_mcp_state(state)
+    deployment = DB.get_workbook_mcp_deployment(state.id)
     tools = state.tools if state.status == "connected" else record.get("tools", [])
     return {
         "id": state.id,
@@ -775,7 +800,152 @@ def _serialize_mcp_connector(state: Any) -> dict[str, Any]:
         "description_status": record.get("description_status", "metadata"),
         "scope": record.get("scope", "global"),
         "project_ids": DB.connector_project_ids(state.id),
+        "cloudflare": deployment,
     }
+
+
+def _safe_worker_name(raw: str) -> str:
+    name = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")
+    return (name or "unipro-workbook-mcp")[:63]
+
+
+def _safe_workbook_view_name(raw: str) -> str:
+    name = re.sub(r"[^0-9a-zA-Z_]+", "_", raw.strip()).strip("_").lower()
+    if not name:
+        raise HTTPException(status_code=400, detail="View name is required")
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$", name):
+        raise HTTPException(status_code=400, detail="View name must start with a letter or underscore")
+    return name
+
+
+def _get_workbook_connector_state(connector_id: str) -> Any:
+    state = get_pool().connectors.get(connector_id)
+    if not state or state.status != "connected" or not hasattr(state, "_excel_connector"):
+        raise HTTPException(status_code=404, detail="Workbook MCP connector not found")
+    connector = getattr(state, "_excel_connector", None)
+    if not connector or not hasattr(connector, "db_path"):
+        raise HTTPException(status_code=400, detail="Connector is not a workbook MCP")
+    return state
+
+
+def _refresh_workbook_connector_tools(connector_id: str) -> None:
+    state = get_pool().connectors.get(connector_id)
+    connector = getattr(state, "_excel_connector", None) if state else None
+    if not state or connector is None:
+        return
+    state.tools = connector.list_tools()
+    record = DB.get_mcp_connector(connector_id)
+    _persist_mcp_state(state, scope=record.get("scope", "global") if record else "global")
+
+
+def _preview_workbook_sql(connector_id: str, sql: str) -> tuple[list[str], int]:
+    state = _get_workbook_connector_state(connector_id)
+    connector = getattr(state, "_excel_connector")
+    validate_readonly_sql(sql)
+    import duckdb
+    con = duckdb.connect(connector.db_path)
+    try:
+        df = con.execute(f"SELECT * FROM ({sql}) AS view_preview LIMIT 1000").fetchdf()
+        count = con.execute(f"SELECT COUNT(*) FROM ({sql}) AS view_count").fetchone()[0]
+    finally:
+        con.close()
+    return [str(c) for c in df.columns], int(count or 0)
+
+
+def _apply_workbook_view(connector_id: str, name: str, sql: str) -> dict[str, Any]:
+    state = _get_workbook_connector_state(connector_id)
+    connector = getattr(state, "_excel_connector")
+    view_name = _safe_workbook_view_name(name)
+    columns, row_count = _preview_workbook_sql(connector_id, sql)
+    import duckdb
+    con = duckdb.connect(connector.db_path)
+    try:
+        con.execute(f"CREATE OR REPLACE VIEW {quote_ident(view_name)} AS {sql}")
+    finally:
+        con.close()
+    if view_name not in connector.table_names:
+        connector.table_names.append(view_name)
+    view = DB.upsert_workbook_view(
+        connector_id=connector_id,
+        name=view_name,
+        sql=sql,
+        columns=columns,
+        row_count=row_count,
+    )
+    _refresh_workbook_connector_tools(connector_id)
+    return view
+
+
+def build_cloudflare_workbook_worker() -> str:
+    return """
+export default {
+  async fetch(request, env) {
+    if (new URL(request.url).pathname !== "/mcp") {
+      return new Response("Not found", { status: 404 });
+    }
+    if (request.method !== "POST") {
+      return new Response("Method not allowed", { status: 405 });
+    }
+    const body = await request.text();
+    const response = await fetch(env.BACKEND_RPC_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-workbook-mcp-token": env.WORKBOOK_MCP_TOKEN
+      },
+      body
+    });
+    return new Response(await response.text(), {
+      status: response.status,
+      headers: { "content-type": "application/json" }
+    });
+  }
+};
+""".strip()
+
+
+def deploy_cloudflare_workbook_worker(*, script_name: str, backend_rpc_url: str, public_token: str) -> str:
+    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    api_token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+    api_key = os.getenv("CLOUDFLARE_API_KEY", "").strip()
+    api_email = os.getenv("CLOUDFLARE_API_EMAIL", "").strip()
+    if not account_id or not (api_token or (api_key and api_email)):
+        raise RuntimeError("Cloudflare credentials are not configured")
+
+    import requests
+
+    headers = {"Authorization": f"Bearer {api_token}"} if api_token else {"X-Auth-Key": api_key, "X-Auth-Email": api_email}
+    metadata = {
+        "main_module": "worker.js",
+        "compatibility_date": "2026-05-01",
+        "bindings": [
+            {"type": "plain_text", "name": "BACKEND_RPC_URL", "text": backend_rpc_url},
+            {"type": "plain_text", "name": "WORKBOOK_MCP_TOKEN", "text": public_token},
+        ],
+    }
+    files = {
+        "metadata": ("metadata.json", json.dumps(metadata), "application/json"),
+        "worker.js": ("worker.js", build_cloudflare_workbook_worker(), "application/javascript+module"),
+    }
+    base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
+    upload = requests.put(f"{base}/workers/scripts/{script_name}", headers=headers, files=files, timeout=30)
+    if not upload.ok:
+        raise RuntimeError(f"Cloudflare worker upload failed ({upload.status_code})")
+
+    subdomain_resp = requests.get(f"{base}/workers/subdomain", headers=headers, timeout=15)
+    if not subdomain_resp.ok:
+        raise RuntimeError(f"Cloudflare subdomain lookup failed ({subdomain_resp.status_code})")
+    subdomain = (subdomain_resp.json().get("result") or {}).get("subdomain")
+    if not subdomain:
+        raise RuntimeError("Cloudflare workers.dev subdomain is not configured")
+
+    requests.post(
+        f"{base}/workers/scripts/{script_name}/subdomain",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"enabled": True},
+        timeout=15,
+    )
+    return f"https://{script_name}.{subdomain}.workers.dev/mcp"
 
 
 def _verify_admin(request: Request):
@@ -902,6 +1072,7 @@ async def admin_stats(request: Request) -> dict[str, Any]:
 
     stats["token_usage_by_project"] = DB.list_token_usage_by_project()
     stats["token_usage_by_purpose"] = DB.list_token_usage_by_purpose()
+    stats["query_loop_summary"] = DB.query_loop_summary()
 
     if CONFIG.openrouter_api_key:
         def fetch_or():
@@ -996,6 +1167,15 @@ async def list_traces(request: Request, limit: int = 100):
             "hallucination_count": hallucination_count,
             "trace_volume": len(traces)
         }
+    }
+
+
+@app.get("/admin/query-loops")
+async def admin_query_loops(request: Request, limit: int = 100) -> dict[str, Any]:
+    _verify_admin(request)
+    return {
+        "summary": DB.query_loop_summary(),
+        "queries": DB.list_query_loop_metrics(limit=limit),
     }
 
 
@@ -1882,6 +2062,12 @@ async def resolve_pending(body: ResolvePending, request: Request) -> dict[str, A
                 )
                 state = get_pool().connectors[cid]
                 _persist_mcp_state(state, scope="global")
+                DB.upsert_workbook_mcp_metadata(
+                    connector_id=cid,
+                    db_path=sources[0].db_path or "",
+                    table_names=[source.table_name for source in sources],
+                    display_name=path.name,
+                )
                 result = {"sources": persisted, "mcp_connector": _serialize_mcp_connector(state)}
             else:
                 source = prepare_excel_source(path, body.value, LOGGERS["cache"])
@@ -2312,6 +2498,125 @@ async def remove_mcp_connector(connector_id: str) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.post("/mcp/workbooks/{connector_id}/rpc")
+async def workbook_mcp_rpc(connector_id: str, request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    token = request.headers.get("x-workbook-mcp-token", "")
+    if not token or not DB.verify_workbook_mcp_token(connector_id, token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    state = _get_workbook_connector_state(connector_id)
+    method = payload.get("method")
+    rpc_id = payload.get("id")
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": state.name, "version": "1.0.0"},
+                "capabilities": {"tools": {}},
+            },
+        }
+    if method == "notifications/initialized":
+        return {"jsonrpc": "2.0", "id": rpc_id, "result": {}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": state.tools}}
+    if method == "tools/call":
+        params = payload.get("params") or {}
+        tool_name = params.get("name")
+        if not isinstance(tool_name, str):
+            raise HTTPException(status_code=400, detail="tools/call requires params.name")
+        result = await get_pool().call_tool(connector_id, tool_name, params.get("arguments") or {})
+        text = extract_text_content(result)
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {"content": [{"type": "text", "text": text}]},
+        }
+    return {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+    }
+
+
+@app.post("/mcp/connectors/{connector_id}/cloudflare")
+async def deploy_workbook_mcp_to_cloudflare(connector_id: str, request: Request, body: CloudflareWorkbookDeploy) -> dict[str, Any]:
+    _verify_admin(request)
+    _get_workbook_connector_state(connector_id)
+    public_base = (body.public_base_url or str(request.base_url)).rstrip("/")
+    worker_name = _safe_worker_name(body.worker_name or f"unipro-{connector_id}-mcp")
+    public_token = secrets.token_urlsafe(32)
+    backend_rpc_url = f"{public_base}/mcp/workbooks/{connector_id}/rpc"
+    worker_url = await asyncio.to_thread(
+        deploy_cloudflare_workbook_worker,
+        script_name=worker_name,
+        backend_rpc_url=backend_rpc_url,
+        public_token=public_token,
+    )
+    deployment = DB.upsert_workbook_mcp_deployment(
+        connector_id=connector_id,
+        worker_name=worker_name,
+        worker_url=worker_url,
+        public_token=public_token,
+    )
+    return deployment
+
+
+@app.get("/mcp/connectors/{connector_id}/views")
+def list_workbook_views(connector_id: str) -> list[dict[str, Any]]:
+    _get_workbook_connector_state(connector_id)
+    return DB.list_workbook_views(connector_id)
+
+
+@app.post("/mcp/connectors/{connector_id}/views")
+def create_workbook_view(connector_id: str, body: WorkbookViewUpsert) -> dict[str, Any]:
+    name = body.name or "custom_view"
+    return _apply_workbook_view(connector_id, name, body.sql.strip())
+
+
+@app.patch("/mcp/connectors/{connector_id}/views/{view_name}")
+def update_workbook_view(connector_id: str, view_name: str, body: WorkbookViewUpsert) -> dict[str, Any]:
+    existing = DB.get_workbook_view(connector_id, _safe_workbook_view_name(view_name))
+    if not existing:
+        raise HTTPException(status_code=404, detail="Workbook view not found")
+    return _apply_workbook_view(connector_id, view_name, body.sql.strip())
+
+
+@app.delete("/mcp/connectors/{connector_id}/views/{view_name}")
+def delete_workbook_view(connector_id: str, view_name: str) -> dict[str, Any]:
+    state = _get_workbook_connector_state(connector_id)
+    connector = getattr(state, "_excel_connector")
+    safe_name = _safe_workbook_view_name(view_name)
+    import duckdb
+    con = duckdb.connect(connector.db_path)
+    try:
+        con.execute(f"DROP VIEW IF EXISTS {quote_ident(safe_name)}")
+    finally:
+        con.close()
+    connector.table_names = [t for t in connector.table_names if t != safe_name]
+    DB.delete_workbook_view(connector_id, safe_name)
+    _refresh_workbook_connector_tools(connector_id)
+    return {"ok": True}
+
+
+@app.post("/mcp/connectors/{connector_id}/views/merge")
+def merge_workbook_view(connector_id: str, body: WorkbookViewMerge) -> dict[str, Any]:
+    join_type = body.join_type.lower().strip()
+    if join_type not in {"inner", "left", "right", "full"}:
+        raise HTTPException(status_code=400, detail="Join type must be inner, left, right, or full")
+    name = _safe_workbook_view_name(body.name)
+    left = _safe_workbook_view_name(body.left_table)
+    right = _safe_workbook_view_name(body.right_table)
+    left_key = _safe_workbook_view_name(body.left_key)
+    right_key = _safe_workbook_view_name(body.right_key)
+    sql = (
+        f"SELECT * FROM {quote_ident(left)} "
+        f"{join_type.upper()} JOIN {quote_ident(right)} "
+        f"ON {quote_ident(left)}.{quote_ident(left_key)} = {quote_ident(right)}.{quote_ident(right_key)}"
+    )
+    return _apply_workbook_view(connector_id, name, sql)
+
+
 EXCEL_MCP_MAX_BYTES = 50 * 1024 * 1024  # 50MB
 
 
@@ -2671,6 +2976,7 @@ async def _run_mcp_agent(
     request_id: str,
     allowed_connector_ids: set[str] | None = None,
     llm_router: LLMRouter | None = None,
+    user_message_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     span = TRACER.start_span("mcp_agent")
     span.set_attribute("question", question)
@@ -2724,6 +3030,7 @@ async def _run_mcp_agent(
                 return "", str(exc), connector_id
 
         full_text_parts: list[str] = []
+        loop_metrics = {"round_count": 0, "tool_call_count": 0, "tool_error_count": 0, "thinking_event_count": 0}
         last_tool_call: dict[str, Any] | None = None
         agent = _get_domain_agent(chat_id)
         domain_prompt = agent.get_system_prompt() if agent else ""
@@ -2744,6 +3051,9 @@ async def _run_mcp_agent(
             ):
                 kind = ev["kind"]
                 if kind == "tool_call":
+                    loop_metrics["tool_call_count"] += 1
+                    loop_metrics["thinking_event_count"] += 1
+                    loop_metrics["round_count"] = max(loop_metrics["round_count"], int(ev.get("round") or 0) + 1)
                     last_tool_call = ev
                     connector_id = routing.get(ev["name"])
                     cname = name_lookup.get(connector_id, "MCP")
@@ -2751,7 +3061,9 @@ async def _run_mcp_agent(
                     step = f"Calling {ev['name']}({args_str}) on {cname}"
                     yield {"event": "thinking", "data": json.dumps({"step": step})}
                 elif kind == "tool_result":
+                    loop_metrics["thinking_event_count"] += 1
                     if ev.get("error"):
+                        loop_metrics["tool_error_count"] += 1
                         yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned an error"})}
                     else:
                         yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
@@ -2796,6 +3108,13 @@ async def _run_mcp_agent(
         if result_payload:
             assistant_payload["result"] = result_payload
         msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
+        DB.add_query_loop_metrics(
+            chat_id=chat_id,
+            message_id=user_message_id,
+            question=question,
+            route="mcp_agent",
+            **loop_metrics,
+        )
         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
     finally:
         span.end()
@@ -2809,6 +3128,7 @@ async def _run_local_agent(
     request_id: str,
     model_used: str,
     llm_router: LLMRouter | None = None,
+    user_message_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     span = TRACER.start_span("local_agent")
     span.set_attribute("question", question)
@@ -2885,6 +3205,7 @@ async def _run_local_agent(
             return text, None, "local"
 
         full_text_parts: list[str] = []
+        loop_metrics = {"round_count": 0, "tool_call_count": 0, "tool_error_count": 0, "thinking_event_count": 0}
 
         try:
             async for ev in router.agent_loop_stream(
@@ -2898,12 +3219,17 @@ async def _run_local_agent(
             ):
                 kind = ev["kind"]
                 if kind == "tool_call":
+                    loop_metrics["tool_call_count"] += 1
+                    loop_metrics["thinking_event_count"] += 1
+                    loop_metrics["round_count"] = max(loop_metrics["round_count"], int(ev.get("round") or 0) + 1)
                     sql_arg = (ev.get("args") or {}).get("query", "")
                     preview = sql_arg.replace("\n", " ").strip()[:120]
                     step = f"Querying: {preview}{'…' if len(sql_arg) > 120 else ''}"
                     yield {"event": "thinking", "data": json.dumps({"step": step})}
                 elif kind == "tool_result":
+                    loop_metrics["thinking_event_count"] += 1
                     if ev.get("error"):
+                        loop_metrics["tool_error_count"] += 1
                         yield {"event": "thinking", "data": json.dumps({"step": "Query returned an error — adjusting"})}
                     else:
                         yield {"event": "thinking", "data": json.dumps({"step": "Got data"})}
@@ -2944,6 +3270,13 @@ async def _run_local_agent(
         if result_payload:
             payload["result"] = result_payload
         msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
+        DB.add_query_loop_metrics(
+            chat_id=chat_id,
+            message_id=user_message_id,
+            question=question,
+            route="local_agent",
+            **loop_metrics,
+        )
         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
     finally:
         span.end()
@@ -2957,6 +3290,7 @@ async def _run_multi_source_agent(
     request_id: str,
     allowed_connector_ids: set[str] | None = None,
     llm_router: LLMRouter | None = None,
+    user_message_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     span = TRACER.start_span("multi_source_agent")
     span.set_attribute("question", question)
@@ -3050,6 +3384,7 @@ async def _run_multi_source_agent(
                 return "", str(exc), connector_id
 
         full_text_parts: list[str] = []
+        loop_metrics = {"round_count": 0, "tool_call_count": 0, "tool_error_count": 0, "thinking_event_count": 0}
         try:
             async for ev in router.agent_loop_stream(
                 request_id=request_id,
@@ -3062,6 +3397,9 @@ async def _run_multi_source_agent(
             ):
                 kind = ev["kind"]
                 if kind == "tool_call":
+                    loop_metrics["tool_call_count"] += 1
+                    loop_metrics["thinking_event_count"] += 1
+                    loop_metrics["round_count"] = max(loop_metrics["round_count"], int(ev.get("round") or 0) + 1)
                     if ev["name"] == "run_sql":
                         sql_arg = (ev.get("args") or {}).get("query", "")
                         preview = sql_arg.replace("\n", " ").strip()[:120]
@@ -3071,7 +3409,9 @@ async def _run_multi_source_agent(
                         cname = name_lookup.get(connector_id, "connected source")
                         yield {"event": "thinking", "data": json.dumps({"step": f"Fetching data from {cname}"})}
                 elif kind == "tool_result":
+                    loop_metrics["thinking_event_count"] += 1
                     if ev.get("error"):
+                        loop_metrics["tool_error_count"] += 1
                         yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned an error — adjusting"})}
                     else:
                         yield {"event": "thinking", "data": json.dumps({"step": f"{ev['name']} returned data"})}
@@ -3118,6 +3458,13 @@ async def _run_multi_source_agent(
         if result_payload:
             payload["result"] = result_payload
         msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
+        DB.add_query_loop_metrics(
+            chat_id=chat_id,
+            message_id=user_message_id,
+            question=question,
+            route="multi_source_agent",
+            **loop_metrics,
+        )
         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
     finally:
         span.end()
@@ -3205,7 +3552,7 @@ async def query_endpoint(body: QueryRequest, request: Request):
 
         # Store source_ids in user message payload so we can restore them when loading chat history
         user_payload: dict[str, Any] = {"source_ids": [row["id"] for row, _ in selected_sources]}
-        DB.add_message(chat_id, "user", question, payload=user_payload, trace_id=trace_id)
+        user_msg = DB.add_message(chat_id, "user", question, payload=user_payload, trace_id=trace_id)
         chat = DB.get_chat(chat_id, owner_id=owner_id)
         if chat and (not chat.get("title") or chat["title"] == "New chat"):
             DB.update_chat_title(chat_id, question[:60], owner_id=owner_id)
@@ -3282,7 +3629,7 @@ async def query_endpoint(body: QueryRequest, request: Request):
 
                 if len(selected_sources) > 1 or selected_mcp or (source is None and has_mcp):
                     try:
-                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router):
+                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router, user_msg["id"]):
                             yield ev
                     except Exception as exc:
                         log_event(LOGGERS["errors"], "multi_source_agent_error", request_id=request_id, error=str(exc))
@@ -3339,13 +3686,13 @@ async def query_endpoint(body: QueryRequest, request: Request):
 
                     # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
                     if route == "mcp" and has_mcp:
-                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router):
+                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router, user_msg["id"]):
                             yield ev
                         return
 
                     # Compound question that needs sequential SQL — route to local agent loop.
                     if intent.get("intent_type") == "multi_step" and source is not None:
-                        async for ev in _run_local_agent(chat_id, question, source, history, request_id, model_used, llm_router):
+                        async for ev in _run_local_agent(chat_id, question, source, history, request_id, model_used, llm_router, user_msg["id"]):
                             yield ev
                         return
 
@@ -3369,7 +3716,7 @@ async def query_endpoint(body: QueryRequest, request: Request):
                         # However, if the user explicitly asked about the "table" or "file" or if the
                         # prompt classified it explicitly as 'local' route, don't hallucinate MCP calls.
                         if has_mcp and route != "local" and "table" not in question.lower() and "file" not in question.lower():
-                            async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids, llm_router):
+                            async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids, llm_router, user_msg["id"]):
                                 yield ev
                             return
                         content = (

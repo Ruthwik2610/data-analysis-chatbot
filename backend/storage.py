@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import sqlite3
 import time
@@ -143,6 +145,37 @@ CREATE TABLE IF NOT EXISTS project_mcp_connectors (
 
 CREATE INDEX IF NOT EXISTS idx_project_mcp_project ON project_mcp_connectors(project_id);
 
+CREATE TABLE IF NOT EXISTS workbook_mcp_metadata (
+  connector_id TEXT PRIMARY KEY REFERENCES mcp_connectors(id) ON DELETE CASCADE,
+  db_path TEXT NOT NULL,
+  table_names_json TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workbook_mcp_deployments (
+  connector_id TEXT PRIMARY KEY REFERENCES mcp_connectors(id) ON DELETE CASCADE,
+  worker_name TEXT NOT NULL,
+  worker_url TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workbook_views (
+  id TEXT PRIMARY KEY,
+  connector_id TEXT NOT NULL REFERENCES mcp_connectors(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  sql TEXT NOT NULL,
+  columns_json TEXT NOT NULL DEFAULT '[]',
+  row_count INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  UNIQUE(connector_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workbook_views_connector ON workbook_views(connector_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS test_suites (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -213,6 +246,21 @@ CREATE TABLE IF NOT EXISTS hallucination_logs (
   reason TEXT,
   created_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS query_loop_metrics (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+  message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
+  question TEXT NOT NULL,
+  route TEXT NOT NULL,
+  round_count INTEGER NOT NULL DEFAULT 0,
+  tool_call_count INTEGER NOT NULL DEFAULT 0,
+  tool_error_count INTEGER NOT NULL DEFAULT 0,
+  thinking_event_count INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_loop_metrics_created ON query_loop_metrics(created_at DESC);
 """
 
 
@@ -740,6 +788,178 @@ class Storage:
                 ).fetchall()
                 allowed.update(r["connector_id"] for r in project_rows)
         return allowed
+
+    def upsert_workbook_mcp_metadata(
+        self,
+        *,
+        connector_id: str,
+        db_path: str,
+        table_names: list[str],
+        display_name: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO workbook_mcp_metadata (connector_id, db_path, table_names_json, display_name, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(connector_id) DO UPDATE SET
+                  db_path=excluded.db_path,
+                  table_names_json=excluded.table_names_json,
+                  display_name=excluded.display_name,
+                  updated_at=excluded.updated_at
+                """,
+                (connector_id, db_path, json.dumps(table_names), display_name, now),
+            )
+        return {
+            "connector_id": connector_id,
+            "db_path": db_path,
+            "table_names": table_names,
+            "display_name": display_name,
+            "updated_at": now,
+        }
+
+    def get_workbook_mcp_metadata(self, connector_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT * FROM workbook_mcp_metadata WHERE connector_id = ?",
+                (connector_id,),
+            ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["table_names"] = json.loads(data.pop("table_names_json") or "[]")
+        return data
+
+    @staticmethod
+    def _token_hash(public_token: str) -> str:
+        return hashlib.sha256(public_token.encode("utf-8")).hexdigest()
+
+    def upsert_workbook_mcp_deployment(
+        self,
+        *,
+        connector_id: str,
+        worker_name: str,
+        worker_url: str,
+        public_token: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        existing = self.get_workbook_mcp_deployment(connector_id)
+        created_at = existing["created_at"] if existing else now
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO workbook_mcp_deployments (connector_id, worker_name, worker_url, token_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(connector_id) DO UPDATE SET
+                  worker_name=excluded.worker_name,
+                  worker_url=excluded.worker_url,
+                  token_hash=excluded.token_hash,
+                  updated_at=excluded.updated_at
+                """,
+                (connector_id, worker_name, worker_url, self._token_hash(public_token), created_at, now),
+            )
+        return {
+            "connector_id": connector_id,
+            "worker_name": worker_name,
+            "worker_url": worker_url,
+            "created_at": created_at,
+            "updated_at": now,
+        }
+
+    def get_workbook_mcp_deployment(self, connector_id: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT connector_id, worker_name, worker_url, created_at, updated_at FROM workbook_mcp_deployments WHERE connector_id = ?",
+                (connector_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def verify_workbook_mcp_token(self, connector_id: str, public_token: str) -> bool:
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT token_hash FROM workbook_mcp_deployments WHERE connector_id = ?",
+                (connector_id,),
+            ).fetchone()
+        if not row:
+            return False
+        return hmac.compare_digest(row["token_hash"], self._token_hash(public_token))
+
+    def upsert_workbook_view(
+        self,
+        *,
+        connector_id: str,
+        name: str,
+        sql: str,
+        columns: list[str],
+        row_count: int,
+    ) -> dict[str, Any]:
+        now = time.time()
+        view_id = f"view_{uuid.uuid4().hex[:10]}"
+        with self._conn() as con:
+            existing = con.execute(
+                "SELECT id, created_at FROM workbook_views WHERE connector_id = ? AND name = ?",
+                (connector_id, name),
+            ).fetchone()
+            if existing:
+                view_id = existing["id"]
+                created_at = existing["created_at"]
+            else:
+                created_at = now
+            con.execute(
+                """
+                INSERT INTO workbook_views (id, connector_id, name, sql, columns_json, row_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(connector_id, name) DO UPDATE SET
+                  sql=excluded.sql,
+                  columns_json=excluded.columns_json,
+                  row_count=excluded.row_count,
+                  updated_at=excluded.updated_at
+                """,
+                (view_id, connector_id, name, sql, json.dumps(columns), row_count, created_at, now),
+            )
+        return {
+            "id": view_id,
+            "connector_id": connector_id,
+            "name": name,
+            "sql": sql,
+            "columns": columns,
+            "row_count": row_count,
+            "created_at": created_at,
+            "updated_at": now,
+        }
+
+    def list_workbook_views(self, connector_id: str) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT * FROM workbook_views WHERE connector_id = ? ORDER BY name ASC",
+                (connector_id,),
+            ).fetchall()
+        views = []
+        for row in rows:
+            item = dict(row)
+            item["columns"] = json.loads(item.pop("columns_json") or "[]")
+            views.append(item)
+        return views
+
+    def get_workbook_view(self, connector_id: str, name: str) -> dict[str, Any] | None:
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT * FROM workbook_views WHERE connector_id = ? AND name = ?",
+                (connector_id, name),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["columns"] = json.loads(item.pop("columns_json") or "[]")
+        return item
+
+    def delete_workbook_view(self, connector_id: str, name: str) -> None:
+        with self._conn() as con:
+            con.execute(
+                "DELETE FROM workbook_views WHERE connector_id = ? AND name = ?",
+                (connector_id, name),
+            )
 
     # -- projects ------------------------------------------------------------
     def create_project(self, title: str, owner_id: str = "legacy") -> dict[str, Any]:
@@ -1353,6 +1573,97 @@ class Storage:
                 """,
                 (log_id, chat_id, message_id, score, reason, now),
             )
+
+    def add_query_loop_metrics(
+        self,
+        *,
+        chat_id: str,
+        message_id: str | None,
+        question: str,
+        route: str,
+        round_count: int = 0,
+        tool_call_count: int = 0,
+        tool_error_count: int = 0,
+        thinking_event_count: int = 0,
+    ) -> dict[str, Any]:
+        metric_id = f"loop_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO query_loop_metrics (
+                  id, chat_id, message_id, question, route, round_count,
+                  tool_call_count, tool_error_count, thinking_event_count, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    metric_id,
+                    chat_id,
+                    message_id,
+                    question,
+                    route,
+                    max(0, int(round_count or 0)),
+                    max(0, int(tool_call_count or 0)),
+                    max(0, int(tool_error_count or 0)),
+                    max(0, int(thinking_event_count or 0)),
+                    now,
+                ),
+            )
+        return {
+            "id": metric_id,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "question": question,
+            "route": route,
+            "round_count": max(0, int(round_count or 0)),
+            "tool_call_count": max(0, int(tool_call_count or 0)),
+            "tool_error_count": max(0, int(tool_error_count or 0)),
+            "thinking_event_count": max(0, int(thinking_event_count or 0)),
+            "created_at": now,
+        }
+
+    def list_query_loop_metrics(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT
+                  qlm.*,
+                  c.title AS chat_title,
+                  p.id AS project_id,
+                  p.title AS project_name,
+                  m.trace_id
+                FROM query_loop_metrics qlm
+                LEFT JOIN chats c ON c.id = qlm.chat_id
+                LEFT JOIN projects p ON p.id = c.project_id
+                LEFT JOIN messages m ON m.id = qlm.message_id
+                ORDER BY qlm.tool_call_count DESC, qlm.round_count DESC, qlm.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def query_loop_summary(self) -> dict[str, Any]:
+        with self._conn() as con:
+            row = con.execute(
+                """
+                SELECT
+                  COUNT(*) AS total_queries,
+                  SUM(CASE WHEN tool_call_count >= 3 OR round_count >= 3 THEN 1 ELSE 0 END) AS high_loop_queries,
+                  AVG(tool_call_count) AS avg_tool_calls,
+                  AVG(round_count) AS avg_rounds,
+                  SUM(tool_error_count) AS total_tool_errors
+                FROM query_loop_metrics
+                """
+            ).fetchone()
+        return {
+            "total_queries": int(row["total_queries"] or 0) if row else 0,
+            "high_loop_queries": int(row["high_loop_queries"] or 0) if row else 0,
+            "avg_tool_calls": round(float(row["avg_tool_calls"] or 0), 2) if row else 0,
+            "avg_rounds": round(float(row["avg_rounds"] or 0), 2) if row else 0,
+            "total_tool_errors": int(row["total_tool_errors"] or 0) if row else 0,
+        }
 
     def list_hallucination_logs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._conn() as con:

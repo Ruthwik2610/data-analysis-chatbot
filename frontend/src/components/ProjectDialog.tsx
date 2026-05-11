@@ -5,6 +5,7 @@ import { X, Plus, Trash2, FileText, Database, Server, Save, StickyNote, Wand2 } 
 import { api } from "@/lib/api";
 import type { MCPConnector, Project, ProjectNote, Source } from "@/lib/types";
 import { displaySourceName } from "@/lib/displayNames";
+import { WorkbookViewsPanel } from "./WorkbookViewsPanel";
 
 interface ProjectDialogProps {
   projectId: string;
@@ -21,6 +22,10 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
   const [selectedMcpId, setSelectedMcpId] = useState("");
   const [projectCategory, setProjectCategory] = useState("general");
   const [projectRules, setProjectRules] = useState("");
+  const [metricGlossary, setMetricGlossary] = useState("");
+  const [entityGlossary, setEntityGlossary] = useState("");
+  const [synonymGlossary, setSynonymGlossary] = useState("");
+  const [defaultDateColumn, setDefaultDateColumn] = useState("");
   const [savingRules, setSavingRules] = useState(false);
   const [selectedInstructionSourceId, setSelectedInstructionSourceId] = useState("");
   const [sourceRowGrain, setSourceRowGrain] = useState("row");
@@ -51,6 +56,10 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
       setNotes(noteData);
       setProjectCategory(projectInstructions.instructions.category || "general");
       setProjectRules(projectInstructions.instructions.notes || "");
+      setMetricGlossary(formatMetrics(projectInstructions.instructions.metrics || {}));
+      setEntityGlossary(formatEntities(projectInstructions.instructions.entities || {}));
+      setSynonymGlossary(formatSynonyms(projectInstructions.instructions.synonyms || {}));
+      setDefaultDateColumn(projectInstructions.instructions.default_date_column || "");
     } catch (err) {
       console.error("Failed to load project data", err);
     } finally {
@@ -139,6 +148,10 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
       await api.updateProjectInstructions(projectId, {
         category: projectCategory,
         notes: projectRules,
+        metrics: parseMetrics(metricGlossary),
+        entities: parseEntities(entityGlossary),
+        synonyms: parseSynonyms(synonymGlossary),
+        default_date_column: defaultDateColumn.trim() || undefined,
       });
       await api.rebuildProjectProfile(projectId);
       onUpdate();
@@ -187,7 +200,7 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-[4px] animate-in fade-in duration-300">
-      <div className="w-full max-w-lg flex flex-col max-h-[90vh] overflow-hidden glass rounded-[32px] shadow-2xl border border-secondary">
+      <div className="w-full max-w-4xl flex flex-col max-h-[90vh] overflow-hidden glass rounded-[32px] shadow-2xl border border-secondary">
         <div className="flex items-center justify-between p-6 border-b border-tertiary">
           <div className="min-w-0 flex-1 pr-3">
             <h2 className="text-xl font-bold text-primary truncate">
@@ -271,6 +284,42 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                 placeholder="Shared rules for this project context..."
                 className="min-h-[100px] resize-none px-4 py-3 text-sm bg-secondary border border-secondary rounded-2xl text-primary focus:outline-none focus:border-blue-500/50 transition-all placeholder:text-tertiary leading-relaxed"
               />
+              <div className="rounded-2xl border border-blue-500/10 bg-blue-500/[0.04] p-4">
+                <div className="mb-3">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-blue-300">Semantic glossary</p>
+                  <p className="mt-1 text-[11px] text-secondary">Metrics, entities, synonyms, and the default date column used during intent understanding.</p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <textarea
+                    aria-label="Metric glossary"
+                    value={metricGlossary}
+                    onChange={(e) => setMetricGlossary(e.target.value)}
+                    placeholder="revenue = total_price | sum"
+                    className="min-h-[76px] resize-none rounded-xl border border-secondary bg-secondary px-3 py-2 text-xs text-primary outline-none focus:border-blue-500/50"
+                  />
+                  <textarea
+                    aria-label="Entity glossary"
+                    value={entityGlossary}
+                    onChange={(e) => setEntityGlossary(e.target.value)}
+                    placeholder="order = order_id"
+                    className="min-h-[76px] resize-none rounded-xl border border-secondary bg-secondary px-3 py-2 text-xs text-primary outline-none focus:border-blue-500/50"
+                  />
+                  <textarea
+                    aria-label="Synonym glossary"
+                    value={synonymGlossary}
+                    onChange={(e) => setSynonymGlossary(e.target.value)}
+                    placeholder="revenue = sales, turnover"
+                    className="min-h-[76px] resize-none rounded-xl border border-secondary bg-secondary px-3 py-2 text-xs text-primary outline-none focus:border-blue-500/50"
+                  />
+                  <input
+                    aria-label="Default date column"
+                    value={defaultDateColumn}
+                    onChange={(e) => setDefaultDateColumn(e.target.value)}
+                    placeholder="order_date"
+                    className="h-[40px] rounded-xl border border-secondary bg-secondary px-3 py-2 text-xs text-primary outline-none focus:border-blue-500/50"
+                  />
+                </div>
+              </div>
             </div>
           </div>
 
@@ -318,7 +367,8 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                     </div>
                     ))}
                     {linkedMCPs.map((connector) => (
-                    <div key={connector.id} className="flex items-center justify-between p-4 bg-emerald-500/5 rounded-2xl border border-emerald-500/10 group hover:bg-emerald-500/10 transition-all">
+                    <div key={connector.id} className="flex flex-col gap-3">
+                    <div className="flex items-center justify-between p-4 bg-emerald-500/5 rounded-2xl border border-emerald-500/10 group hover:bg-emerald-500/10 transition-all">
                         <div className="flex items-center gap-4 min-w-0">
                             <div className="p-2.5 bg-emerald-500/10 rounded-xl text-emerald-400">
                                 <Server size={16} />
@@ -335,6 +385,10 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
                         >
                             <Trash2 size={14} />
                         </button>
+                    </div>
+                    {connector.is_excel && (
+                      <WorkbookViewsPanel connectorId={connector.id} connectorName={connector.name} />
+                    )}
                     </div>
                     ))}
                 </>
@@ -497,4 +551,56 @@ export function ProjectDialog({ projectId, onClose, onUpdate }: ProjectDialogPro
       `}</style>
     </div>
   );
+}
+
+function formatMetrics(metrics: Record<string, any>): string {
+  return Object.entries(metrics || {}).map(([name, value]) => {
+    const column = typeof value === "string" ? value : value?.column || "";
+    const aggregation = typeof value === "object" ? value?.aggregation : "";
+    return aggregation ? `${name} = ${column} | ${aggregation}` : `${name} = ${column}`;
+  }).join("\n");
+}
+
+function parseMetrics(text: string): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const line of text.split("\n")) {
+    const [rawName, rawRest] = line.split("=");
+    if (!rawName || !rawRest) continue;
+    const [column, aggregation] = rawRest.split("|").map((part) => part.trim()).filter(Boolean);
+    if (column) out[rawName.trim()] = { column, ...(aggregation ? { aggregation } : {}) };
+  }
+  return out;
+}
+
+function formatEntities(entities: Record<string, any>): string {
+  return Object.entries(entities || {}).map(([name, value]) => {
+    const column = typeof value === "string" ? value : value?.column || "";
+    return `${name} = ${column}`;
+  }).join("\n");
+}
+
+function parseEntities(text: string): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const line of text.split("\n")) {
+    const [rawName, rawColumn] = line.split("=");
+    if (rawName?.trim() && rawColumn?.trim()) out[rawName.trim()] = { column: rawColumn.trim() };
+  }
+  return out;
+}
+
+function formatSynonyms(synonyms: Record<string, any>): string {
+  return Object.entries(synonyms || {}).map(([name, value]) => {
+    const items = Array.isArray(value) ? value : [];
+    return `${name} = ${items.join(", ")}`;
+  }).join("\n");
+}
+
+function parseSynonyms(text: string): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const line of text.split("\n")) {
+    const [rawName, rawItems] = line.split("=");
+    if (!rawName?.trim() || !rawItems?.trim()) continue;
+    out[rawName.trim()] = rawItems.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+  return out;
 }

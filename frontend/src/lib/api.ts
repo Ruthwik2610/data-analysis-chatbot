@@ -1,4 +1,4 @@
-import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ProjectNote, ModelMode, InstructionsResponse } from "./types";
+import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ProjectNote, ModelMode, InstructionsResponse, QueryLoopMetricsResponse, WorkbookMCPDeployment, WorkbookView } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 const TOKEN_KEY = "datachat_user_token";
@@ -74,6 +74,7 @@ export const api = {
       return r.json();
     }),
   getUserAnalytics: () => jget<any>("/admin/user-analytics"),
+  getQueryLoops: () => jget<QueryLoopMetricsResponse>("/admin/query-loops"),
   clearCache: () => jpost<any>("/admin/maintenance/clear-cache", {}),
 
   listSources: (projectId?: string | null) =>
@@ -157,6 +158,24 @@ export const api = {
   removeMCPConnector: (id: string) => jdelete(`/mcp/connectors/${id}`),
   attachExcelMCP: (path: string, sheet?: string) =>
     jpost<MCPConnector>("/mcp/excel", { path, sheet: sheet || null }),
+  deployWorkbookCloudflare: (id: string, body: { public_base_url?: string; worker_name?: string }) =>
+    jpost<WorkbookMCPDeployment>(`/mcp/connectors/${id}/cloudflare`, body),
+  listWorkbookViews: (id: string) => jget<WorkbookView[]>(`/mcp/connectors/${id}/views`),
+  createWorkbookView: (id: string, body: { name: string; sql: string }) =>
+    jpost<WorkbookView>(`/mcp/connectors/${id}/views`, body),
+  mergeWorkbookView: (id: string, body: { name: string; left_table: string; right_table: string; left_key: string; right_key: string; join_type?: string }) =>
+    jpost<WorkbookView>(`/mcp/connectors/${id}/views/merge`, body),
+  updateWorkbookView: (id: string, viewName: string, body: { sql: string }) =>
+    fetch(`${BASE}/mcp/connectors/${id}/views/${encodeURIComponent(viewName)}`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      return r.json() as Promise<WorkbookView>;
+    }),
+  deleteWorkbookView: (id: string, viewName: string) =>
+    jdelete(`/mcp/connectors/${id}/views/${encodeURIComponent(viewName)}`),
 
   listProjects: () => jget<Project[]>("/projects"),
   createProject: (title: string) => jpost<Project>("/projects", { title }),

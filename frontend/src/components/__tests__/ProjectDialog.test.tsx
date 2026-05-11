@@ -46,7 +46,14 @@ vi.mock("@/lib/api", () => ({
     ]),
     getProjectInstructions: vi.fn().mockResolvedValue({
       project_id: "proj_1",
-      instructions: { category: "sales", notes: "Orders are distinct order_id." },
+      instructions: {
+        category: "sales",
+        notes: "Orders are distinct order_id.",
+        metrics: { revenue: { column: "total_price", aggregation: "sum" } },
+        entities: { order: { column: "order_id" } },
+        synonyms: { revenue: ["sales", "turnover"] },
+        default_date_column: "order_date",
+      },
     }),
     updateProjectInstructions: vi.fn().mockResolvedValue({
       project_id: "proj_1",
@@ -134,6 +141,10 @@ describe("ProjectDialog", () => {
       expect(api.updateProjectInstructions).toHaveBeenCalledWith("proj_1", {
         category: "sales",
         notes: "Revenue means total_price.",
+        metrics: { revenue: { column: "total_price", aggregation: "sum" } },
+        entities: { order: { column: "order_id" } },
+        synonyms: { revenue: ["sales", "turnover"] },
+        default_date_column: "order_date",
       });
     });
 
@@ -146,6 +157,22 @@ describe("ProjectDialog", () => {
       expect(api.updateSourceInstructions).toHaveBeenCalledWith("src_pizza", expect.objectContaining({
         row_grain: "line_item",
         notes: "Orders are distinct order_id.",
+      }));
+    });
+  });
+
+  it("edits semantic glossary fields for project intent understanding", async () => {
+    render(<ProjectDialog projectId="proj_1" onClose={vi.fn()} onUpdate={vi.fn()} />);
+
+    expect(await screen.findByLabelText("Metric glossary")).toHaveValue("revenue = total_price | sum");
+    fireEvent.change(screen.getByLabelText("Synonym glossary"), {
+      target: { value: "customer = client, account" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save rules" }));
+
+    await waitFor(() => {
+      expect(api.updateProjectInstructions).toHaveBeenCalledWith("proj_1", expect.objectContaining({
+        synonyms: { customer: ["client", "account"] },
       }));
     });
   });

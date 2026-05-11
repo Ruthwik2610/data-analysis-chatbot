@@ -378,14 +378,14 @@ class LLMRouter:
                             round_span.set_attribute("tool_name", tool_name)
                             round_span.set_attribute("tool_args", json.dumps(args))
                             
-                            yield {"kind": "tool_call", "name": tool_name, "args": args}
+                            yield {"kind": "tool_call", "name": tool_name, "args": args, "round": round_idx}
                             try:
                                 result_text, error, connector_id = await on_tool_call(tool_name, args)
                             except Exception as exc:
                                 result_text, error, connector_id = "", str(exc), None
                                 round_span.record_exception(exc)
                             
-                            yield {"kind": "tool_result", "name": tool_name, "text": result_text, "error": error, "connector_id": connector_id}
+                            yield {"kind": "tool_result", "name": tool_name, "text": result_text, "error": error, "connector_id": connector_id, "round": round_idx}
                             tool_content = json.dumps({"error": error}) if error else (result_text or "")
                             messages.append({
                                 "role": "tool",

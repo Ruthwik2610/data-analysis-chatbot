@@ -70,6 +70,7 @@ export default function AdminLayout({
                     <NavLink href="/admin/feedback" active={pathname === "/admin/feedback"}>Feedback</NavLink>
                     <NavLink href="/admin/user-analytics" active={pathname === "/admin/user-analytics"}>Users</NavLink>
                     <NavLink href="/admin/costs" active={pathname === "/admin/costs"}>Costs</NavLink>
+                    <NavLink href="/admin/query-loops" active={pathname === "/admin/query-loops"}>Loops</NavLink>
                     <NavLink href="/admin/testing" active={pathname === "/admin/testing"}>Testing Gateway</NavLink>
                 </div>
             </div>
