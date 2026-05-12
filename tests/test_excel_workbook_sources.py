@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from io import BytesIO
 import asyncio
+import logging
 
 import duckdb
+from openpyxl import Workbook
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
@@ -54,6 +56,55 @@ def test_selected_excel_sheets_become_tables_in_one_duckdb(tmp_path):
         tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
         assert tables == {"orders", "inventory"}
         assert con.execute('SELECT SUM(revenue) FROM "orders"').fetchone()[0] == pytest.approx(30.5)
+    finally:
+        con.close()
+
+
+def test_report_style_excel_sheet_detects_header_below_title_rows(tmp_path):
+    from src.data_sources import prepare_excel_source
+
+    workbook = tmp_path / "travel_report.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Spend Report"
+    ws["A1"] = "Corporate Travel Spend Report"
+    ws["A2"] = "Generated from BI export"
+    ws.append([])
+    ws.append(["Employee", "Total Spend", "Booking Date"])
+    ws.append(["Emp001", "1,250", "2026-05-01"])
+    ws.append(["Emp002", "2,500", "2026-05-02"])
+    wb.save(workbook)
+
+    source = prepare_excel_source(workbook, "Spend Report", logging.getLogger("test"))
+
+    assert source.row_count == 2
+    assert list(source.dataframe.columns) == ["employee", "total_spend", "booking_date"]
+    assert source.dataframe["total_spend"].sum() == 3750
+
+
+def test_workbook_ingestion_skips_chart_or_blank_sheets(tmp_path):
+    from src.data_sources import prepare_excel_workbook_duckdb_sources
+
+    workbook = tmp_path / "corporate_travel.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Charts_Dashboard"
+    data = wb.create_sheet("Bookings")
+    data.append(["BookingID", "Client", "Revenue"])
+    data.append(["BKG001", "Client ABC", 1250])
+    wb.save(workbook)
+
+    sources = prepare_excel_workbook_duckdb_sources(
+        workbook,
+        ["Charts_Dashboard", "Bookings"],
+        tmp_path / "cache",
+        None,
+    )
+
+    assert [source.display_name for source in sources] == ["corporate_travel.xlsx - Bookings"]
+    con = duckdb.connect(sources[0].db_path, read_only=True)
+    try:
+        assert con.execute('SELECT SUM(revenue) FROM "bookings"').fetchone()[0] == 1250
     finally:
         con.close()
 

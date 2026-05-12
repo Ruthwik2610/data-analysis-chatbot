@@ -420,29 +420,115 @@ def prepare_csv_memory_source(csv_path: Path, logger: Any) -> DataSource:
     return DataSource(source_kind="Uploaded CSV", schema=schema, display_name=csv_path.name, memory_key=memory_key, dataframe=df)
 
 
-def _read_xlsx_via_duckdb(excel_path: Path, sheet: str | int) -> pd.DataFrame:
-    # DuckDB's excel extension reads cell formatting metadata, so dates land as DATE/TIMESTAMP
-    # and numbers as DOUBLE/BIGINT — types that pandas+openpyxl drops on the floor.
-    import duckdb
+def _is_blank_excel_value(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
-    con = duckdb.connect()
+
+def _resolve_excel_sheet_name(excel_path: Path, sheet: str | int) -> str:
+    sheet_names = pd.ExcelFile(excel_path).sheet_names
+    if isinstance(sheet, int):
+        return sheet_names[sheet] if 0 <= sheet < len(sheet_names) else sheet_names[0]
+    return str(sheet)
+
+
+def _looks_like_header_value(value: Any) -> bool:
+    if _is_blank_excel_value(value):
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return False
+        return not _NUMBER_RE.match(text)
+    return False
+
+
+def _read_xlsx_table(excel_path: Path, sheet: str | int) -> pd.DataFrame:
+    from openpyxl import load_workbook
+
+    sheet_name = _resolve_excel_sheet_name(excel_path, sheet)
+    wb = load_workbook(excel_path, data_only=True, read_only=True)
     try:
-        try:
-            con.execute("LOAD excel")
-        except Exception:
-            con.execute("INSTALL excel")
-            con.execute("LOAD excel")
-        if isinstance(sheet, int):
-            sheet_names = pd.ExcelFile(excel_path).sheet_names
-            sheet_name = sheet_names[sheet] if 0 <= sheet < len(sheet_names) else sheet_names[0]
-        else:
-            sheet_name = str(sheet)
-        return con.execute(
-            "SELECT * FROM read_xlsx(?, header=true, ignore_errors=true, sheet=?)",
-            [str(excel_path), sheet_name],
-        ).df()
+        ws = wb[sheet_name]
+        rows = [list(row) for row in ws.iter_rows(values_only=True)]
     finally:
-        con.close()
+        wb.close()
+    return _extract_excel_table(rows, sheet_name)
+
+
+def _extract_excel_table(rows: list[list[Any]], sheet_name: str) -> pd.DataFrame:
+    non_empty_rows = [
+        idx for idx, row in enumerate(rows)
+        if any(not _is_blank_excel_value(value) for value in row)
+    ]
+    if not non_empty_rows:
+        raise ValueError(f"No tabular data found in sheet: {sheet_name}")
+
+    row_start, row_end = non_empty_rows[0], non_empty_rows[-1]
+    non_empty_cols = [
+        idx
+        for idx in range(max(len(row) for row in rows[row_start:row_end + 1]))
+        if any(idx < len(row) and not _is_blank_excel_value(row[idx]) for row in rows[row_start:row_end + 1])
+    ]
+    if not non_empty_cols:
+        raise ValueError(f"No tabular data found in sheet: {sheet_name}")
+
+    col_start, col_end = non_empty_cols[0], non_empty_cols[-1]
+    matrix = [
+        [(row[col] if col < len(row) else None) for col in range(col_start, col_end + 1)]
+        for row in rows[row_start:row_end + 1]
+    ]
+
+    best: tuple[float, int, list[int]] | None = None
+    for row_idx, row in enumerate(matrix[:50]):
+        header_cols = [idx for idx, value in enumerate(row) if not _is_blank_excel_value(value)]
+        if not header_cols:
+            continue
+        labels = [str(row[idx]).strip().lower() for idx in header_cols]
+        unique_count = len(set(labels))
+        if unique_count < max(1, len(labels) - 1):
+            continue
+        header_like = sum(1 for idx in header_cols if _looks_like_header_value(row[idx]))
+        if header_like < max(1, len(header_cols) // 2):
+            continue
+
+        min_values = 1 if len(header_cols) <= 2 else 2
+        body_rows = sum(
+            1
+            for body_row in matrix[row_idx + 1: row_idx + 11]
+            if sum(
+                1
+                for idx in header_cols
+                if idx < len(body_row) and not _is_blank_excel_value(body_row[idx])
+            ) >= min_values
+        )
+        if body_rows == 0 and any(any(not _is_blank_excel_value(value) for value in r) for r in matrix[row_idx + 1:]):
+            continue
+
+        score = (len(header_cols) * 4) + (header_like * 2) + (body_rows * 3) - row_idx
+        if best is None or score > best[0]:
+            best = (score, row_idx, header_cols)
+
+    if best is None:
+        raise ValueError(f"No tabular data found in sheet: {sheet_name}")
+
+    _, header_idx, header_cols = best
+    left, right = min(header_cols), max(header_cols)
+    selected_cols = [
+        idx for idx in range(left, right + 1)
+        if not _is_blank_excel_value(matrix[header_idx][idx])
+        or any(idx < len(row) and not _is_blank_excel_value(row[idx]) for row in matrix[header_idx + 1:])
+    ]
+    headers = [
+        str(matrix[header_idx][idx]).strip() if not _is_blank_excel_value(matrix[header_idx][idx]) else f"Column {pos + 1}"
+        for pos, idx in enumerate(selected_cols)
+    ]
+    data_rows = []
+    for row in matrix[header_idx + 1:]:
+        values = [row[idx] if idx < len(row) else None for idx in selected_cols]
+        if any(not _is_blank_excel_value(value) for value in values):
+            data_rows.append(values)
+    df = pd.DataFrame(data_rows, columns=headers).replace("", pd.NA)
+    return df.dropna(axis=1, how="all") if data_rows else df
 
 
 def prepare_excel_source(excel_path: Path, sheet_name: str | int | None, logger: Any) -> DataSource:
@@ -450,15 +536,17 @@ def prepare_excel_source(excel_path: Path, sheet_name: str | int | None, logger:
         raise FileNotFoundError(f"Excel file not found: {excel_path}")
     selected_sheet: str | int = 0 if sheet_name in {None, ""} else sheet_name
     if excel_path.suffix.lower() == ".xlsx":
-        df = _read_xlsx_via_duckdb(excel_path, selected_sheet)
+        df = _read_xlsx_table(excel_path, selected_sheet)
     else:
         # Legacy .xls — DuckDB's excel extension only reads .xlsx, so fall back to pandas.
         df = pd.read_excel(excel_path, sheet_name=selected_sheet)
     df = normalize_dataframe_columns(df)
+    df = coerce_numeric_columns(df)
     df = coerce_date_columns(df)
     memory_key = f"excel::{excel_path.resolve()}::{excel_path.stat().st_mtime_ns}::{selected_sheet}"
     schema = schema_from_dataframe(df, source_name=f"Excel sheet {selected_sheet}")
-    log_event(logger, "excel_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(excel_path))
+    if logger:
+        log_event(logger, "excel_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(excel_path))
     return DataSource(source_kind="Excel direct", schema=schema, display_name=excel_path.name, memory_key=memory_key, dataframe=df)
 
 
@@ -576,11 +664,16 @@ def prepare_excel_workbook_duckdb_sources(
     con = duckdb.connect(str(db_path))
     try:
         for sheet in selected:
-            if excel_path.suffix.lower() == ".xlsx":
-                df = _read_xlsx_via_duckdb(excel_path, sheet)
-            else:
-                df = pd.read_excel(excel_path, sheet_name=sheet)
-            df = coerce_date_columns(normalize_dataframe_columns(df))
+            try:
+                if excel_path.suffix.lower() == ".xlsx":
+                    df = _read_xlsx_table(excel_path, sheet)
+                else:
+                    df = pd.read_excel(excel_path, sheet_name=sheet)
+            except ValueError as exc:
+                if "No tabular data found" in str(exc):
+                    continue
+                raise
+            df = coerce_date_columns(coerce_numeric_columns(normalize_dataframe_columns(df)))
             table_name = _safe_table_name(sheet, seen)
             con.register("sheet_df", df)
             con.execute(f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM sheet_df')
@@ -597,6 +690,8 @@ def prepare_excel_workbook_duckdb_sources(
             )
     finally:
         con.close()
+    if not sources:
+        raise ValueError("No tabular data found in selected sheets")
     if logger:
         log_event(logger, "excel_workbook_converted_to_duckdb", sheets=len(sources), path=str(excel_path), db_path=str(db_path))
     return sources
