@@ -3635,6 +3635,23 @@ async def _run_multi_source_agent(
         router = llm_router or ROUTER
         pool = get_pool()
         specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
+        if len(specs) > 3:
+            yield {"event": "thinking", "data": json.dumps({"step": f"Searching through {len(specs)} available MCP tools..."})}
+            try:
+                tool_desc = "\n".join([f"- {s['name']}: {s.get('description', 'No description')}" for s in specs])
+                filter_prompt = (
+                    f"Question: {question}\n\n"
+                    f"Tools:\n{tool_desc}\n\n"
+                    "Based on the question, identify up to 3 most relevant tool names from the list above. "
+                    "Return ONLY their exact names separated by commas. Do not explain."
+                )
+                relevant_raw, _ = router._generate_text(filter_prompt, request_id)
+                relevant_names = [n.strip() for n in relevant_raw.split(',')]
+                filtered_specs = [s for s in specs if s['name'] in relevant_names]
+                if filtered_specs:
+                    specs = filtered_specs
+            except Exception as e:
+                log_event(LOGGERS["query"], "mcp_tool_search_error", request_id=request_id, error=str(e))
         loop = asyncio.get_running_loop()
         source_summaries = await loop.run_in_executor(None, lambda: _prepare_workspace_sync(chat_id, selected))
         join_candidates = _detect_join_candidates(source_summaries)
@@ -4109,6 +4126,75 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
                         return
 
+                    if intent.get("intent_type") == "multi_step":
+                        yield {"event": "thinking", "data": json.dumps({"step": f"Generating Python Data Analysis Script..."})}
+                        try:
+                            from backend.code_execution import CodeSandbox
+                            code_prompt = (
+                                f"Write a complete Python script using pandas to analyze a CSV file located at '/data.csv'.\n\n"
+                                f"Question: {question}\n\n"
+                                f"The data columns are: {source.allowed_columns}.\n"
+                                f"Print out the final answer clearly. If a chart is requested, use matplotlib to generate it (`plt.show()`).\n"
+                                f"Do NOT explain the code, just return the raw Python code wrapped in ```python."
+                            )
+                            script_raw, _ = router._generate_text(code_prompt, request_id)
+                            match = re.search(r"```(?:python)?\s+(.*?)\s+```", script_raw, re.DOTALL)
+                            script = match.group(1).strip() if match else script_raw.strip()
+
+                            yield {"event": "thinking", "data": json.dumps({"step": f"Executing Python Script in E2B Cloud Sandbox..."})}
+                            
+                            # Prepare data subset
+                            sample_df, _ = await loop.run_in_executor(
+                                None, lambda: _run_query(build_query_plan({"intent_type": "lookup", "limit": 5000}, question, source.allowed_columns), source)
+                            )
+                            csv_data = sample_df.to_csv(index=False)
+                            
+                            sandbox_start = time.perf_counter()
+                            with CodeSandbox() as sandbox:
+                                sandbox.sandbox.files.write("/data.csv", csv_data)
+                                execution_result = sandbox.run_python(script)
+                            sandbox_elapsed_ms = int((time.perf_counter() - sandbox_start) * 1000)
+                            
+                            viz = "card"
+                            b64_image = None
+                            for res in execution_result.get("results", []):
+                                if res["type"] == "image/png":
+                                    b64_image = res["data"]
+                                    viz = "chart"
+                            
+                            output_text = execution_result.get("output", "")
+                            if execution_result.get("error"):
+                                output_text += f"\n\nError: {execution_result['error']}"
+                                
+                            result_payload = {
+                                "title": "Python Sandbox Analysis",
+                                "viz": viz,
+                                "elapsed_ms": sandbox_elapsed_ms,
+                                "sql": script,
+                                "how": f"Source: {source.source_kind}. Model: {model_used}. Executed secure Python script in E2B.",
+                                "view_type": _get_view_type(chat_id),
+                                "columns": [],
+                                "rows": [],
+                                "image_b64": b64_image,
+                                "text_output": output_text
+                            }
+                            yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+                            
+                            summary_prompt = f"The python script produced this output:\n{output_text}\n\nSummarize the answer to the user's question: '{question}'. Keep it brief."
+                            yield {"event": "thinking", "data": json.dumps({"step": "Putting an answer together"})}
+                            full_text, _ = router._generate_text(summary_prompt, request_id)
+                            
+                            full_text = _finalize_visible_answer(full_text, question, result_payload)
+                            payload = {"kind": "result", "model": model_used, "result": result_payload}
+                            msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
+                            yield {"event": "text", "data": json.dumps({"delta": full_text})}
+                            yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+                            return
+                        except Exception as e:
+                            log_event(LOGGERS["query"], "sandbox_error", request_id=request_id, error=str(e))
+                            # Fallback to standard SQL execution on failure
+                            yield {"event": "thinking", "data": json.dumps({"step": f"Python Sandbox failed, falling back to SQL..."})}
+
                     plan = build_query_plan(intent, question, source.allowed_columns)
                     validate_readonly_sql(plan.sql)
 
@@ -4117,7 +4203,43 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     yield {"event": "thinking", "data": json.dumps({"step": f"Understood: {plan.title}{filter_note}"})}
                     yield {"event": "thinking", "data": json.dumps({"step": f"Querying {active_row['name']}"})}
 
-                    df, elapsed_ms = await loop.run_in_executor(None, lambda: _run_query(plan, source))
+                    max_retries = 3
+                    current_sql = plan.sql
+                    last_error = None
+                    df = None
+                    elapsed_ms = 0
+
+                    for attempt in range(max_retries):
+                        try:
+                            plan.sql = current_sql
+                            df, elapsed_ms = await loop.run_in_executor(None, lambda p=plan: _run_query(p, source))
+                            break
+                        except Exception as e:
+                            last_error = str(e)
+                            if attempt < max_retries - 1:
+                                yield {"event": "thinking", "data": json.dumps({"step": f"Correcting SQL syntax (Attempt {attempt+1}/{max_retries - 1})..."})}
+                                correction_prompt = (
+                                    f"The following DuckDB SQL query failed:\n\nSQL:\n{current_sql}\n\nError:\n{last_error}\n\n"
+                                    f"Context: The available columns are {source.allowed_columns}. "
+                                    f"Please output ONLY a corrected valid read-only DuckDB SQL query string wrapped in ```sql. Do not explain."
+                                )
+                                try:
+                                    corrected_sql_raw, _ = router._generate_text(correction_prompt, request_id)
+                                    match = re.search(r"```(?:sql)?\s+(.*?)\s+```", corrected_sql_raw, re.DOTALL)
+                                    if match:
+                                        current_sql = match.group(1).strip()
+                                    else:
+                                        current_sql = corrected_sql_raw.strip()
+                                    validate_readonly_sql(current_sql)
+                                except Exception as llm_error:
+                                    last_error = f"{last_error} (Correction failed: {llm_error})"
+                                    break
+                            else:
+                                break
+
+                    if df is None:
+                        raise ValueError(f"Failed to execute query after {max_retries} attempts. Last error: {last_error}")
+
                     log_event(LOGGERS["query"], "query_executed", request_id=request_id, source=source.source_kind, sql_hash=plan.cache_key, rows=len(df), elapsed_ms=elapsed_ms)
                     viz = choose_visualization(question, intent, df)
 
