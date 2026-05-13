@@ -9,6 +9,7 @@ import { ThinkingIndicator } from "./ThinkingIndicator";
 import { FilePickButton } from "./FilePickButton";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { AnswerActions } from "./AnswerActions";
+import { TravelResultPanel } from "./TravelResultPanel";
 import { FollowUpChips } from "./FollowUpChips";
 
 interface MessageListProps {
@@ -59,7 +60,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
 
   return (
     <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col min-h-0">
-      <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-6 mt-auto justify-end">
         {messages.map((msg, idx) => {
             const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
             const previousUserMessage = msg.role === "assistant"
@@ -168,6 +169,13 @@ const Bubble = React.memo(function Bubble({
           />
         )}
         {message.result && <ResultBlock result={message.result} />}
+        {message.travel_offers && message.travel_intent && (
+          <TravelResultPanel 
+            offers={message.travel_offers} 
+            intent={message.travel_intent}
+            onRefresh={onAskFollowUp ? () => onAskFollowUp("Refresh the flight prices for this search") : undefined}
+          />
+        )}
         {message.pending && !message.resolved && (
           <div className="mt-4 p-6 rounded-[24px] glass border-blue-500/10 bg-blue-500/[0.02]">
             <InlineQuestion

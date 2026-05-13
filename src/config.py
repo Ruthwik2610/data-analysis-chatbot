@@ -26,6 +26,7 @@ def load_dotenv_if_present(path: str = ".env") -> None:
             "DATA_PATH",
             "CACHE_DIR",
             "PROMPT_CHAR_BUDGET",
+            "DUFFEL_API_TOKEN",
         }:
             os.environ[clean_key] = clean_value
         else:
@@ -44,6 +45,7 @@ class AppConfig:
     admin_password: str | None
     phoenix_api_key: str | None
     phoenix_project_name: str
+    duffel_api_token: str | None = None
     max_preview_rows: int = 100
 
     @classmethod
@@ -68,4 +70,5 @@ class AppConfig:
             admin_password=os.getenv("ADMIN_PASSWORD") or None,
             phoenix_api_key=os.getenv("PHOENIX_API_KEY") or None,
             phoenix_project_name=os.getenv("PHOENIX_PROJECT_NAME", "data-analysis-chatbot"),
+            duffel_api_token=os.getenv("DUFFEL_API_TOKEN") or None,
         )

@@ -1,8 +1,10 @@
 from src.agents.base import DomainAgent
 from src.agents.education import EducationAgent
+from src.agents.travel import TravelAgent
 
 DOMAIN_AGENTS = {
-    "education": EducationAgent
+    "travel": TravelAgent,
+    "education": EducationAgent,
 }
 
 def get_agent_for_domain(domain: str) -> DomainAgent | None:

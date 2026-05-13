@@ -1,0 +1,71 @@
+{
+  "version": "2025-01",
+  "policy_name": "Unipro Corporate Travel Policy",
+  "effective_date": "2025-01-01",
+  "currency": "USD",
+  "tiers": {
+    "standard": {
+      "label": "Standard Employee",
+      "max_flight_budget_usd": 1500,
+      "allowed_cabin_classes": ["economy"],
+      "max_connections": 2,
+      "advance_booking_days": 14,
+      "preferred_airlines": ["UA", "DL", "AA", "LH", "EK"],
+      "hotel_max_per_night_usd": 200,
+      "car_rental_category": "compact",
+      "long_haul_exception_hours": 8,
+      "long_haul_allowed_class": "premium_economy"
+    },
+    "senior": {
+      "label": "Senior / Manager",
+      "max_flight_budget_usd": 3000,
+      "allowed_cabin_classes": ["economy", "premium_economy"],
+      "max_connections": 1,
+      "advance_booking_days": 7,
+      "preferred_airlines": ["UA", "DL", "AA", "LH", "EK", "SQ", "QF"],
+      "hotel_max_per_night_usd": 350,
+      "car_rental_category": "midsize",
+      "long_haul_exception_hours": 6,
+      "long_haul_allowed_class": "business"
+    },
+    "executive": {
+      "label": "Executive / Director+",
+      "max_flight_budget_usd": 8000,
+      "allowed_cabin_classes": ["economy", "premium_economy", "business"],
+      "max_connections": 1,
+      "advance_booking_days": 3,
+      "preferred_airlines": null,
+      "hotel_max_per_night_usd": 600,
+      "car_rental_category": "luxury",
+      "long_haul_exception_hours": 0,
+      "long_haul_allowed_class": "first"
+    }
+  },
+  "global_rules": [
+    "Book at least 7 days in advance unless a pre-approved exception has been granted",
+    "Flights over 6 hours duration may qualify for premium_economy with direct manager approval",
+    "All travel must be booked through the company platform or an approved corporate travel agent",
+    "Receipts required for all individual expenses over $25 USD",
+    "Loyalty miles and points may be retained by the traveler for personal use",
+    "Upgrades using company funds are not permitted — traveler-paid upgrades are allowed",
+    "Travel insurance is mandatory for international trips over 5 nights",
+    "Same-day return trips qualify for a $50 meal allowance"
+  ],
+  "approval_thresholds": {
+    "no_approval_required_usd": 500,
+    "manager_approval_usd": 2000,
+    "vp_approval_usd": 5000,
+    "cfo_approval_usd": 999999
+  },
+  "preferred_booking_window_days": {
+    "domestic": 14,
+    "international": 21,
+    "intercontinental": 30
+  },
+  "scoring_weights": {
+    "price_vs_budget": 0.40,
+    "preferred_airline": 0.25,
+    "stops_penalty": 0.20,
+    "advance_booking": 0.15
+  }
+}

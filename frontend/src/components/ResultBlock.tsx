@@ -51,11 +51,20 @@ export function ResultBlock({ result }: ResultBlockProps) {
         boxShadow: "var(--shadow-xl)",
       }}
     >
-      <div className="flex items-center justify-between mb-4">
-        <div className="text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: "var(--color-text-tertiary)" }}>
-          {result.title} · {result.row_count.toLocaleString()} rows
+      <div className="flex items-start justify-between mb-4">
+        <div className="flex flex-col gap-1.5">
+          <div className="text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: "var(--color-text-tertiary)" }}>
+            {result.title} · {result.row_count.toLocaleString()} rows
+          </div>
+          {result.how && (
+            <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 border border-blue-500/20 font-medium">
+                {result.how}
+              </span>
+            </div>
+          )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 mt-1">
           {hasChartControls && result.view_type !== "timetable" && (
             <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-secondary border border-tertiary">
               <span className="text-[9px] font-bold uppercase tracking-widest text-tertiary ml-1">Viz</span>

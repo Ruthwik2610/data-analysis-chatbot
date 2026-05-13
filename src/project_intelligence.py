@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any
 
+from src.domain_detection import detect_domain
+
 
 COUNT_WORDS = ("how many", "count", "number of")
 ROW_WORDS = ("row", "rows", "line item", "line items", "records")
@@ -112,18 +114,23 @@ def default_source_instructions(schema: dict[str, Any], display_name: str = "") 
 
 def detect_project_category(project: dict[str, Any] | None, source_rows: list[dict[str, Any]] | None = None) -> str:
     text_parts = [str((project or {}).get("title") or "")]
+    all_schemas: list[dict[str, Any]] = []
+
     for row in source_rows or []:
         text_parts.append(str(row.get("name") or ""))
         text_parts.append(str(row.get("kind") or ""))
         # Check direct columns list
         cols = row.get("columns") or []
+        col_dicts: list[dict[str, Any]] = []
         if isinstance(cols, list):
             for c in cols:
                 if isinstance(c, dict):
                     text_parts.append(str(c.get("name") or c.get("column") or ""))
+                    col_dicts.append(c)
                 else:
                     text_parts.append(str(c))
-        
+                    col_dicts.append({"name": str(c)})
+
         # Check schema_json if present
         schema_json = row.get("schema_json")
         if schema_json:
@@ -131,10 +138,24 @@ def detect_project_category(project: dict[str, Any] | None, source_rows: list[di
                 schema = json.loads(schema_json)
                 for c in schema.get("columns", []):
                     text_parts.append(str(c.get("name") or c.get("column") or ""))
+                all_schemas.append(schema)
             except Exception:
                 pass
+        elif col_dicts:
+            all_schemas.append({"columns": col_dicts})
 
+    # ── Schema-signal domain detection (travel, education) ────────────────
+    for schema in all_schemas:
+        domain = detect_domain(schema)
+        if domain == "travel":
+            return "travel"
+        if domain == "education":
+            return "education"
+
+    # ── Keyword fallback ─────────────────────────────────────────────────
     text = " ".join(text_parts).lower()
+    if any(term in text for term in ("airline", "flight", "departure", "arrival", "airport", "cabin", "pnr", "itinerary")):
+        return "travel"
     if any(term in text for term in ("pizza", "sales", "order", "revenue", "customer")):
         return "sales"
     if any(term in text for term in ("invoice", "ledger", "finance", "payment", "expense")):

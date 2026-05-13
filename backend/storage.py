@@ -262,6 +262,27 @@ CREATE TABLE IF NOT EXISTS query_loop_metrics (
 );
 
 CREATE INDEX IF NOT EXISTS idx_query_loop_metrics_created ON query_loop_metrics(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS travel_journeys (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
+  chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+  origin TEXT,
+  destination TEXT,
+  departure_date TEXT,
+  return_date TEXT,
+  passengers INTEGER,
+  cabin_class TEXT,
+  traveler_tier TEXT,
+  budget_limit_usd REAL,
+  selected_offer_id TEXT,
+  flight_offer_json TEXT,
+  status TEXT NOT NULL DEFAULT 'saved',
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_travel_journeys_owner ON travel_journeys(owner_id, created_at DESC);
 """
 
 
@@ -291,6 +312,7 @@ class Storage:
             self._ensure_column(con, "user_feedback", "category", "TEXT NOT NULL DEFAULT 'feedback'")
             self._ensure_column(con, "user_feedback", "status", "TEXT NOT NULL DEFAULT 'open'")
             self._ensure_column(con, "token_usage", "purpose", "TEXT NOT NULL DEFAULT 'chat'")
+            self._ensure_column(con, "travel_journeys", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
             self._ensure_project_memory_table(con)
             con.execute("PRAGMA journal_mode=WAL")
 
@@ -384,6 +406,36 @@ class Storage:
     def revoke_session(self, jti: str) -> None:
         with self._conn() as con:
             con.execute("UPDATE user_sessions SET revoked_at = ? WHERE token_jti = ?", (time.time(), jti))
+
+    # -- travel journeys -----------------------------------------------------
+    def create_travel_journey(self, owner_id: str, chat_id: str | None, intent: dict[str, Any], offer: dict[str, Any]) -> dict[str, Any]:
+        journey_id = f"journey_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT INTO travel_journeys (
+                  id, owner_id, chat_id, origin, destination, departure_date, return_date,
+                  passengers, cabin_class, traveler_tier, budget_limit_usd, selected_offer_id,
+                  flight_offer_json, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    journey_id, owner_id, chat_id,
+                    intent.get("origin"), intent.get("destination"),
+                    intent.get("departure_date"), intent.get("return_date"),
+                    intent.get("passengers"), intent.get("cabin_class"),
+                    intent.get("traveler_tier"), intent.get("budget_limit_usd"),
+                    offer.get("offer_id"), json.dumps(offer), "saved",
+                    now, now
+                )
+            )
+        return {"id": journey_id, "created_at": now}
+
+    def list_travel_journeys(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute("SELECT * FROM travel_journeys WHERE owner_id = ? ORDER BY created_at DESC", (owner_id,)).fetchall()
+        return [dict(r) for r in rows]
 
     # -- chats ---------------------------------------------------------------
     def create_chat(self, title: str | None = None, project_id: str | None = None, owner_id: str = "legacy") -> dict[str, Any]:

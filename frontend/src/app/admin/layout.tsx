@@ -69,8 +69,8 @@ export default function AdminLayout({
             </Link>
             
             <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
-                <img src="/unipro-icon.svg" alt="Unipro" className="w-5 h-5" />
-                <div className="flex items-center gap-6 ml-2">
+                <img src={theme === "dark" ? "/unipro-full-logo-dark.svg" : "/unipro-full-logo.svg"} alt="Unipro" className="h-6" />
+                <div className="flex items-center gap-6 ml-4">
                     <NavLink href="/admin" active={pathname === "/admin"}>Insights</NavLink>
                     <NavLink href="/admin/observability" active={pathname === "/admin/observability"}>Observability</NavLink>
                     <NavLink href="/admin/feedback" active={pathname === "/admin/feedback"}>Feedback</NavLink>

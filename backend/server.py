@@ -206,6 +206,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.agents import DomainAgent, get_agent_for_domain
 from src.config import AppConfig
+from src.travel_orchestrator import TravelOrchestrator
 from src.data_sources import (
     DataSource,
     dataframe_to_duckdb_source,
@@ -358,6 +359,23 @@ async def lifespan(app: FastAPI):
             _persist_mcp_state(state, scope="global")
     except Exception as exc:
         logging.warning("MCP auto-load failed: %s", exc)
+
+    # Auto-connect the Duffel MCP bridge if the API token is configured.
+    if CONFIG.duffel_api_token:
+        duffel_url = os.getenv("DUFFEL_MCP_URL", "http://localhost:8083/sse")
+        already_connected = any(
+            "duffel" in s.name.lower() for s in pool.connectors.values()
+        )
+        if not already_connected:
+            try:
+                cid = await pool.connect(url=duffel_url, name="Duffel Flights")
+                state = pool.connectors.get(cid)
+                if state:
+                    _persist_mcp_state(state, scope="global")
+                    logging.info("Duffel MCP bridge connected: %s", duffel_url)
+            except Exception as exc:
+                logging.warning("Duffel MCP auto-connect failed (start bridge first): %s", exc)
+
     pool.start_health_loop()
     try:
         yield
@@ -373,6 +391,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from backend.routes.travel_routes import router as travel_router
+app.include_router(travel_router)
 
 
 @app.middleware("http")
@@ -3945,7 +3966,49 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                 }
                 yield {"event": "thinking", "data": json.dumps({"step": "Reading your question"})}
 
+                # ── Travel domain fast-path ─────────────────────────────────────────
+                _proj_category = (project_instructions or {}).get("category", "")
+                _travel_keywords = ("flight", "airline", "airport", "fly ", "depart",
+                                    "cabin class", "economy class", "business class",
+                                    "travel to", "itinerary", " pnr ")
+                _is_travel_query = (
+                    _proj_category == "travel"
+                    or any(kw in question.lower() for kw in _travel_keywords)
+                )
+                if _is_travel_query and CONFIG.duffel_api_token:
+                    try:
+                        orchestrator = TravelOrchestrator()
+                        _src_ids = [row["id"] for row, _ in selected_sources]
+                        async for ev in orchestrator.run(
+                            question=question,
+                            chat_id=chat_id,
+                            source_ids=_src_ids or None,
+                            request_id=request_id,
+                            router=llm_router,
+                            pool=pool,
+                            db=DB,
+                            config=CONFIG,
+                        ):
+                            if ev.get("kind") == "thinking":
+                                yield {"event": "thinking", "data": json.dumps({"step": ev.get("step", ""), "progress": ev.get("progress")})}
+                            elif ev.get("kind") == "travel_result":
+                                _travel_payload = {
+                                    "kind": "travel_result",
+                                    "text": ev.get("text", ""),
+                                    "travel_offers": ev.get("travel_offers", []),
+                                    "travel_intent": ev.get("travel_intent", {}),
+                                }
+                                DB.add_message(chat_id, "assistant", ev.get("text", ""), payload=_travel_payload)
+                                yield {"event": "travel_result", "data": json.dumps(_travel_payload)}
+                                yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
+                        return
+                    except Exception as exc:
+                        log_event(LOGGERS["errors"], "travel_orchestrator_error", request_id=request_id, error=str(exc))
+                        # Fall through to standard SQL path on error
+                # ── End travel domain fast-path ────────────────────────────────────
+
                 if len(selected_sources) > 1 or selected_mcp or (source is None and has_mcp):
+
                     try:
                         async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router, user_msg["id"]):
                             yield ev

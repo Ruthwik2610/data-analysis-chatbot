@@ -112,6 +112,37 @@ export interface ModelFallbackNotice {
   reason: string;
 }
 
+export interface TravelIntent {
+  origin: string | null;
+  destination: string | null;
+  departure_date: string | null;
+  return_date: string | null;
+  passengers: number;
+  cabin_class: string;
+  traveler_tier: string;
+  budget_limit_usd: number;
+}
+
+export interface TravelOffer {
+  offer_id: string;
+  airline: string;
+  airline_iata: string;
+  origin: string;
+  destination: string;
+  departure_at: string;
+  arrival_at: string;
+  duration_minutes: number;
+  stops: number;
+  cabin_class: string;
+  price_usd: number;
+  currency: string;
+  policy_compliant: boolean;
+  policy_violation_reason: string | null;
+  booking_redirect_url: string;
+  expires_at: string | null;
+  score: number;
+}
+
 export type Message =
   | { id: string; role: "user"; content: string; created_at?: number }
   | {
@@ -128,6 +159,8 @@ export type Message =
       pending?: Pending;
       resolved?: boolean;
       notice?: ModelFallbackNotice | null;
+      travel_intent?: TravelIntent;
+      travel_offers?: TravelOffer[];
     };
 
 export type SSEEvent =
@@ -138,6 +171,7 @@ export type SSEEvent =
   | { event: "clarify"; data: { content: string; message_id: string } }
   | { event: "error"; data: { message: string; detail?: string } }
   | { event: "notice"; data: ModelFallbackNotice }
+  | { event: "travel_result"; data: { text: string; travel_intent: TravelIntent; travel_offers: TravelOffer[] } }
   | { event: "done"; data: { message_id?: string; chat_id: string } };
 
 export type MCPStatus = "connecting" | "connected" | "error";
