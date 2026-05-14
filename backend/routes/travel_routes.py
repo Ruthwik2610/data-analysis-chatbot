@@ -1,7 +1,7 @@
 import io
 import json
 import pandas as pd
-from typing import Any
+from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -12,6 +12,8 @@ class CreateJourneyRequest(BaseModel):
     chat_id: str | None = None
     intent: dict[str, Any]
     offer: dict[str, Any]
+    hotel_offer: dict[str, Any] | None = None
+    status: Literal["saved", "downloaded"] = "saved"
 
 @router.post("")
 def save_journey(req: CreateJourneyRequest, request: Request):
@@ -21,7 +23,9 @@ def save_journey(req: CreateJourneyRequest, request: Request):
         owner_id=user_id,
         chat_id=req.chat_id,
         intent=req.intent,
-        offer=req.offer
+        offer=req.offer,
+        hotel_offer=req.hotel_offer,
+        status=req.status,
     )
     return journey
 

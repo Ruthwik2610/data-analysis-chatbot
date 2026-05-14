@@ -277,7 +277,11 @@ CREATE TABLE IF NOT EXISTS travel_journeys (
   budget_limit_usd REAL,
   selected_offer_id TEXT,
   flight_offer_json TEXT,
+  hotel_offer_json TEXT,
+  total_price_usd REAL,
+  currency TEXT NOT NULL DEFAULT 'USD',
   status TEXT NOT NULL DEFAULT 'saved',
+  downloaded_at REAL,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
@@ -313,6 +317,10 @@ class Storage:
             self._ensure_column(con, "user_feedback", "status", "TEXT NOT NULL DEFAULT 'open'")
             self._ensure_column(con, "token_usage", "purpose", "TEXT NOT NULL DEFAULT 'chat'")
             self._ensure_column(con, "travel_journeys", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
+            self._ensure_column(con, "travel_journeys", "hotel_offer_json", "TEXT")
+            self._ensure_column(con, "travel_journeys", "total_price_usd", "REAL")
+            self._ensure_column(con, "travel_journeys", "currency", "TEXT NOT NULL DEFAULT 'USD'")
+            self._ensure_column(con, "travel_journeys", "downloaded_at", "REAL")
             self._ensure_project_memory_table(con)
             con.execute("PRAGMA journal_mode=WAL")
 
@@ -408,17 +416,32 @@ class Storage:
             con.execute("UPDATE user_sessions SET revoked_at = ? WHERE token_jti = ?", (time.time(), jti))
 
     # -- travel journeys -----------------------------------------------------
-    def create_travel_journey(self, owner_id: str, chat_id: str | None, intent: dict[str, Any], offer: dict[str, Any]) -> dict[str, Any]:
+    def create_travel_journey(
+        self,
+        owner_id: str,
+        chat_id: str | None,
+        intent: dict[str, Any],
+        offer: dict[str, Any],
+        hotel_offer: dict[str, Any] | None = None,
+        status: str = "saved",
+    ) -> dict[str, Any]:
+        if status not in {"saved", "downloaded"}:
+            raise ValueError("Invalid travel journey status")
         journey_id = f"journey_{uuid.uuid4().hex[:10]}"
         now = time.time()
+        downloaded_at = now if status == "downloaded" else None
+        hotel_offer_json = json.dumps(hotel_offer) if hotel_offer else None
+        total_price_usd = self._offer_price_usd(offer, "price_usd") + self._hotel_price_usd(hotel_offer)
+        currency = offer.get("currency") or (hotel_offer or {}).get("currency") or "USD"
         with self._conn() as con:
             con.execute(
                 """
                 INSERT INTO travel_journeys (
                   id, owner_id, chat_id, origin, destination, departure_date, return_date,
                   passengers, cabin_class, traveler_tier, budget_limit_usd, selected_offer_id,
-                  flight_offer_json, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  flight_offer_json, hotel_offer_json, total_price_usd, currency, status,
+                  downloaded_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     journey_id, owner_id, chat_id,
@@ -426,16 +449,43 @@ class Storage:
                     intent.get("departure_date"), intent.get("return_date"),
                     intent.get("passengers"), intent.get("cabin_class"),
                     intent.get("traveler_tier"), intent.get("budget_limit_usd"),
-                    offer.get("offer_id"), json.dumps(offer), "saved",
-                    now, now
+                    offer.get("offer_id"), json.dumps(offer),
+                    hotel_offer_json, total_price_usd, currency, status,
+                    downloaded_at, now, now
                 )
             )
-        return {"id": journey_id, "created_at": now}
+            row = con.execute("SELECT * FROM travel_journeys WHERE id = ?", (journey_id,)).fetchone()
+        return self._travel_journey_record(row)
 
     def list_travel_journeys(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
         with self._conn() as con:
             rows = con.execute("SELECT * FROM travel_journeys WHERE owner_id = ? ORDER BY created_at DESC", (owner_id,)).fetchall()
         return [dict(r) for r in rows]
+
+    @staticmethod
+    def _offer_price_usd(offer: dict[str, Any] | None, key: str) -> float:
+        if not offer:
+            return 0.0
+        try:
+            return float(offer.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _hotel_price_usd(hotel_offer: dict[str, Any] | None) -> float:
+        if not hotel_offer:
+            return 0.0
+        currency = str(hotel_offer.get("currency") or "USD").upper()
+        if currency != "USD":
+            return 0.0
+        return Storage._offer_price_usd(hotel_offer, "total_price")
+
+    @staticmethod
+    def _travel_journey_record(row: sqlite3.Row) -> dict[str, Any]:
+        record = dict(row)
+        record["flight_offer"] = json.loads(record["flight_offer_json"]) if record.get("flight_offer_json") else None
+        record["hotel_offer"] = json.loads(record["hotel_offer_json"]) if record.get("hotel_offer_json") else None
+        return record
 
     # -- chats ---------------------------------------------------------------
     def create_chat(self, title: str | None = None, project_id: str | None = None, owner_id: str = "legacy") -> dict[str, Any]:

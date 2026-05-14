@@ -845,6 +845,7 @@ export default function Home() {
         <MessageList
           messages={messages}
           loading={loading}
+          currentChatId={currentChatId}
           onPendingChoice={handlePendingChoice}
           onPickFile={handlePickFile}
           onConnectClick={handleConnectClick}

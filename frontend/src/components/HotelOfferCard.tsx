@@ -1,6 +1,6 @@
 import React from "react";
 import type { HotelOffer } from "@/lib/types";
-import { ArrowRight, AlertTriangle, CheckCircle2, MapPin, Bed, Star } from "lucide-react";
+import { AlertTriangle, CheckCircle2, MapPin, Bed, Star } from "lucide-react";
 
 const formatDate = (iso: string) => {
   if (!iso) return "";
@@ -45,9 +45,14 @@ function StarRow({ count }: { count: number }) {
   );
 }
 
-type HotelOfferCardProps = { offer: HotelOffer };
+type HotelOfferCardProps = {
+  offer: HotelOffer;
+  selected?: boolean;
+  onSelect?: () => void;
+  selectLabel?: string;
+};
 
-export function HotelOfferCard({ offer }: HotelOfferCardProps) {
+export function HotelOfferCard({ offer, selected = false, onSelect, selectLabel }: HotelOfferCardProps) {
   const nights = formatNights(offer.check_in_date, offer.check_out_date);
 
   return (
@@ -144,15 +149,22 @@ export function HotelOfferCard({ offer }: HotelOfferCardProps) {
           </span>
         </div>
 
-        <a
-          href={offer.redirect_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-1.5 px-4 py-2 rounded-[12px] bg-blue-600 hover:bg-blue-500 text-white font-bold text-[13px] transition-colors shadow-md active:scale-95"
-        >
-          View & Book
-          <ArrowRight size={14} strokeWidth={2.5} />
-        </a>
+        {onSelect && (
+          <button
+            type="button"
+            onClick={onSelect}
+            aria-label={selectLabel}
+            aria-pressed={selected}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-[12px] font-bold text-[13px] transition-colors shadow-md active:scale-95"
+            style={{
+              background: selected ? "var(--color-text-info)" : "var(--color-background-elevated)",
+              color: selected ? "var(--color-background-primary)" : "var(--color-text-primary)",
+              border: "1px solid var(--color-border-secondary)",
+            }}
+          >
+            {selected ? "Selected" : "Select"}
+          </button>
+        )}
       </div>
     </div>
   );

@@ -18,6 +18,7 @@ interface MessageListProps {
   onPendingChoice: (messageId: string, value: string | string[]) => void;
   onPickFile: (file: File) => void;
   onConnectClick: () => void;
+  currentChatId?: string | null;
   currentProjectId?: string | null;
   onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
   onAskFollowUp?: (content: string) => void;
@@ -34,7 +35,7 @@ function formatRelative(ts?: number): string {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
-export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback }: MessageListProps) {
+export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentChatId, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback }: MessageListProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isStreaming = messages.some((m) => m.role === "assistant" && m.streaming);
 
@@ -71,6 +72,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
                 <Bubble
                 message={msg}
                 onChoose={onPendingChoice}
+                currentChatId={currentChatId}
                 currentProjectId={currentProjectId}
                 onSaveProjectNote={onSaveProjectNote}
                 onAskFollowUp={onAskFollowUp}
@@ -93,6 +95,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
 const Bubble = React.memo(function Bubble({
   message,
   onChoose,
+  currentChatId,
   currentProjectId,
   onSaveProjectNote,
   onAskFollowUp,
@@ -101,6 +104,7 @@ const Bubble = React.memo(function Bubble({
 }: {
   message: Message;
   onChoose: (messageId: string, value: string | string[]) => void;
+  currentChatId?: string | null;
   currentProjectId?: string | null;
   onSaveProjectNote?: (message: Extract<Message, { role: "assistant" }>) => void;
   onAskFollowUp?: (content: string) => void;
@@ -179,6 +183,7 @@ const Bubble = React.memo(function Bubble({
             offers={message.travel_offers || []}
             hotels={message.hotel_offers || []}
             intent={message.travel_intent}
+            chatId={currentChatId}
             onRefresh={onAskFollowUp ? () => {
               const wantsF = message.travel_intent?.wants_flights;
               const wantsH = message.travel_intent?.wants_hotels;

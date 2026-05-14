@@ -1,6 +1,8 @@
+import json
 import os
 import pytest
 from pathlib import Path
+from fastapi.testclient import TestClient
 from backend.storage import Storage
 
 @pytest.fixture
@@ -68,3 +70,163 @@ def test_project_title_uniqueness(storage):
     # Different owner can have same title (if intended, though usually titles are globally unique in some systems, 
     # but here it's filtered by owner_id in project_title_exists)
     storage.create_project(title="Unique Project", owner_id="user_2")
+
+
+def test_create_travel_journey_persists_downloaded_itinerary_with_hotel(storage):
+    intent = {
+        "origin": "HYD",
+        "destination": "RUH",
+        "departure_date": "2026-06-01",
+        "return_date": "2026-06-08",
+        "passengers": 1,
+        "cabin_class": "economy",
+    }
+    flight_offer = {
+        "offer_id": "flight_123",
+        "airline": "United",
+        "price_usd": 750,
+        "currency": "USD",
+    }
+    hotel_offer = {
+        "hotel_id": "hotel_456",
+        "name": "Riyadh Suites",
+        "total_price": 900,
+        "currency": "USD",
+    }
+
+    journey = storage.create_travel_journey(
+        owner_id="user_123",
+        chat_id=None,
+        intent=intent,
+        offer=flight_offer,
+        hotel_offer=hotel_offer,
+        status="downloaded",
+    )
+
+    assert journey["id"].startswith("journey_")
+    assert journey["status"] == "downloaded"
+    assert journey["downloaded_at"] is not None
+    assert journey["total_price_usd"] == 1650
+    assert journey["currency"] == "USD"
+    assert journey["flight_offer"] == flight_offer
+    assert journey["hotel_offer"] == hotel_offer
+
+    rows = storage.list_travel_journeys(owner_id="user_123")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "downloaded"
+    assert row["downloaded_at"] is not None
+    assert row["total_price_usd"] == 1650
+    assert row["currency"] == "USD"
+    assert row["flight_offer_json"] == json.dumps(flight_offer)
+    assert row["hotel_offer_json"] == json.dumps(hotel_offer)
+
+
+def test_create_travel_journey_excludes_non_usd_hotel_total_from_usd_total(storage):
+    flight_offer = {
+        "offer_id": "flight_123",
+        "price_usd": 750,
+        "currency": "USD",
+    }
+    hotel_offer = {
+        "hotel_id": "hotel_456",
+        "total_price": 900,
+        "currency": "EUR",
+    }
+
+    journey = storage.create_travel_journey(
+        owner_id="user_123",
+        chat_id=None,
+        intent={"origin": "HYD", "destination": "RUH"},
+        offer=flight_offer,
+        hotel_offer=hotel_offer,
+        status="downloaded",
+    )
+
+    assert journey["total_price_usd"] == 750
+    assert storage.list_travel_journeys(owner_id="user_123")[0]["total_price_usd"] == 750
+
+
+def test_post_journeys_saves_downloaded_itinerary_with_hotel(monkeypatch, tmp_path):
+    import backend.server as server
+
+    storage = Storage(tmp_path / "app.sqlite")
+    monkeypatch.setattr(server, "DB", storage)
+    monkeypatch.setattr(server, "API_KEY", "")
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", False)
+    monkeypatch.setattr(server, "_current_user_id", lambda request: "user_123")
+    client = TestClient(server.app)
+
+    intent = {
+        "origin": "HYD",
+        "destination": "RUH",
+        "departure_date": "2026-06-01",
+        "return_date": "2026-06-08",
+        "passengers": 1,
+        "cabin_class": "economy",
+    }
+    flight_offer = {
+        "offer_id": "flight_123",
+        "airline": "United",
+        "price_usd": 750,
+        "currency": "USD",
+    }
+    hotel_offer = {
+        "hotel_id": "hotel_456",
+        "name": "Riyadh Suites",
+        "total_price": 900,
+        "currency": "USD",
+    }
+
+    response = client.post(
+        "/api/journeys",
+        json={
+            "intent": intent,
+            "offer": flight_offer,
+            "hotel_offer": hotel_offer,
+            "status": "downloaded",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"].startswith("journey_")
+    assert body["status"] == "downloaded"
+    assert body["downloaded_at"] is not None
+    assert body["total_price_usd"] == 1650
+    assert body["currency"] == "USD"
+    assert body["flight_offer"] == flight_offer
+    assert body["hotel_offer"] == hotel_offer
+
+    rows = storage.list_travel_journeys(owner_id="user_123")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "downloaded"
+    assert row["downloaded_at"] is not None
+    assert row["total_price_usd"] == 1650
+    assert row["currency"] == "USD"
+    assert row["flight_offer_json"] == json.dumps(flight_offer)
+    assert row["hotel_offer_json"] == json.dumps(hotel_offer)
+
+
+def test_post_journeys_rejects_invalid_status(monkeypatch, tmp_path):
+    import backend.server as server
+
+    storage = Storage(tmp_path / "app.sqlite")
+    monkeypatch.setattr(server, "DB", storage)
+    monkeypatch.setattr(server, "API_KEY", "")
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", False)
+    monkeypatch.setattr(server, "_current_user_id", lambda request: "user_123")
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/api/journeys",
+        json={
+            "intent": {"origin": "HYD", "destination": "RUH"},
+            "offer": {"offer_id": "flight_123", "price_usd": 750, "currency": "USD"},
+            "status": "booked",
+        },
+    )
+
+    assert response.status_code == 422
+    assert storage.list_travel_journeys(owner_id="user_123") == []

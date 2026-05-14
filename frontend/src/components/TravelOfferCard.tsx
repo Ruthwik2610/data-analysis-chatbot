@@ -1,6 +1,6 @@
 import React from "react";
 import type { TravelOffer } from "@/lib/types";
-import { ArrowRight, Clock, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Clock, AlertTriangle, CheckCircle2 } from "lucide-react";
 
 const formatTime = (iso: string) => {
   if (!iso) return "";
@@ -63,7 +63,14 @@ function RouteRow({ departure_at, origin, arrival_at, destination, duration_minu
   );
 }
 
-export function TravelOfferCard({ offer }: { offer: TravelOffer }) {
+type TravelOfferCardProps = {
+  offer: TravelOffer;
+  selected?: boolean;
+  onSelect?: () => void;
+  selectLabel?: string;
+};
+
+export function TravelOfferCard({ offer, selected = false, onSelect, selectLabel }: TravelOfferCardProps) {
   const hasReturn = !!offer.return_slice;
 
   return (
@@ -130,7 +137,7 @@ export function TravelOfferCard({ offer }: { offer: TravelOffer }) {
         </>
       )}
 
-      {/* Bottom row: Price & Book */}
+      {/* Bottom row: Price & Selection */}
       <div className="flex items-end justify-between mt-auto pt-4 border-t border-white/5">
         <div className="flex flex-col">
           <span className="text-[10px] font-bold tracking-widest uppercase opacity-60" style={{ color: "var(--color-text-tertiary)" }}>
@@ -141,15 +148,22 @@ export function TravelOfferCard({ offer }: { offer: TravelOffer }) {
           </span>
         </div>
         
-        <a 
-          href={offer.booking_redirect_url} 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="flex items-center gap-1.5 px-4 py-2 rounded-[12px] bg-blue-600 hover:bg-blue-500 text-white font-bold text-[13px] transition-colors shadow-md active:scale-95"
-        >
-          View & Book
-          <ArrowRight size={14} strokeWidth={2.5} />
-        </a>
+        {onSelect && (
+          <button
+            type="button"
+            onClick={onSelect}
+            aria-label={selectLabel}
+            aria-pressed={selected}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-[12px] font-bold text-[13px] transition-colors shadow-md active:scale-95"
+            style={{
+              background: selected ? "var(--color-text-info)" : "var(--color-background-elevated)",
+              color: selected ? "var(--color-background-primary)" : "var(--color-text-primary)",
+              border: "1px solid var(--color-border-secondary)",
+            }}
+          >
+            {selected ? "Selected" : "Select"}
+          </button>
+        )}
       </div>
       
       {/* Expiry Footer */}

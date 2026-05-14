@@ -1,4 +1,4 @@
-import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ProjectNote, ModelMode, InstructionsResponse, QueryLoopMetricsResponse, WorkbookMCPDeployment, WorkbookView } from "./types";
+import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConnector, Project, ProjectFile, ProjectNote, ModelMode, InstructionsResponse, QueryLoopMetricsResponse, WorkbookMCPDeployment, WorkbookView, TravelIntent, TravelOffer, HotelOffer } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 const TOKEN_KEY = "datachat_user_token";
@@ -232,6 +232,13 @@ export const api = {
     }),
   postFeedback: (body: { chat_id?: string | null; message_id?: string | null; rating: number; comment?: string; category?: string }) =>
     jpost<{ ok: boolean }>("/feedback", body),
+  saveTravelJourney: (body: {
+    chat_id?: string | null;
+    intent: TravelIntent;
+    offer: TravelOffer;
+    hotel_offer?: HotelOffer | null;
+    status?: "saved" | "downloaded";
+  }) => jpost<any>("/api/journeys", body),
 
   // Testing Gateway
   listTestSuites: () => jget<any[]>("/admin/testing/suites"),
