@@ -4,6 +4,8 @@ import { api } from "@/lib/api";
 import { TravelOfferCard } from "./TravelOfferCard";
 import { HotelOfferCard } from "./HotelOfferCard";
 import { RefreshCw, Plane, Filter, Hotel, ArrowLeft, ArrowRight, Download } from "lucide-react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 
 interface TravelResultPanelProps {
   offers: TravelOffer[];
@@ -15,7 +17,7 @@ interface TravelResultPanelProps {
 
 type SortOption = "price" | "score" | "duration";
 type HotelSortOption = "score" | "price" | "rating";
-type Step = "flight" | "hotel" | "itinerary";
+type Step = "outbound_flight" | "return_flight" | "hotel" | "itinerary";
 
 const formatCurrency = (amount: number, currency: string) => {
   try {
@@ -29,11 +31,15 @@ const formatCurrency = (amount: number, currency: string) => {
   }
 };
 
+const getOutboundKey = (o: TravelOffer) => `${o.airline}-${o.departure_at}-${o.arrival_at}`;
+
 export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }: TravelResultPanelProps) {
   const [sortBy, setSortBy] = useState<SortOption>("score");
   const [hotelSortBy, setHotelSortBy] = useState<HotelSortOption>("score");
-  const [step, setStep] = useState<Step>(offers.length > 0 ? "flight" : "hotel");
-  const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null);
+  const [step, setStep] = useState<Step>(offers.length > 0 ? "outbound_flight" : "hotel");
+  
+  const [selectedOutboundKey, setSelectedOutboundKey] = useState<string | null>(null);
+  const [selectedOfferId, setSelectedOfferId] = useState<string | null>(null);
   const [selectedHotelId, setSelectedHotelId] = useState<string | null>(null);
   const [hotelSkipped, setHotelSkipped] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -42,11 +48,38 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   const hasFlights = offers.length > 0;
   const hasHotels = hotels.length > 0;
 
-  const sortedOffers = useMemo(() => [...offers].sort((a, b) => {
-    if (sortBy === "price") return a.price_usd - b.price_usd;
-    if (sortBy === "duration") return a.duration_minutes - b.duration_minutes;
-    return b.score - a.score;
-  }), [offers, sortBy]);
+  // Process Outbound Offers
+  const sortedOutboundOffers = useMemo(() => {
+    const outboundGroupMap = new Map<string, TravelOffer>();
+    for (const offer of offers) {
+      const key = getOutboundKey(offer);
+      if (!outboundGroupMap.has(key)) {
+        outboundGroupMap.set(key, offer);
+      } else {
+        // Keep the cheapest offer for this outbound flight
+        if (offer.price_usd < outboundGroupMap.get(key)!.price_usd) {
+          outboundGroupMap.set(key, offer);
+        }
+      }
+    }
+    const uniqueOutboundOffers = Array.from(outboundGroupMap.values());
+    return [...uniqueOutboundOffers].sort((a, b) => {
+      if (sortBy === "price") return a.price_usd - b.price_usd;
+      if (sortBy === "duration") return a.duration_minutes - b.duration_minutes;
+      return b.score - a.score;
+    });
+  }, [offers, sortBy]);
+
+  // Process Return Offers based on selected outbound flight
+  const sortedReturnOffers = useMemo(() => {
+    if (!selectedOutboundKey) return [];
+    const matchingReturnOffers = offers.filter(o => getOutboundKey(o) === selectedOutboundKey);
+    return [...matchingReturnOffers].sort((a, b) => {
+      if (sortBy === "price") return a.price_usd - b.price_usd;
+      if (sortBy === "duration") return (a.return_slice?.duration_minutes ?? 0) - (b.return_slice?.duration_minutes ?? 0);
+      return b.score - a.score;
+    });
+  }, [offers, selectedOutboundKey, sortBy]);
 
   const sortedHotels = useMemo(() => [...hotels].sort((a, b) => {
     if (hotelSortBy === "price") return a.total_price - b.total_price;
@@ -59,7 +92,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
 
   if (!hasFlights && !hasHotels) return null;
 
-  const selectedFlight = offers.find((offer) => offer.offer_id === selectedFlightId) || null;
+  const selectedFlight = offers.find((offer) => offer.offer_id === selectedOfferId) || null;
   const selectedHotel = hotels.find((hotel) => hotel.hotel_id === selectedHotelId) || null;
   const hasMixedCurrencies = !!selectedFlight && !!selectedHotel && selectedFlight.currency !== selectedHotel.currency;
   const totalLabel = hasMixedCurrencies ? "Mixed currencies" : "Total";
@@ -69,15 +102,48 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
         (selectedFlight?.price_usd || 0) + (selectedHotel?.total_price || 0),
         selectedFlight?.currency || selectedHotel?.currency || "USD",
       );
-  const canPersist = !!selectedFlight;
+  const canPersist = !!selectedFlight || !!selectedHotel;
 
-  const goNextFromFlight = () => setStep(hasHotels ? "hotel" : "itinerary");
+  const goNextFromOutbound = () => {
+    const options = offers.filter(o => getOutboundKey(o) === selectedOutboundKey);
+    const hasReturnOptions = options.some(o => !!o.return_slice);
+    
+    if (hasReturnOptions) {
+      setStep("return_flight");
+    } else {
+      // It's a one-way trip
+      const cheapest = [...options].sort((a, b) => a.price_usd - b.price_usd)[0];
+      if (cheapest) setSelectedOfferId(cheapest.offer_id);
+      setStep(hasHotels ? "hotel" : "itinerary");
+    }
+  };
+
+  const goBackFromReturn = () => {
+    setSelectedOfferId(null);
+    setStep("outbound_flight");
+  };
+
+  const goNextFromReturn = () => {
+    setStep(hasHotels ? "hotel" : "itinerary");
+  };
+
+  const goBackFromHotel = () => {
+    if (hasFlights) {
+      if (selectedFlight && selectedFlight.return_slice) {
+        setStep("return_flight");
+      } else {
+        setStep("outbound_flight");
+      }
+    } else {
+      setStep("itinerary");
+    }
+  };
+
   const goNextFromHotel = () => setStep("itinerary");
-  const goBackFromHotel = () => setStep(hasFlights ? "flight" : "itinerary");
-  const goBackFromItinerary = () => setStep(hasHotels ? "hotel" : "flight");
+  const goBackFromItinerary = () => setStep(hasHotels ? "hotel" : (hasFlights ? (selectedFlight?.return_slice ? "return_flight" : "outbound_flight") : "flight"));
 
   const downloadItinerary = async () => {
-    if (!selectedFlight) return;
+    if (!canPersist) return;
     setDownloadError(null);
     setDownloading(true);
     try {
@@ -88,15 +154,99 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
         hotel_offer: selectedHotel,
         status: "downloaded",
       });
-      const blob = new Blob([JSON.stringify(saved, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `itinerary_${saved.id}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+
+      // Generate PDF
+      const doc = new jsPDF();
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(22);
+      doc.text("Travel Itinerary", 14, 22);
+
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "normal");
+      doc.text(`Reference: ${saved.id}`, 14, 30);
+      doc.text(`Date Generated: ${new Date().toLocaleDateString()}`, 14, 36);
+
+      let currentY = 46;
+
+      if (selectedFlight) {
+        doc.setFontSize(14);
+        doc.setFont("helvetica", "bold");
+        doc.text("Flight Details", 14, currentY);
+        currentY += 6;
+
+        autoTable(doc, {
+          startY: currentY,
+          head: [["Leg", "Airline", "Route", "Departure", "Arrival", "Duration"]],
+          body: [
+            [
+              "Outbound",
+              selectedFlight.airline,
+              `${selectedFlight.origin} -> ${selectedFlight.destination}`,
+              new Date(selectedFlight.departure_at).toLocaleString(),
+              new Date(selectedFlight.arrival_at).toLocaleString(),
+              `${Math.floor(selectedFlight.duration_minutes / 60)}h ${selectedFlight.duration_minutes % 60}m`
+            ],
+            ...(selectedFlight.return_slice ? [[
+              "Return",
+              selectedFlight.return_slice.airline,
+              `${selectedFlight.return_slice.origin} -> ${selectedFlight.return_slice.destination}`,
+              new Date(selectedFlight.return_slice.departure_at).toLocaleString(),
+              new Date(selectedFlight.return_slice.arrival_at).toLocaleString(),
+              `${Math.floor(selectedFlight.return_slice.duration_minutes / 60)}h ${selectedFlight.return_slice.duration_minutes % 60}m`
+            ]] : [])
+          ],
+          theme: 'grid',
+          headStyles: { fillColor: [41, 128, 185] },
+          margin: { top: 10 }
+        });
+        currentY = (doc as any).lastAutoTable.finalY + 15;
+      }
+
+      if (selectedHotel) {
+        doc.setFontSize(14);
+        doc.setFont("helvetica", "bold");
+        doc.text("Hotel Details", 14, currentY);
+        currentY += 6;
+
+        autoTable(doc, {
+          startY: currentY,
+          head: [["Hotel", "Check In", "Check Out", "Rooms", "Guests", "Rating"]],
+          body: [
+            [
+              selectedHotel.name,
+              selectedHotel.check_in_date,
+              selectedHotel.check_out_date,
+              selectedHotel.rooms.toString(),
+              selectedHotel.guests.toString(),
+              selectedHotel.star_rating ? `${selectedHotel.star_rating} Stars` : "N/A"
+            ]
+          ],
+          theme: 'grid',
+          headStyles: { fillColor: [39, 174, 96] },
+          margin: { top: 10 }
+        });
+        currentY = (doc as any).lastAutoTable.finalY + 15;
+      }
+
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("Pricing Summary", 14, currentY);
+      currentY += 6;
+
+      autoTable(doc, {
+        startY: currentY,
+        head: [["Item", "Price"]],
+        body: [
+          ...(selectedFlight ? [["Flight Total", formatCurrency(selectedFlight.price_usd, selectedFlight.currency)]] : []),
+          ...(selectedHotel ? [["Hotel Total", formatCurrency(selectedHotel.total_price, selectedHotel.currency)]] : []),
+          ["Grand Total", totalValue]
+        ],
+        theme: 'plain',
+        styles: { fontStyle: 'bold' },
+        margin: { top: 10 }
+      });
+
+      doc.save(`itinerary_${saved.id}.pdf`);
     } catch {
       setDownloadError("Could not download itinerary.");
     } finally {
@@ -107,7 +257,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   return (
     <div className="flex flex-col mt-4 w-full animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-[800px]">
       <div className="flex flex-wrap items-center gap-3 mb-4 p-3 rounded-[16px] glass" style={{ border: "1px solid var(--color-border-secondary)" }}>
-        {step === "flight" && hasFlights && (
+        {(step === "outbound_flight" || step === "return_flight") && hasFlights && (
           <SortControls
             options={["score", "price", "duration"]}
             value={sortBy}
@@ -134,28 +284,63 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
         )}
       </div>
 
-      {step === "flight" && (
+      {step === "outbound_flight" && (
         <>
           <SectionHeader
             icon={<Plane size={20} strokeWidth={2.5} />}
-            title={`${intent.origin} → ${intent.destination}`}
+            title={`${intent.origin} → ${intent.destination} (Outbound)`}
             subtitle={`${intent.departure_date} • ${intent.passengers} pax • ${intent.traveler_tier} tier`}
           />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {sortedOffers.map((offer, index) => (
-              <div key={offer.offer_id} className="relative">
+            {sortedOutboundOffers.map((offer, index) => (
+              <div key={getOutboundKey(offer)} className="relative">
                 {sortBy === "score" && index === 0 && <BestMatchBadge />}
                 <TravelOfferCard
                   offer={offer}
-                  selected={selectedFlightId === offer.offer_id}
-                  selectLabel={`Select ${offer.airline} flight ${offer.origin} to ${offer.destination}`}
-                  onSelect={() => setSelectedFlightId(offer.offer_id)}
+                  mode="outbound_only"
+                  selected={selectedOutboundKey === getOutboundKey(offer)}
+                  selectLabel={`Select outbound flight to ${offer.destination}`}
+                  onSelect={() => setSelectedOutboundKey(getOutboundKey(offer))}
                 />
               </div>
             ))}
           </div>
           <WorkflowFooter>
-            <button type="button" onClick={goNextFromFlight} disabled={!selectedFlight} className={actionButtonClass} style={primaryButtonStyle(!selectedFlight)}>
+            <button type="button" onClick={goNextFromOutbound} disabled={!selectedOutboundKey} className={actionButtonClass} style={primaryButtonStyle(!selectedOutboundKey)}>
+              Next
+              <ArrowRight size={14} />
+            </button>
+          </WorkflowFooter>
+        </>
+      )}
+
+      {step === "return_flight" && (
+        <>
+          <SectionHeader
+            icon={<Plane size={20} strokeWidth={2.5} className="rotate-180" />}
+            title={`${intent.destination} → ${intent.origin} (Return)`}
+            subtitle={`${intent.return_date || intent.departure_date} • ${intent.passengers} pax • ${intent.traveler_tier} tier`}
+          />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {sortedReturnOffers.map((offer, index) => (
+              <div key={offer.offer_id} className="relative">
+                {sortBy === "score" && index === 0 && <BestMatchBadge />}
+                <TravelOfferCard
+                  offer={offer}
+                  mode="return_only"
+                  selected={selectedOfferId === offer.offer_id}
+                  selectLabel={`Select return flight to ${offer.origin}`}
+                  onSelect={() => setSelectedOfferId(offer.offer_id)}
+                />
+              </div>
+            ))}
+          </div>
+          <WorkflowFooter>
+            <button type="button" onClick={goBackFromReturn} className={actionButtonClass} style={secondaryButtonStyle}>
+              <ArrowLeft size={14} />
+              Back
+            </button>
+            <button type="button" onClick={goNextFromReturn} disabled={!selectedOfferId} className={actionButtonClass} style={primaryButtonStyle(!selectedOfferId)}>
               Next
               <ArrowRight size={14} />
             </button>
@@ -243,7 +428,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
             )}
             <button type="button" onClick={downloadItinerary} disabled={!canPersist || downloading} className={actionButtonClass} style={primaryButtonStyle(!canPersist || downloading)}>
               <Download size={14} />
-              {downloading ? "Downloading" : "Download itinerary"}
+              {downloading ? "Downloading" : "Download PDF itinerary"}
             </button>
           </div>
           {downloadError && <p className="text-[12px]" style={{ color: "var(--color-text-warning)" }}>{downloadError}</p>}

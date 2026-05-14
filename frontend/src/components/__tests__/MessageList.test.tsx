@@ -224,9 +224,9 @@ describe("MessageList markdown rendering", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Select United flight SFO to JFK" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select outbound flight to JFK" }));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    fireEvent.click(screen.getByRole("button", { name: "Download itinerary" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download PDF itinerary" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);

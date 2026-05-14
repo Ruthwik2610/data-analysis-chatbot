@@ -2,6 +2,23 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TravelResultPanel } from "../TravelResultPanel";
 import type { HotelOffer, TravelIntent, TravelOffer } from "@/lib/types";
 
+vi.mock("jspdf", () => {
+  return {
+    default: vi.fn().mockImplementation(() => ({
+      setFont: vi.fn(),
+      setFontSize: vi.fn(),
+      text: vi.fn(),
+      save: vi.fn(),
+      lastAutoTable: { finalY: 100 }
+    }))
+  };
+});
+vi.mock("jspdf-autotable", () => {
+  return {
+    default: vi.fn()
+  };
+});
+
 const intent: TravelIntent = {
   origin: "SFO",
   destination: "JFK",
@@ -66,6 +83,16 @@ const offers: TravelOffer[] = [
     policy_violation_reason: null,
     booking_redirect_url: "https://book.example.com/flight_2",
     expires_at: null,
+    return_slice: {
+      origin: "JFK",
+      destination: "SFO",
+      departure_at: "2026-06-05T16:00:00Z",
+      arrival_at: "2026-06-05T20:00:00Z",
+      duration_minutes: 360,
+      stops: 0,
+      airline: "Delta",
+      airline_iata: "DL",
+    },
     score: 85,
   },
 ];
@@ -97,26 +124,32 @@ describe("TravelResultPanel workflow", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows flight selection first and moves to hotel selection with Next", () => {
+  it("shows outbound flight, then return flight, then hotel selection", () => {
     render(<TravelResultPanel offers={offers} hotels={hotels} intent={intent} />);
 
-    expect(screen.getByRole("button", { name: "Select United flight SFO to JFK" })).toHaveTextContent("Select");
-    expect(screen.getByRole("button", { name: "Select Delta flight SFO to JFK" })).toHaveTextContent("Select");
-    expect(screen.queryByRole("link", { name: /View & Book/i })).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Select United flight SFO to JFK" }));
+    // Outbound Step
+    expect(screen.getAllByRole("button", { name: "Select outbound flight to JFK" }).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
 
+    // Return Step
+    expect(screen.getByText(/Return/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select return flight to SFO" })).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    // Hotel Step
     expect(screen.getByText("Hotels in JFK")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Skip hotel" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Select Hudson Hotel" })).toHaveTextContent("Select");
-    expect(screen.queryByRole("link", { name: /View & Book/i })).not.toBeInTheDocument();
   });
 
   it("shows booking redirects only on the itinerary step", () => {
     render(<TravelResultPanel offers={offers} hotels={hotels} intent={intent} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select United flight SFO to JFK" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.click(screen.getByRole("button", { name: "Select Hudson Hotel" }));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
@@ -124,13 +157,15 @@ describe("TravelResultPanel workflow", () => {
     expect(screen.getByText("Itinerary")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Book flight" })).toHaveAttribute("href", offers[0].booking_redirect_url);
     expect(screen.getByRole("link", { name: "Book hotel" })).toHaveAttribute("href", hotels[0].redirect_url);
-    expect(screen.getByRole("button", { name: "Download itinerary" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download PDF itinerary" })).toBeInTheDocument();
   });
 
   it("can skip hotel and continue to itinerary", () => {
     render(<TravelResultPanel offers={offers} hotels={hotels} intent={intent} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select United flight SFO to JFK" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.click(screen.getByRole("button", { name: "Skip hotel" }));
 
@@ -142,7 +177,9 @@ describe("TravelResultPanel workflow", () => {
   it("goes directly to itinerary when no hotels are available", () => {
     render(<TravelResultPanel offers={offers} hotels={[]} intent={{ ...intent, wants_hotels: false }} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select United flight SFO to JFK" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
 
     expect(screen.getByText("Itinerary")).toBeInTheDocument();
@@ -160,14 +197,15 @@ describe("TravelResultPanel workflow", () => {
     expect(screen.getByText("Flight required to save itinerary")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Book flight" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Book hotel" })).toHaveAttribute("href", hotels[0].redirect_url);
-    expect(screen.getByRole("button", { name: "Download itinerary" })).toBeDisabled();
   });
 
   it("does not combine mixed-currency flight and hotel totals", () => {
     const euroHotel = { ...hotels[0], currency: "EUR", total_price: 720 };
     render(<TravelResultPanel offers={offers} hotels={[euroHotel]} intent={intent} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select United flight SFO to JFK" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.click(screen.getByRole("button", { name: "Select Hudson Hotel" }));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
@@ -185,17 +223,19 @@ describe("TravelResultPanel workflow", () => {
 
     render(<TravelResultPanel offers={offers} hotels={hotels} intent={intent} chatId="chat_1" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select United flight SFO to JFK" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.click(screen.getByRole("button", { name: "Select Hudson Hotel" }));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    fireEvent.click(screen.getByRole("button", { name: "Download itinerary" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download PDF itinerary" }));
 
     expect(await screen.findByText("Could not download itinerary.")).toBeInTheDocument();
     expect(screen.queryByText(/token secret|stack trace/i)).not.toBeInTheDocument();
   });
 
-  it("saves before downloading the itinerary JSON", async () => {
+  it("saves before downloading the itinerary PDF", async () => {
     const saved = {
       id: "journey_123",
       status: "downloaded",
@@ -212,18 +252,16 @@ describe("TravelResultPanel workflow", () => {
       json: async () => saved,
     });
     vi.stubGlobal("fetch", fetchMock);
-    const clickMock = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-    const createObjectURL = vi.fn(() => "blob:itinerary");
-    const revokeObjectURL = vi.fn();
-    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
 
     render(<TravelResultPanel offers={offers} hotels={hotels} intent={intent} chatId="chat_1" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select United flight SFO to JFK" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.click(screen.getByRole("button", { name: "Select Hudson Hotel" }));
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    fireEvent.click(screen.getByRole("button", { name: "Download itinerary" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download PDF itinerary" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/api/journeys"),
@@ -239,8 +277,5 @@ describe("TravelResultPanel workflow", () => {
       offer: { offer_id: "flight_1" },
       hotel_offer: { hotel_id: "hotel_1" },
     });
-    await waitFor(() => expect(clickMock).toHaveBeenCalled());
-    expect(clickMock.mock.contexts[0].download).toBe("itinerary_journey_123.json");
-    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
   });
 });

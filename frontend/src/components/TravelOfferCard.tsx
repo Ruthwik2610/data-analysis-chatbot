@@ -68,10 +68,13 @@ type TravelOfferCardProps = {
   selected?: boolean;
   onSelect?: () => void;
   selectLabel?: string;
+  mode?: "outbound_only" | "return_only" | "both";
 };
 
-export function TravelOfferCard({ offer, selected = false, onSelect, selectLabel }: TravelOfferCardProps) {
-  const hasReturn = !!offer.return_slice;
+export function TravelOfferCard({ offer, selected = false, onSelect, selectLabel, mode = "both" }: TravelOfferCardProps) {
+  const hasReturn = !!offer.return_slice && mode !== "outbound_only";
+  const showOutbound = mode !== "return_only";
+  const showReturn = hasReturn && mode !== "outbound_only";
 
   return (
     <div className="flex flex-col p-5 rounded-[20px] glass shadow-lg border border-white/5 transition-transform hover:-translate-y-1 hover:shadow-xl w-full min-w-[300px]">
@@ -108,24 +111,30 @@ export function TravelOfferCard({ offer, selected = false, onSelect, selectLabel
       </div>
 
       {/* Middle row: Route & Times */}
-      {hasReturn && (
-        <span className="text-[11px] font-medium tracking-wide uppercase opacity-70 mb-1" style={{ color: "var(--color-text-tertiary)" }}>
-          Outbound
-        </span>
-      )}
-      <RouteRow
-        departure_at={offer.departure_at}
-        origin={offer.origin}
-        arrival_at={offer.arrival_at}
-        destination={offer.destination}
-        duration_minutes={offer.duration_minutes}
-        stops={offer.stops}
-      />
-      {offer.return_slice && (
+      {showOutbound && (
         <>
-          <span className="text-[11px] font-medium tracking-wide uppercase opacity-70 mb-1" style={{ color: "var(--color-text-tertiary)" }}>
-            Return
-          </span>
+          {hasReturn && mode === "both" && (
+            <span className="text-[11px] font-medium tracking-wide uppercase opacity-70 mb-1" style={{ color: "var(--color-text-tertiary)" }}>
+              Outbound
+            </span>
+          )}
+          <RouteRow
+            departure_at={offer.departure_at}
+            origin={offer.origin}
+            arrival_at={offer.arrival_at}
+            destination={offer.destination}
+            duration_minutes={offer.duration_minutes}
+            stops={offer.stops}
+          />
+        </>
+      )}
+      {showReturn && offer.return_slice && (
+        <>
+          {mode === "both" && (
+            <span className="text-[11px] font-medium tracking-wide uppercase opacity-70 mb-1" style={{ color: "var(--color-text-tertiary)" }}>
+              Return
+            </span>
+          )}
           <RouteRow
             departure_at={offer.return_slice.departure_at}
             origin={offer.return_slice.origin}
