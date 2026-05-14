@@ -9,15 +9,12 @@ interface SheetQuestionArgs {
 
 export function buildSheetModeQuestion({ fileName, uploadId, sheets }: SheetQuestionArgs): { content: string; pending: Pending } {
   return {
-    content: `Got **${displaySourceName(fileName)}**. It has ${sheets.length} sheets. Load all sheets or choose specific sheets?`,
+    content: `Got **${displaySourceName(fileName)}**. It has ${sheets.length} sheets — which one should I open as the source?`,
     pending: {
-      resolver: "sheet_pick_mode",
-      hint: "Choose sheet mode",
-      options: [
-        { label: "All sheets", value: "all_sheets" },
-        { label: "Custom sheets", value: "custom_sheets" },
-      ],
-      args: { upload_id: uploadId, file_name: fileName, sheets },
+      resolver: "sheet_pick",
+      hint: "Pick a sheet",
+      options: sheets.map((sheet) => ({ label: sheet, value: sheet })),
+      args: { upload_id: uploadId },
     },
   };
 }

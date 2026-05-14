@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -35,6 +36,7 @@ class TravelIntent:
     currency: str = "USD"
     confidence: float = 0.0
     raw_question: str = ""
+    date_assumed: bool = False
 
 
 @dataclass
@@ -346,11 +348,16 @@ class TravelOrchestrator:
             if not intent.origin or not intent.destination:
                 return []
 
+            if not intent.departure_date:
+                intent.departure_date = (date.today() + timedelta(days=7)).isoformat()
+                intent.date_assumed = True
+                span.set_attribute("duffel.date_defaulted", intent.departure_date)
+
             # Build SANITIZED params — zero-trust boundary
             search_params: dict[str, Any] = {
                 "origin": intent.origin,
                 "destination": intent.destination,
-                "departure_date": intent.departure_date or "",
+                "departure_date": intent.departure_date,
                 "passengers": intent.passengers,
                 "cabin_class": intent.cabin_class,
                 "max_price_usd": history.budget_limit_usd,
@@ -459,20 +466,28 @@ class TravelOrchestrator:
                 "budget_limit_usd": history.budget_limit_usd,
             }
 
+            assumed_note = (
+                f"*Assumed departure date {intent.departure_date} (a week from today). "
+                "Tell me a specific date and I'll re-run the search.*\n\n"
+                if intent.date_assumed else ""
+            )
+
             # Text summary for markdown fallback
             if not offers:
                 summary = (
-                    f"No flights found for **{intent.origin} → {intent.destination}** "
-                    f"on {intent.departure_date or 'the requested date'}.\n\n"
-                    "Try adjusting dates or cabin class. You can also search directly on "
-                    f"[Duffel](https://duffel.com/search?origin={intent.origin or ''}&destination={intent.destination or ''})."
+                    f"{assumed_note}"
+                    f"No flights returned for **{intent.origin} → {intent.destination}** "
+                    f"on {intent.departure_date} in {intent.cabin_class}. "
+                    "Try a different date, cabin class, or nearby airports."
                 )
             else:
                 best = offers[0]
                 compliant_count = sum(1 for o in offers if o.policy_compliant)
                 summary = (
+                    f"{assumed_note}"
                     f"Found **{len(offers)} flight offer(s)** for "
-                    f"**{intent.origin} → {intent.destination}** ({intent.cabin_class}).\n\n"
+                    f"**{intent.origin} → {intent.destination}** on {intent.departure_date} "
+                    f"({intent.cabin_class}).\n\n"
                     f"**Best match:** {best.airline} — **${best.price_usd:.0f}** "
                     f"({'✅ Policy compliant' if best.policy_compliant else '⚠️ Needs approval'})\n\n"
                     f"{compliant_count} of {len(offers)} offers comply with your **{history.traveler_tier}** tier policy "
