@@ -27,3 +27,4 @@ logs/
 cache/
 tests/
 .worktrees/
+data/travel.db
