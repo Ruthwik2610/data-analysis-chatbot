@@ -74,7 +74,7 @@ type TravelOfferCardProps = {
 export function TravelOfferCard({ offer, selected = false, onSelect, selectLabel, mode = "both" }: TravelOfferCardProps) {
   const hasReturn = !!offer.return_slice && mode !== "outbound_only";
   const showOutbound = mode !== "return_only";
-  const showReturn = hasReturn && mode !== "outbound_only";
+  const showReturn = hasReturn;
 
   return (
     <div className="flex flex-col p-5 rounded-[20px] glass shadow-lg border border-white/5 transition-transform hover:-translate-y-1 hover:shadow-xl w-full min-w-[300px]">
