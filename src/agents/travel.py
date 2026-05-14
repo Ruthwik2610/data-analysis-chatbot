@@ -59,5 +59,8 @@ Always be concise, professional, and focused on saving the company money while r
 class TravelAgent(DomainAgent):
     """Domain agent for corporate travel intelligence."""
 
+    def __init__(self):
+        super().__init__(domain="travel")
+
     def get_system_prompt(self) -> str:
         return TRAVEL_SYSTEM_PROMPT

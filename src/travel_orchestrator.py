@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 from opentelemetry import trace
+
+from src.mcp_pool import extract_text_content
 
 TRACER = trace.get_tracer(__name__)
 
@@ -363,10 +364,12 @@ class TravelOrchestrator:
             for round_idx in range(chain.max_inner_rounds):
                 try:
                     result = await pool.call_tool(duffel_cid, "search_flights", search_params)
-                    text = result if isinstance(result, str) else (
-                        result.content[0].text if hasattr(result, "content") else str(result)
-                    )
-                    data = json.loads(text)
+                    text = extract_text_content(result)
+                    try:
+                        data = json.loads(text) if text else None
+                    except json.JSONDecodeError:
+                        data = None
+                        span.set_attribute(f"duffel.parse_error.round_{round_idx}", text[:200])
                     if isinstance(data, list):
                         raw_offers = data
                     elif isinstance(data, dict) and data.get("error"):
