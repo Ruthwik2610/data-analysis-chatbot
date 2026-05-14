@@ -287,6 +287,13 @@ ALLOWED_ORIGINS = [o.strip() for o in os.getenv(
     "http://localhost:3000,http://127.0.0.1:3000",
 ).split(",") if o.strip()]
 ALLOW_PRIVATE_API_URLS = os.getenv("ALLOW_PRIVATE_API_URLS", "0") == "1"
+# Narrow allowlist for known co-hosted MCP bridges. Comma-separated absolute
+# URLs whose loopback/private IP is acceptable (e.g. http://localhost:8083/sse
+# for the local Duffel bridge running on the same VPS). The SSRF guard still
+# rejects every other private/internal URL.
+ALLOWED_INTERNAL_MCP_URLS = {
+    u.strip() for u in os.getenv("ALLOWED_INTERNAL_MCP_URLS", "").split(",") if u.strip()
+}
 
 if not API_KEY:
     logging.warning(
@@ -595,8 +602,11 @@ def _detect_join_candidates(source_summaries: list[dict[str, Any]]) -> list[dict
 
 async def _assert_public_url(url: str) -> None:
     """Block SSRF: reject URLs whose host resolves to a private/loopback/link-local
-    address or the cloud metadata endpoint. Bypass with ALLOW_PRIVATE_API_URLS=1."""
+    address or the cloud metadata endpoint. Bypass with ALLOW_PRIVATE_API_URLS=1
+    (or per-URL via ALLOWED_INTERNAL_MCP_URLS)."""
     if ALLOW_PRIVATE_API_URLS:
+        return
+    if url.strip() in ALLOWED_INTERNAL_MCP_URLS:
         return
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
