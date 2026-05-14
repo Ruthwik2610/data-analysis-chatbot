@@ -6,9 +6,6 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-E2B_API_KEY = "e2b_cb59f3f710c0ae6883c586db4d0f2dbf7d4d0ed7"
-os.environ["E2B_API_KEY"] = E2B_API_KEY
-
 class CodeSandbox:
     def __init__(self):
         self.sandbox = None

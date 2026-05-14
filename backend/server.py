@@ -4149,10 +4149,15 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                             )
                             csv_data = sample_df.to_csv(index=False)
                             
+                            def _execute_sandbox(script_content, csv_content):
+                                with CodeSandbox() as sandbox:
+                                    sandbox.sandbox.files.write("/data.csv", csv_content)
+                                    return sandbox.run_python(script_content)
+
                             sandbox_start = time.perf_counter()
-                            with CodeSandbox() as sandbox:
-                                sandbox.sandbox.files.write("/data.csv", csv_data)
-                                execution_result = sandbox.run_python(script)
+                            execution_result = await loop.run_in_executor(
+                                None, _execute_sandbox, script, csv_data
+                            )
                             sandbox_elapsed_ms = int((time.perf_counter() - sandbox_start) * 1000)
                             
                             viz = "card"
