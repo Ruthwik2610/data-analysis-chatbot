@@ -32,9 +32,9 @@ class TravelStorage:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(db_path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+        with self._conn() as conn:
             conn.executescript(SCHEMA)
+            conn.execute("PRAGMA journal_mode=WAL")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:

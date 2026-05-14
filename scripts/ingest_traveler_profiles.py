@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -22,9 +21,12 @@ REQUIRED_COLUMNS = [
 ]
 
 
+DEFAULT_XLSX = Path(__file__).resolve().parent.parent / "data" / "traveler_profiles.xlsx"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("path", nargs="?", default="data/traveler_profiles.xlsx")
+    parser.add_argument("path", nargs="?", default=str(DEFAULT_XLSX))
     args = parser.parse_args()
 
     df = pd.read_excel(args.path, engine="openpyxl")
@@ -41,15 +43,13 @@ def main() -> None:
         name = row["client_name"]
         if not isinstance(name, str) or not name.strip():
             continue
-        if isinstance(name, float) and math.isnan(name):
-            continue
 
         profile: dict = {}
         for col in REQUIRED_COLUMNS:
             val = row[col]
             if hasattr(val, "item"):
                 val = val.item()
-            if isinstance(val, float) and math.isnan(val):
+            if isinstance(val, float) and val != val:
                 val = None
             # Convert pandas Timestamp to YYYY-MM-DD string
             if hasattr(val, "strftime"):
