@@ -38,6 +38,8 @@ class TravelIntent:
     raw_question: str = ""
     date_assumed: bool = False
     duffel_offline: bool = False
+    airline_filter_applied: bool = False
+    airline_fallback_to_all: bool = False
 
 
 @dataclass
@@ -48,6 +50,9 @@ class TravelHistory:
     total_trips_ytd: int = 0
     budget_limit_usd: float = 1500.0
     policy: dict[str, Any] = field(default_factory=dict)
+    # User-chosen airline preference for THIS trip (from Excel column or follow-up answer).
+    # Distinct from policy-level `preferred_airlines`.
+    user_preferred_airline: str | None = None
 
 
 @dataclass
@@ -91,11 +96,18 @@ class TravelThinkingChain:
         return round_idx < self.max_inner_rounds
 
 
+# Marker phrase included in the airline-clarify message. The orchestrator
+# detects this in the previous assistant message to treat the user's next
+# reply as the airline answer. Keep wording stable.
+AIRLINE_CLARIFY_MARKER = "preferred airline for this trip"
+
 # ── Heuristic intent extraction (no LLM needed for common patterns) ───────────
 
 _IATA_RE = re.compile(r'\b([A-Z]{3})\b')
 _DATE_RE = re.compile(r'\b(\d{4}-\d{2}-\d{2})\b')
 _PAX_RE  = re.compile(r'\b(\d+)\s*(?:passenger|pax|adult|people|person|travell?er)', re.I)
+_AIRLINE_COL_RE = re.compile(r'(?i)(preferred|favorite|favourite|fav)[\s_]*(airline|carrier)')
+_NO_PREF_RE = re.compile(r'(?i)\b(no preference|no preferred|none|skip|any airline|any carrier|doesn.?t matter|don.?t care)\b')
 _CABIN_KEYWORDS = {
     "economy": ["economy", "coach", "standard"],
     "premium_economy": ["premium economy", "premium_economy", "premium"],
@@ -127,6 +139,72 @@ def extract_travel_intent(question: str) -> TravelIntent:
             intent.confidence += 0.1
             break
     return intent
+
+
+def _extract_preferred_airline_from_dfs(dataframes: list[Any]) -> str | None:
+    """Scan loaded DataFrames for a preferred-airline column, return most common value.
+
+    Looks for columns matching `(preferred|favorite|favourite)[ _]?(airline|carrier)`
+    (case-insensitive). Returns the most common non-null string value across matched
+    columns, or None if nothing matched or all values are empty.
+    """
+    for df in dataframes:
+        if df is None:
+            continue
+        try:
+            cols = [str(c) for c in getattr(df, "columns", [])]
+        except Exception:
+            continue
+        matched = [c for c in cols if _AIRLINE_COL_RE.search(c)]
+        for col in matched:
+            try:
+                series = df[col].dropna().astype(str).str.strip()
+                series = series[series != ""]
+                if series.empty:
+                    continue
+                # Most common value — handles datasets where the user has logged
+                # multiple trips with the same favorite airline.
+                top = series.value_counts().idxmax()
+                if top and isinstance(top, str):
+                    return top
+            except Exception:
+                continue
+    return None
+
+
+def _extract_airline_answer_from_history(
+    current_question: str, chat_history: list[dict[str, Any]]
+) -> str | None:
+    """If the previous assistant message was an airline clarify, parse the current reply.
+
+    Returns:
+        - airline name string (e.g. "Emirates")
+        - "__none__" sentinel if the user explicitly said no preference
+        - None if there was no recent airline clarify to answer
+    """
+    last_assistant: str | None = None
+    for msg in reversed(chat_history):
+        role = (msg.get("role") or "").lower()
+        if role == "assistant":
+            last_assistant = str(msg.get("content") or "")
+            break
+        if role == "user":
+            # The current question is the most recent user turn; anything older
+            # is irrelevant context. Continue scanning for the assistant turn
+            # that came just before it.
+            continue
+    if not last_assistant or AIRLINE_CLARIFY_MARKER not in last_assistant:
+        return None
+    reply = current_question.strip()
+    if not reply:
+        return None
+    if _NO_PREF_RE.search(reply):
+        return "__none__"
+    # Take the first short phrase as the airline name. Strip prompt-y words.
+    cleaned = re.sub(r'(?i)^(yes|ok|sure|please|i prefer|i like|my preferred|prefer|use)\s+', '', reply)
+    cleaned = re.sub(r'(?i)\b(airlines?|carrier)\b', '', cleaned).strip()
+    # Cap to 40 chars to avoid passing a full sentence as the filter.
+    return cleaned[:40] if cleaned else None
 
 
 def _load_policy() -> dict[str, Any]:
@@ -199,6 +277,8 @@ class TravelOrchestrator:
         pool: Any,
         db: Any,
         config: Any,
+        dataframes: list[Any] | None = None,
+        chat_history: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         with TRACER.start_as_current_span("travel_orchestrator") as span:
             span.set_attribute("question", question)
@@ -235,9 +315,32 @@ class TravelOrchestrator:
 
             # ── Phase 2: DB History (parallel inner loop) ─────────────────
             yield {"kind": "thinking", "step": "🗄️ Checking travel history & policy…", "progress": 40}
-            history = await self._db_history_agent(intent, source_ids, db)
+            history = await self._db_history_agent(intent, source_ids, db, dataframes)
             span.set_attribute("history.tier", history.traveler_tier)
             span.set_attribute("history.budget", history.budget_limit_usd)
+            span.set_attribute("history.user_pref_airline", history.user_preferred_airline or "")
+
+            # ── Phase 2b: Airline preference resolution ───────────────────
+            # If no preference came from uploaded sources, check whether the
+            # user just answered a prior clarify (chat_history-driven), then
+            # otherwise emit a clarify and stop.
+            if not history.user_preferred_airline:
+                from_history = _extract_airline_answer_from_history(question, chat_history or [])
+                if from_history == "__none__":
+                    history.user_preferred_airline = None  # user explicitly said no preference
+                elif from_history:
+                    history.user_preferred_airline = from_history
+                else:
+                    # First time we hit this question for this trip — ask.
+                    yield {
+                        "kind": "travel_clarify",
+                        "content": (
+                            f"Before I search, which is your **{AIRLINE_CLARIFY_MARKER}**? "
+                            "Type an airline name (e.g. `Emirates`, `IndiGo`, `Air India`) "
+                            "or `no preference` to see all carriers."
+                        ),
+                    }
+                    return
 
             # ── Phase 3: Duffel search (inner loop with constraint relaxation)
             yield {"kind": "thinking", "step": "🔍 Searching live flight availability…", "progress": 65}
@@ -316,7 +419,11 @@ class TravelOrchestrator:
         return partial
 
     async def _db_history_agent(
-        self, intent: TravelIntent, source_ids: list[str] | None, db: Any
+        self,
+        intent: TravelIntent,
+        source_ids: list[str] | None,
+        db: Any,
+        dataframes: list[Any] | None = None,
     ) -> TravelHistory:
         """Query the uploaded travel DB for history + extract policy tier.
 
@@ -365,6 +472,11 @@ class TravelOrchestrator:
             if not history.preferred_airlines:
                 history.preferred_airlines = tier_data.get("preferred_airlines") or []
             history.policy = tier_data
+
+            # Detect user's preferred airline from uploaded dataframes.
+            # Look for columns matching (preferred|favorite|favourite)[ _]?(airline|carrier).
+            if dataframes:
+                history.user_preferred_airline = _extract_preferred_airline_from_dfs(dataframes)
             return history
 
     async def _duffel_agent(
@@ -462,6 +574,24 @@ class TravelOrchestrator:
                 ))
 
             offers.sort(key=lambda o: (-o.score, o.price_usd))
+
+            # Filter by user's preferred airline if set. Falls back to showing
+            # all offers (with a banner) when nothing matches the carrier.
+            pref = (history.user_preferred_airline or "").strip()
+            if pref and offers:
+                pref_low = pref.lower()
+                # Exact IATA match (2-3 letters, all alphanum) is more precise
+                # than substring; otherwise compare against airline display name.
+                is_iata = len(pref) <= 3 and pref.isalpha()
+                if is_iata:
+                    filtered = [o for o in offers if o.airline_iata.upper() == pref.upper()]
+                else:
+                    filtered = [o for o in offers if pref_low in o.airline.lower()]
+                if filtered:
+                    offers = filtered
+                    intent.airline_filter_applied = True
+                else:
+                    intent.airline_fallback_to_all = True
             span.set_attribute("duffel.offers_returned", len(offers))
             return offers
 
@@ -532,11 +662,28 @@ class TravelOrchestrator:
             else:
                 best = offers[0]
                 compliant_count = sum(1 for o in offers if o.policy_compliant)
+                pref = history.user_preferred_airline
+                if intent.airline_filter_applied and pref:
+                    pref_note = f"*Filtered to your preferred airline: **{pref}**.*\n\n"
+                elif intent.airline_fallback_to_all and pref:
+                    route_label = f"{intent.origin} → {intent.destination}"
+                    pref_note = (
+                        f"*No **{pref}** flights on this route ({route_label}) "
+                        f"on {intent.departure_date} — showing all available options.*\n\n"
+                    )
+                else:
+                    pref_note = ""
+                trip_kind = "round-trip" if intent.return_date else "one-way"
+                date_line = (
+                    f"on {intent.departure_date} → returning {intent.return_date}"
+                    if intent.return_date else f"on {intent.departure_date}"
+                )
                 summary = (
                     f"{assumed_note}"
+                    f"{pref_note}"
                     f"Found **{len(offers)} flight offer(s)** for "
-                    f"**{intent.origin} → {intent.destination}** on {intent.departure_date} "
-                    f"({intent.cabin_class}).\n\n"
+                    f"**{intent.origin} → {intent.destination}** {date_line} "
+                    f"({trip_kind}, {intent.cabin_class}).\n\n"
                     f"**Best match:** {best.airline} — **${best.price_usd:.0f}** "
                     f"({'✅ Policy compliant' if best.policy_compliant else '⚠️ Needs approval'})\n\n"
                     f"{compliant_count} of {len(offers)} offers comply with your **{history.traveler_tier}** tier policy "

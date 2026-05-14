@@ -4006,6 +4006,9 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     try:
                         orchestrator = TravelOrchestrator()
                         _src_ids = [row["id"] for row, _ in selected_sources]
+                        # Pass loaded DataFrames so the orchestrator can scan for a
+                        # preferred-airline column without re-reading from disk.
+                        _dfs = [src.dataframe for _, src in selected_sources if getattr(src, "dataframe", None) is not None]
                         async for ev in orchestrator.run(
                             question=question,
                             chat_id=chat_id,
@@ -4015,9 +4018,16 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                             pool=pool,
                             db=DB,
                             config=CONFIG,
+                            dataframes=_dfs,
+                            chat_history=history,
                         ):
                             if ev.get("kind") == "thinking":
                                 yield {"event": "thinking", "data": json.dumps({"step": ev.get("step", ""), "progress": ev.get("progress")})}
+                            elif ev.get("kind") == "travel_clarify":
+                                _clar_content = ev.get("content", "")
+                                _clar_msg = DB.add_message(chat_id, "assistant", _clar_content, payload={"kind": "clarify"})
+                                yield {"event": "clarify", "data": json.dumps({"content": _clar_content, "message_id": _clar_msg["id"]})}
+                                yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
                             elif ev.get("kind") == "travel_result":
                                 _travel_payload = {
                                     "kind": "travel_result",

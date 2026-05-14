@@ -343,7 +343,19 @@ app.get('/sse', async (req, res) => {
   const transport = new SSEServerTransport('/message', res);
   sseTransports.set(transport.sessionId, transport);
 
+  // Heartbeat: write an SSE comment line every 15s. Without this, an idle MCP
+  // session triggers httpx.ReadTimeout on the Python client (~5-8 min) and the
+  // backend marks the connector as errored.
+  const heartbeat = setInterval(() => {
+    try {
+      if (!res.writableEnded) res.write(': ping\n\n');
+    } catch (_) {
+      clearInterval(heartbeat);
+    }
+  }, 15000);
+
   res.on('close', () => {
+    clearInterval(heartbeat);
     sseTransports.delete(transport.sessionId);
     console.log(`[Duffel Bridge] SSE session ${transport.sessionId} closed`);
   });
