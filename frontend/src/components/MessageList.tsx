@@ -137,6 +137,11 @@ const Bubble = React.memo(function Bubble({
   const showThinking =
     message.thinking && !message.content && !message.result && !message.pending;
 
+  const hasTravelData = !!message.travel_intent && (
+    (message.travel_offers?.length ?? 0) > 0 ||
+    (message.hotel_offers?.length ?? 0) > 0
+  );
+
   return (
     <div className="self-start max-w-[720px] w-full animate-in slide-in-from-left-2 duration-500">
       <div className="text-[14px] leading-[1.7]" style={{ color: "var(--color-text-primary)" }}>
@@ -169,11 +174,17 @@ const Bubble = React.memo(function Bubble({
           />
         )}
         {message.result && <ResultBlock result={message.result} />}
-        {message.travel_offers && message.travel_intent && (
-          <TravelResultPanel 
-            offers={message.travel_offers} 
+        {hasTravelData && message.travel_intent && (
+          <TravelResultPanel
+            offers={message.travel_offers || []}
+            hotels={message.hotel_offers || []}
             intent={message.travel_intent}
-            onRefresh={onAskFollowUp ? () => onAskFollowUp("Refresh the flight prices for this search") : undefined}
+            onRefresh={onAskFollowUp ? () => {
+              const wantsF = message.travel_intent?.wants_flights;
+              const wantsH = message.travel_intent?.wants_hotels;
+              const refreshSubject = (wantsF && wantsH) ? "flight and hotel prices" : wantsH ? "hotel prices" : "flight prices";
+              onAskFollowUp(`Refresh the ${refreshSubject} for this search`);
+            } : undefined}
           />
         )}
         {message.pending && !message.resolved && (

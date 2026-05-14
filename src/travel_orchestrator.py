@@ -37,9 +37,18 @@ class TravelIntent:
     confidence: float = 0.0
     raw_question: str = ""
     date_assumed: bool = False
+    hotel_dates_assumed: bool = False
     duffel_offline: bool = False
     airline_filter_applied: bool = False
     airline_fallback_to_all: bool = False
+    wants_flights: bool = True
+    wants_hotels: bool = False
+    check_in_date: str | None = None
+    check_out_date: str | None = None
+    rooms: int = 1
+    guests: int = 1
+    hotels_offline: bool = False
+    hotels_error: str | None = None
 
 
 @dataclass
@@ -53,6 +62,27 @@ class TravelHistory:
     # User-chosen airline preference for THIS trip (from Excel column or follow-up answer).
     # Distinct from policy-level `preferred_airlines`.
     user_preferred_airline: str | None = None
+
+
+@dataclass
+class HotelOffer:
+    hotel_id: str
+    name: str
+    address: str
+    star_rating: int | None
+    review_score: float | None
+    photo_url: str
+    price_per_night: float
+    total_price: float
+    currency: str
+    check_in_date: str
+    check_out_date: str
+    rooms: int
+    guests: int
+    redirect_url: str
+    policy_compliant: bool
+    policy_violation_reason: str | None
+    score: float = 0.0
 
 
 @dataclass
@@ -74,6 +104,10 @@ class FlightOffer:
     booking_redirect_url: str
     expires_at: str | None = None
     score: float = 0.0
+    # For round-trip offers, Duffel returns a second slice. We carry it through
+    # untouched so the UI can render outbound + return on the same card. None
+    # for one-way offers.
+    return_slice: dict[str, Any] | None = None
 
 
 # ── Multi-loop thinking chain ─────────────────────────────────────────────────
@@ -108,6 +142,16 @@ _DATE_RE = re.compile(r'\b(\d{4}-\d{2}-\d{2})\b')
 _PAX_RE  = re.compile(r'\b(\d+)\s*(?:passenger|pax|adult|people|person|travell?er)', re.I)
 _AIRLINE_COL_RE = re.compile(r'(?i)(preferred|favorite|favourite|fav)[\s_]*(airline|carrier)')
 _NO_PREF_RE = re.compile(r'(?i)\b(no preference|no preferred|none|skip|any airline|any carrier|doesn.?t matter|don.?t care)\b')
+_HOTEL_KEYWORDS_RE = re.compile(
+    r'\b(hotel|hotels|stay|stays|lodging|accommodation|accommodations|room|rooms)\b',
+    re.IGNORECASE,
+)
+_FLIGHT_KEYWORDS_RE = re.compile(
+    r'\b(flight|flights|fly|flying|airline|airfare|ticket|tickets|airport)\b',
+    re.IGNORECASE,
+)
+_ROOMS_RE = re.compile(r'\b(\d+)\s*rooms?\b', re.IGNORECASE)
+_GUESTS_RE = re.compile(r'\b(\d+)\s*guests?\b', re.IGNORECASE)
 _CABIN_KEYWORDS = {
     "economy": ["economy", "coach", "standard"],
     "premium_economy": ["premium economy", "premium_economy", "premium"],
@@ -122,6 +166,12 @@ def extract_travel_intent(question: str) -> TravelIntent:
     if len(iata_codes) >= 2:
         intent.origin, intent.destination = iata_codes[0], iata_codes[1]
         intent.confidence += 0.5
+    elif len(iata_codes) == 1:
+        # Hotel-only queries often have only a destination IATA code.
+        # We'll assign it tentatively; wants_flights/wants_hotels logic below
+        # will determine whether origin is actually required.
+        intent.destination = iata_codes[0]
+        intent.confidence += 0.3
     dates = _DATE_RE.findall(question)
     if dates:
         intent.departure_date = dates[0]
@@ -138,6 +188,31 @@ def extract_travel_intent(question: str) -> TravelIntent:
             intent.cabin_class = cabin
             intent.confidence += 0.1
             break
+
+    mentions_hotel = bool(_HOTEL_KEYWORDS_RE.search(question))
+    mentions_flight = bool(_FLIGHT_KEYWORDS_RE.search(question))
+    if mentions_hotel and not mentions_flight:
+        intent.wants_flights = False
+        intent.wants_hotels = True
+    elif mentions_hotel and mentions_flight:
+        intent.wants_flights = True
+        intent.wants_hotels = True
+    elif mentions_flight:
+        intent.wants_flights = True
+        intent.wants_hotels = False
+    # else: leave defaults (flight-only)
+
+    rooms_match = _ROOMS_RE.search(question)
+    if rooms_match:
+        intent.rooms = int(rooms_match.group(1))
+    guests_match = _GUESTS_RE.search(question)
+    if guests_match:
+        intent.guests = int(guests_match.group(1))
+
+    if intent.wants_hotels:
+        intent.check_in_date = intent.check_in_date or intent.departure_date
+        intent.check_out_date = intent.check_out_date or intent.return_date
+
     return intent
 
 
@@ -254,6 +329,27 @@ def _score_offer(offer_data: dict[str, Any], history: TravelHistory, policy_tier
     return composite, True, None
 
 
+def _score_hotel(
+    raw: dict[str, Any], history: TravelHistory, policy_tier: dict[str, Any]
+) -> tuple[float, bool, str | None]:
+    price_per_night = float(raw.get("price_per_night") or 0)
+    per_night_cap = float(policy_tier.get("hotel_max_per_night_usd") or 200)
+    currency = str(raw.get("currency") or "USD")
+    star = raw.get("star_rating")
+    star_score = (star / 5.0) if isinstance(star, (int, float)) else 0.5
+    review = raw.get("review_score")
+    review_score_val = (review / 10.0) if isinstance(review, (int, float)) else 0.5
+    if currency != "USD":
+        price_score = 0.5
+        composite = 0.5 * price_score + 0.3 * star_score + 0.2 * review_score_val
+        return composite, False, f"Cannot verify ${per_night_cap:.0f}/night cap — hotel priced in {currency}"
+    price_score = max(0.0, 1.0 - price_per_night / per_night_cap) if per_night_cap > 0 else 0.5
+    composite = 0.5 * price_score + 0.3 * star_score + 0.2 * review_score_val
+    if price_per_night > per_night_cap:
+        return composite, False, f"Per-night price ${price_per_night:.0f} exceeds policy cap ${per_night_cap:.0f}"
+    return composite, True, None
+
+
 # ── Main Orchestrator ─────────────────────────────────────────────────────────
 
 class TravelOrchestrator:
@@ -290,18 +386,28 @@ class TravelOrchestrator:
             span.set_attribute("intent.origin", intent.origin or "")
             span.set_attribute("intent.destination", intent.destination or "")
 
-            # Early-exit if we still can't parse origin / destination as IATA codes.
-            # Without this, Duffel returns nothing and the user sees a generic
-            # "No flights found for None → None" string.
-            if not intent.origin or not intent.destination:
-                yield {
-                    "kind": "travel_result",
-                    "text": (
+            # Early-exit if we can't determine enough to search.
+            # Flights need both origin and destination; hotels only need destination.
+            missing_for_flights = intent.wants_flights and (not intent.origin or not intent.destination)
+            missing_for_hotels = intent.wants_hotels and not intent.destination
+            if missing_for_flights or (not intent.wants_flights and missing_for_hotels):
+                if intent.wants_hotels and not intent.wants_flights:
+                    err_text = (
+                        "I couldn't determine a destination from your question. "
+                        "Try naming the city or 3-letter airport code — for example "
+                        "`hotels in RUH from 2026-05-30 to 2026-06-05`."
+                    )
+                else:
+                    err_text = (
                         "I couldn't pin down a clear origin and destination from your question. "
                         "Try naming the cities or 3-letter airport codes — for example "
                         "`flights from HYD to RUH on 2026-05-30 returning 2026-06-05`."
-                    ),
+                    )
+                yield {
+                    "kind": "travel_result",
+                    "text": err_text,
                     "travel_offers": [],
+                    "hotel_offers": [],
                     "travel_intent": {
                         "origin": intent.origin,
                         "destination": intent.destination,
@@ -309,6 +415,12 @@ class TravelOrchestrator:
                         "return_date": intent.return_date,
                         "passengers": intent.passengers,
                         "cabin_class": intent.cabin_class,
+                        "wants_flights": intent.wants_flights,
+                        "wants_hotels": intent.wants_hotels,
+                        "check_in_date": intent.check_in_date,
+                        "check_out_date": intent.check_out_date,
+                        "rooms": intent.rooms,
+                        "guests": intent.guests,
                     },
                 }
                 return
@@ -320,11 +432,9 @@ class TravelOrchestrator:
             span.set_attribute("history.budget", history.budget_limit_usd)
             span.set_attribute("history.user_pref_airline", history.user_preferred_airline or "")
 
-            # ── Phase 2b: Airline preference resolution ───────────────────
-            # If no preference came from uploaded sources, check whether the
-            # user just answered a prior clarify (chat_history-driven), then
-            # otherwise emit a clarify and stop.
-            if not history.user_preferred_airline:
+            # ── Phase 2b: Airline preference resolution (flights only) ────
+            # Hotel-only queries skip this gate entirely.
+            if intent.wants_flights and not history.user_preferred_airline:
                 from_history = _extract_airline_answer_from_history(question, chat_history or [])
                 if from_history == "__none__":
                     history.user_preferred_airline = None  # user explicitly said no preference
@@ -342,14 +452,42 @@ class TravelOrchestrator:
                     }
                     return
 
-            # ── Phase 3: Duffel search (inner loop with constraint relaxation)
-            yield {"kind": "thinking", "step": "🔍 Searching live flight availability…", "progress": 65}
-            offers = await self._duffel_agent(intent, history, pool, config)
-            span.set_attribute("duffel.offer_count", len(offers))
+            # Default missing dates once so both sub-agents see the same values
+            # regardless of asyncio.gather scheduling order.
+            if intent.wants_flights and not intent.departure_date:
+                intent.departure_date = (date.today() + timedelta(days=7)).isoformat()
+                intent.date_assumed = True
+            if intent.wants_hotels:
+                if not intent.check_in_date:
+                    intent.check_in_date = intent.departure_date or (date.today() + timedelta(days=7)).isoformat()
+                    intent.hotel_dates_assumed = True
+                if not intent.check_out_date:
+                    intent.check_out_date = (date.fromisoformat(intent.check_in_date) + timedelta(days=2)).isoformat()
+                    intent.hotel_dates_assumed = True
 
-            # ── Phase 4: Synthesize ───────────────────────────────────────
+            # ── Phase 3 & 4: Search + Synthesize ─────────────────────────
+            yield {"kind": "thinking", "step": "🔍 Searching live availability…", "progress": 65}
+
+            flight_task = self._duffel_agent(intent, history, pool, config) if intent.wants_flights else None
+            hotel_task = self._hotel_agent(intent, history, pool, config) if intent.wants_hotels else None
+
+            if flight_task and hotel_task:
+                offers, hotels = await asyncio.gather(flight_task, hotel_task)
+            elif flight_task:
+                offers = await flight_task
+                hotels = []
+            elif hotel_task:
+                offers = []
+                hotels = await hotel_task
+            else:
+                offers = []
+                hotels = []
+
+            span.set_attribute("duffel.offer_count", len(offers))
+            span.set_attribute("hotels.offer_count", len(hotels))
+
             yield {"kind": "thinking", "step": "📊 Ranking offers by policy & preference…", "progress": 85}
-            async for event in self._synthesize(intent, history, offers, question):
+            async for event in self._synthesize(intent, history, offers, hotels, question):
                 yield event
 
     # ── Sub-agents ────────────────────────────────────────────────────────────
@@ -382,7 +520,13 @@ class TravelOrchestrator:
             f"today is {today_iso}; if year is missing, assume the next occurrence on or after today), "
             "return_date (same rules as departure_date, or null for one-way), "
             "passengers (positive integer, default 1), "
-            "cabin_class (one of: economy, premium_economy, business, first).\n\n"
+            "cabin_class (one of: economy, premium_economy, business, first), "
+            "wants_flights (boolean: true if the user wants flights), "
+            "wants_hotels (boolean: true if the user wants a hotel/lodging/stay), "
+            "check_in_date (YYYY-MM-DD or null: hotel check-in date if mentioned), "
+            "check_out_date (YYYY-MM-DD or null: hotel check-out date if mentioned), "
+            "rooms (positive integer, default 1), "
+            "guests (positive integer, default 1).\n\n"
             f"Request: {question}\n\n"
             f"Already extracted: origin={partial.origin}, destination={partial.destination}, "
             f"departure_date={partial.departure_date}, passengers={partial.passengers}, "
@@ -413,6 +557,26 @@ class TravelOrchestrator:
             cabin = str(data.get("cabin_class") or "").strip().lower()
             if cabin in {"economy", "premium_economy", "business", "first"}:
                 partial.cabin_class = cabin
+            if isinstance(data.get("wants_flights"), bool):
+                partial.wants_flights = data["wants_flights"]
+            if isinstance(data.get("wants_hotels"), bool):
+                partial.wants_hotels = data["wants_hotels"]
+            check_in = str(data.get("check_in_date") or "").strip()
+            if date_re.match(check_in):
+                partial.check_in_date = check_in
+            check_out = str(data.get("check_out_date") or "").strip()
+            if date_re.match(check_out):
+                partial.check_out_date = check_out
+            if data.get("rooms") is not None:
+                try:
+                    partial.rooms = max(1, int(data["rooms"]))
+                except (TypeError, ValueError):
+                    pass
+            if data.get("guests") is not None:
+                try:
+                    partial.guests = max(1, int(data["guests"]))
+                except (TypeError, ValueError):
+                    pass
             partial.confidence = 0.95
         except Exception:
             pass
@@ -502,11 +666,6 @@ class TravelOrchestrator:
             if not intent.origin or not intent.destination:
                 return []
 
-            if not intent.departure_date:
-                intent.departure_date = (date.today() + timedelta(days=7)).isoformat()
-                intent.date_assumed = True
-                span.set_attribute("duffel.date_defaulted", intent.departure_date)
-
             # Build SANITIZED params — zero-trust boundary
             search_params: dict[str, Any] = {
                 "origin": intent.origin,
@@ -571,6 +730,7 @@ class TravelOrchestrator:
                     booking_redirect_url=str(raw.get("booking_redirect_url") or ""),
                     expires_at=raw.get("expires_at"),
                     score=score,
+                    return_slice=raw.get("return_slice") if isinstance(raw.get("return_slice"), dict) else None,
                 ))
 
             offers.sort(key=lambda o: (-o.score, o.price_usd))
@@ -595,11 +755,103 @@ class TravelOrchestrator:
             span.set_attribute("duffel.offers_returned", len(offers))
             return offers
 
+    async def _hotel_agent(
+        self, intent: TravelIntent, history: TravelHistory, pool: Any, config: Any
+    ) -> list[HotelOffer]:
+        with TRACER.start_as_current_span("hotel_search_agent") as span:
+            if not intent.wants_hotels:
+                return []
+
+            duffel_cid = None
+            for cid, state in (pool.connectors if pool else {}).items():
+                if "duffel" in state.name.lower() and state.status == "connected":
+                    duffel_cid = cid
+                    break
+
+            if not duffel_cid:
+                span.set_attribute("hotels.available", False)
+                intent.hotels_offline = True
+                return []
+
+            if not intent.destination:
+                return []
+
+            check_in = intent.check_in_date
+            check_out = intent.check_out_date
+
+            try:
+                nights = max(1, (date.fromisoformat(check_out) - date.fromisoformat(check_in)).days)
+            except (ValueError, TypeError):
+                nights = 2
+            per_night_cap = float(history.policy.get("hotel_max_per_night_usd") or 200)
+            max_price_total_usd = per_night_cap * nights
+
+            search_params = {
+                "destination_iata": intent.destination,
+                "check_in_date": check_in,
+                "check_out_date": check_out,
+                "rooms": intent.rooms,
+                "guests": intent.guests,
+                "max_price_usd": max_price_total_usd,
+            }
+
+            try:
+                result = await pool.call_tool(duffel_cid, "search_hotels", search_params)
+                text = extract_text_content(result)
+                try:
+                    parsed = json.loads(text) if text else None
+                except json.JSONDecodeError:
+                    parsed = None
+                    span.set_attribute("hotels.parse_error", (text or "")[:200])
+                    intent.hotels_error = "Hotel search returned an unparseable response."
+                    return []
+            except Exception as exc:
+                span.set_attribute("hotels.exception", str(exc))
+                intent.hotels_error = f"Hotel search request failed: {exc}"
+                return []
+
+            if isinstance(parsed, dict) and parsed.get("error"):
+                span.set_attribute("hotels.error", parsed["error"])
+                intent.hotels_error = parsed["error"]
+                return []
+
+            if not isinstance(parsed, list):
+                return []
+
+            policy_tier = history.policy
+            hotels: list[HotelOffer] = []
+            for raw in parsed[:10]:
+                score, compliant, violation = _score_hotel(raw, history, policy_tier)
+                hotels.append(HotelOffer(
+                    hotel_id=str(raw.get("hotel_id") or ""),
+                    name=str(raw.get("name") or ""),
+                    address=str(raw.get("address") or ""),
+                    star_rating=raw.get("star_rating"),
+                    review_score=raw.get("review_score"),
+                    photo_url=str(raw.get("photo_url") or ""),
+                    price_per_night=float(raw.get("price_per_night") or 0),
+                    total_price=float(raw.get("total_price") or 0),
+                    currency=str(raw.get("currency") or "USD"),
+                    check_in_date=str(raw.get("check_in_date") or check_in),
+                    check_out_date=str(raw.get("check_out_date") or check_out),
+                    rooms=int(raw.get("rooms") or intent.rooms),
+                    guests=int(raw.get("guests") or intent.guests),
+                    redirect_url=str(raw.get("redirect_url") or ""),
+                    policy_compliant=compliant,
+                    policy_violation_reason=violation,
+                    score=score,
+                ))
+
+            hotels.sort(key=lambda h: (-h.score, h.total_price))
+            span.set_attribute("hotels.returned", len(hotels))
+            return hotels
+
     async def _synthesize(
         self,
         intent: TravelIntent,
         history: TravelHistory,
         offers: list[FlightOffer],
+        hotels: list[HotelOffer],
         question: str,
     ) -> AsyncIterator[dict[str, Any]]:
         with TRACER.start_as_current_span("travel_synthesize"):
@@ -623,8 +875,32 @@ class TravelOrchestrator:
                     "booking_redirect_url": o.booking_redirect_url,
                     "expires_at": o.expires_at,
                     "score": round(o.score, 3),
+                    "return_slice": o.return_slice,
                 }
                 for o in offers[:5]
+            ]
+
+            hotel_dicts = [
+                {
+                    "hotel_id": h.hotel_id,
+                    "name": h.name,
+                    "address": h.address,
+                    "star_rating": h.star_rating,
+                    "review_score": h.review_score,
+                    "photo_url": h.photo_url,
+                    "price_per_night": h.price_per_night,
+                    "total_price": h.total_price,
+                    "currency": h.currency,
+                    "check_in_date": h.check_in_date,
+                    "check_out_date": h.check_out_date,
+                    "rooms": h.rooms,
+                    "guests": h.guests,
+                    "redirect_url": h.redirect_url,
+                    "policy_compliant": h.policy_compliant,
+                    "policy_violation_reason": h.policy_violation_reason,
+                    "score": round(h.score, 3),
+                }
+                for h in hotels
             ]
 
             intent_dict = {
@@ -636,6 +912,12 @@ class TravelOrchestrator:
                 "cabin_class": intent.cabin_class,
                 "traveler_tier": history.traveler_tier,
                 "budget_limit_usd": history.budget_limit_usd,
+                "wants_flights": intent.wants_flights,
+                "wants_hotels": intent.wants_hotels,
+                "check_in_date": intent.check_in_date,
+                "check_out_date": intent.check_out_date,
+                "rooms": intent.rooms,
+                "guests": intent.guests,
             }
 
             assumed_note = (
@@ -644,55 +926,113 @@ class TravelOrchestrator:
                 if intent.date_assumed else ""
             )
 
-            # Text summary for markdown fallback
-            if not offers:
-                if intent.duffel_offline:
-                    summary = (
-                        "The Duffel flight-search bridge is offline right now, so I couldn't "
-                        "look up live availability. Reconnect the Duffel MCP from the connector "
-                        "panel (plug icon) and try again."
-                    )
+            # Build flight summary segment
+            if intent.wants_flights:
+                if not offers:
+                    if intent.duffel_offline:
+                        flight_summary = (
+                            "The Duffel flight-search bridge is offline right now, so I couldn't "
+                            "look up live availability. Reconnect the Duffel MCP from the connector "
+                            "panel (plug icon) and try again."
+                        )
+                    else:
+                        flight_summary = (
+                            f"{assumed_note}"
+                            f"No flights returned for **{intent.origin} → {intent.destination}** "
+                            f"on {intent.departure_date} in {intent.cabin_class}. "
+                            "Try a different date, cabin class, or nearby airports."
+                        )
                 else:
-                    summary = (
+                    best = offers[0]
+                    compliant_count = sum(1 for o in offers if o.policy_compliant)
+                    pref = history.user_preferred_airline
+                    if intent.airline_filter_applied and pref:
+                        pref_note = f"*Filtered to your preferred airline: **{pref}**.*\n\n"
+                    elif intent.airline_fallback_to_all and pref:
+                        route_label = f"{intent.origin} → {intent.destination}"
+                        pref_note = (
+                            f"*No **{pref}** flights on this route ({route_label}) "
+                            f"on {intent.departure_date} — showing all available options.*\n\n"
+                        )
+                    else:
+                        pref_note = ""
+                    trip_kind = "round-trip" if intent.return_date else "one-way"
+                    date_line = (
+                        f"on {intent.departure_date} → returning {intent.return_date}"
+                        if intent.return_date else f"on {intent.departure_date}"
+                    )
+                    return_line = ""
+                    if intent.return_date and best.return_slice:
+                        rs = best.return_slice
+                        return_line = (
+                            f"**Return:** {rs.get('airline', '')} on {intent.return_date} from "
+                            f"{rs.get('origin', '')} → {rs.get('destination', '')}.\n\n"
+                        )
+                    flight_summary = (
                         f"{assumed_note}"
-                        f"No flights returned for **{intent.origin} → {intent.destination}** "
-                        f"on {intent.departure_date} in {intent.cabin_class}. "
-                        "Try a different date, cabin class, or nearby airports."
+                        f"{pref_note}"
+                        f"Found **{len(offers)} flight offer(s)** for "
+                        f"**{intent.origin} → {intent.destination}** {date_line} "
+                        f"({trip_kind}, {intent.cabin_class}).\n\n"
+                        f"**Best match:** {best.airline} — **${best.price_usd:.0f}** "
+                        f"({'✅ Policy compliant' if best.policy_compliant else '⚠️ Needs approval'})\n\n"
+                        f"{return_line}"
+                        f"{compliant_count} of {len(offers)} offers comply with your **{history.traveler_tier}** tier policy "
+                        f"(budget: ${history.budget_limit_usd:.0f})."
                     )
             else:
-                best = offers[0]
-                compliant_count = sum(1 for o in offers if o.policy_compliant)
-                pref = history.user_preferred_airline
-                if intent.airline_filter_applied and pref:
-                    pref_note = f"*Filtered to your preferred airline: **{pref}**.*\n\n"
-                elif intent.airline_fallback_to_all and pref:
-                    route_label = f"{intent.origin} → {intent.destination}"
-                    pref_note = (
-                        f"*No **{pref}** flights on this route ({route_label}) "
-                        f"on {intent.departure_date} — showing all available options.*\n\n"
-                    )
+                flight_summary = ""
+
+            # Build hotel summary segment
+            if intent.wants_hotels:
+                check_in_label = intent.check_in_date or intent.departure_date or "?"
+                check_out_label = intent.check_out_date or intent.return_date or "?"
+                if not hotels:
+                    if intent.hotels_offline:
+                        hotel_summary = (
+                            "The Duffel hotel-search bridge is offline right now, so I couldn't "
+                            "look up live hotel availability. Reconnect the Duffel MCP from the "
+                            "connector panel (plug icon) and try again."
+                        )
+                    elif intent.hotels_error:
+                        hotel_summary = (
+                            f"Hotel search failed for **{intent.destination}**: {intent.hotels_error}. "
+                            "Please try again or adjust your dates."
+                        )
+                    else:
+                        hotel_summary = (
+                            f"No hotels returned for **{intent.destination}** on "
+                            f"{check_in_label} → {check_out_label}. "
+                            "Try a different date or a larger budget."
+                        )
                 else:
-                    pref_note = ""
-                trip_kind = "round-trip" if intent.return_date else "one-way"
-                date_line = (
-                    f"on {intent.departure_date} → returning {intent.return_date}"
-                    if intent.return_date else f"on {intent.departure_date}"
-                )
-                summary = (
-                    f"{assumed_note}"
-                    f"{pref_note}"
-                    f"Found **{len(offers)} flight offer(s)** for "
-                    f"**{intent.origin} → {intent.destination}** {date_line} "
-                    f"({trip_kind}, {intent.cabin_class}).\n\n"
-                    f"**Best match:** {best.airline} — **${best.price_usd:.0f}** "
-                    f"({'✅ Policy compliant' if best.policy_compliant else '⚠️ Needs approval'})\n\n"
-                    f"{compliant_count} of {len(offers)} offers comply with your **{history.traveler_tier}** tier policy "
-                    f"(budget: ${history.budget_limit_usd:.0f})."
-                )
+                    best_h = hotels[0]
+                    stars = f"{best_h.star_rating} stars" if best_h.star_rating is not None else "unrated"
+                    hotel_assumed_note = (
+                        "*Note: I assumed your hotel dates because no specific dates were given.*\n\n"
+                        if intent.hotel_dates_assumed else ""
+                    )
+                    hotel_summary = (
+                        f"{hotel_assumed_note}"
+                        f"Found **{len(hotels)} hotel(s)** near **{intent.destination}** "
+                        f"for {check_in_label} → {check_out_label}. "
+                        f"Best match: **{best_h.name}** at **{best_h.currency} {best_h.price_per_night:.0f}/night** ({stars})."
+                    )
+            else:
+                hotel_summary = ""
+
+            # Combine summaries
+            if flight_summary and hotel_summary:
+                summary = flight_summary + "\n\n---\n\n" + hotel_summary
+            elif flight_summary:
+                summary = flight_summary
+            else:
+                summary = hotel_summary
 
             yield {
                 "kind": "travel_result",
                 "text": summary,
                 "travel_offers": offer_dicts,
+                "hotel_offers": hotel_dicts,
                 "travel_intent": intent_dict,
             }

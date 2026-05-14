@@ -466,6 +466,7 @@ export default function Home() {
                 content: ev.data.text,
                 travel_intent: ev.data.travel_intent,
                 travel_offers: ev.data.travel_offers,
+                hotel_offers: ev.data.hotel_offers,
                 thinking: null,
               });
               setLoading(false);
@@ -608,6 +609,9 @@ export default function Home() {
           role: "assistant",
           content: m.content,
           result: m.payload?.result,
+          travel_intent: m.payload?.travel_intent,
+          travel_offers: m.payload?.travel_offers,
+          hotel_offers: m.payload?.hotel_offers,
           error: isError || undefined,
         };
       });

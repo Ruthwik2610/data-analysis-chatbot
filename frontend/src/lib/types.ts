@@ -121,6 +121,32 @@ export interface TravelIntent {
   cabin_class: string;
   traveler_tier: string;
   budget_limit_usd: number;
+  check_in_date: string | null;
+  check_out_date: string | null;
+  rooms: number;
+  guests: number;
+  wants_flights: boolean;
+  wants_hotels: boolean;
+}
+
+export interface HotelOffer {
+  hotel_id: string;
+  name: string;
+  address: string;
+  star_rating: number | null;
+  review_score: number | null;
+  photo_url: string;
+  price_per_night: number;
+  total_price: number;
+  currency: string;
+  check_in_date: string;
+  check_out_date: string;
+  rooms: number;
+  guests: number;
+  redirect_url: string;
+  policy_compliant: boolean;
+  policy_violation_reason: string | null;
+  score: number;
 }
 
 export interface TravelOffer {
@@ -140,6 +166,16 @@ export interface TravelOffer {
   policy_violation_reason: string | null;
   booking_redirect_url: string;
   expires_at: string | null;
+  return_slice?: {
+    origin: string;
+    destination: string;
+    departure_at: string;
+    arrival_at: string;
+    duration_minutes: number;
+    stops: number;
+    airline: string;
+    airline_iata: string;
+  } | null;
   score: number;
 }
 
@@ -161,6 +197,7 @@ export type Message =
       notice?: ModelFallbackNotice | null;
       travel_intent?: TravelIntent;
       travel_offers?: TravelOffer[];
+      hotel_offers?: HotelOffer[];
     };
 
 export type SSEEvent =
@@ -171,7 +208,7 @@ export type SSEEvent =
   | { event: "clarify"; data: { content: string; message_id: string } }
   | { event: "error"; data: { message: string; detail?: string } }
   | { event: "notice"; data: ModelFallbackNotice }
-  | { event: "travel_result"; data: { text: string; travel_intent: TravelIntent; travel_offers: TravelOffer[] } }
+  | { event: "travel_result"; data: { text: string; travel_intent: TravelIntent; travel_offers: TravelOffer[]; hotel_offers: HotelOffer[] } }
   | { event: "done"; data: { message_id?: string; chat_id: string } };
 
 export type MCPStatus = "connecting" | "connected" | "error";

@@ -3997,7 +3997,9 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                 _proj_category = (project_instructions or {}).get("category", "")
                 _travel_keywords = ("flight", "airline", "airport", "fly ", "depart",
                                     "cabin class", "economy class", "business class",
-                                    "travel to", "itinerary", " pnr ")
+                                    "travel to", "itinerary", " pnr ",
+                                    "hotel", "hotels", "stay", "lodging",
+                                    "accommodation", "check-in", "check in")
                 _is_travel_query = (
                     _proj_category == "travel"
                     or any(kw in question.lower() for kw in _travel_keywords)
@@ -4033,6 +4035,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                                     "kind": "travel_result",
                                     "text": ev.get("text", ""),
                                     "travel_offers": ev.get("travel_offers", []),
+                                    "hotel_offers": ev.get("hotel_offers", []),
                                     "travel_intent": ev.get("travel_intent", {}),
                                 }
                                 DB.add_message(chat_id, "assistant", ev.get("text", ""), payload=_travel_payload)

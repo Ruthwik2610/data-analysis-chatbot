@@ -90,6 +90,26 @@ const TOOLS = [
       required: ['origin', 'destination', 'departure_date'],
     },
   },
+  {
+    name: 'search_hotels',
+    description: 'Search for available hotels near a destination. Returns up to 10 properties sorted by price (cheapest first). Provide an IATA city or airport code to locate the destination.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        destination_iata: {
+          type: 'string',
+          description: '3-letter IATA city or airport code (e.g. RUH, LHR, JFK)',
+        },
+        check_in_date: { type: 'string', description: 'Check-in date in YYYY-MM-DD format' },
+        check_out_date: { type: 'string', description: 'Check-out date in YYYY-MM-DD format' },
+        rooms: { type: 'number', description: 'Number of rooms (default: 1)', default: 1 },
+        guests: { type: 'number', description: 'Number of adult guests across all rooms (default: 1)', default: 1 },
+        max_price_usd: { type: 'number', description: 'Maximum total price in USD (optional filter)' },
+        radius_km: { type: 'number', description: 'Search radius from destination coordinates in km (default: 10)', default: 10 },
+      },
+      required: ['destination_iata', 'check_in_date', 'check_out_date'],
+    },
+  },
 ];
 
 // ── Helper: build booking redirect URL ─────────────────────────────────────
@@ -113,23 +133,46 @@ function parseDurationMinutes(duration) {
   return (parseInt(match[1] || '0') * 60) + parseInt(match[2] || '0');
 }
 
-// ── Helper: shape a raw Duffel offer into our standard offer object ──────────
-function shapeOffer(offer, searchParams = {}) {
-  const slice = offer.slices?.[0];
+// ── Helper: shape a single Duffel slice (outbound or return) ─────────────────
+function shapeSlice(slice, fallbackOrigin = '', fallbackDest = '') {
   const segs = slice?.segments || [];
   const firstSeg = segs[0] || {};
   const lastSeg = segs[segs.length - 1] || {};
+  return {
+    origin: firstSeg.origin?.iata_code || fallbackOrigin || '',
+    destination: lastSeg.destination?.iata_code || fallbackDest || '',
+    departure_at: firstSeg.departing_at || '',
+    arrival_at: lastSeg.arriving_at || '',
+    duration_minutes: parseDurationMinutes(slice?.duration),
+    stops: Math.max(0, segs.length - 1),
+    airline: firstSeg.marketing_carrier?.name
+      || firstSeg.operating_carrier?.name
+      || '',
+    airline_iata: firstSeg.marketing_carrier?.iata_code
+      || firstSeg.operating_carrier?.iata_code
+      || '',
+  };
+}
+
+// ── Helper: shape a raw Duffel offer into our standard offer object ──────────
+function shapeOffer(offer, searchParams = {}) {
+  const outbound = shapeSlice(offer.slices?.[0], searchParams.origin, searchParams.destination);
+  const returnSlice = offer.slices?.[1]
+    ? shapeSlice(offer.slices[1], outbound.destination || searchParams.destination, outbound.origin || searchParams.origin)
+    : null;
+
+  const firstSeg = offer.slices?.[0]?.segments?.[0] || {};
 
   return {
     offer_id: offer.id,
     airline: offer.owner?.name || 'Unknown Airline',
     airline_iata: offer.owner?.iata_code || '',
-    origin: firstSeg.origin?.iata_code || searchParams.origin || '',
-    destination: lastSeg.destination?.iata_code || searchParams.destination || '',
-    departure_at: firstSeg.departing_at || '',
-    arrival_at: lastSeg.arriving_at || '',
-    duration_minutes: parseDurationMinutes(slice?.duration),
-    stops: Math.max(0, segs.length - 1),
+    origin: outbound.origin,
+    destination: outbound.destination,
+    departure_at: outbound.departure_at,
+    arrival_at: outbound.arrival_at,
+    duration_minutes: outbound.duration_minutes,
+    stops: outbound.stops,
     cabin_class: firstSeg.passengers?.[0]?.cabin_class_marketing_name
       || firstSeg.passengers?.[0]?.cabin_class
       || searchParams.cabin_class
@@ -137,9 +180,10 @@ function shapeOffer(offer, searchParams = {}) {
     price_usd: parseFloat(offer.total_amount || '0'),
     currency: offer.total_currency || 'USD',
     expires_at: offer.expires_at || null,
+    return_slice: returnSlice,
     booking_redirect_url: buildRedirectUrl(
-      firstSeg.origin?.iata_code || searchParams.origin || '',
-      lastSeg.destination?.iata_code || searchParams.destination || '',
+      outbound.origin,
+      outbound.destination,
       searchParams.departure_date || '',
       searchParams.passengers || 1,
       searchParams.cabin_class || 'economy',
@@ -293,6 +337,180 @@ async function handleGetCheapestOffer(args) {
   }
 }
 
+// ── Helper: resolve IATA code to lat/long via Duffel suggestions ─────────────
+async function resolveCoordinates(iata) {
+  const duffel = createDuffelClient();
+  const response = await duffel.suggestions.list({ query: iata.trim() });
+  const places = response.data || [];
+  for (const p of places) {
+    if (p.geographic_coordinates?.latitude != null) {
+      return {
+        latitude: p.geographic_coordinates.latitude,
+        longitude: p.geographic_coordinates.longitude,
+      };
+    }
+    // Cities may not carry top-level coords but airports nested under them do.
+    for (const a of (p.airports || [])) {
+      if (a.geographic_coordinates?.latitude != null) {
+        return {
+          latitude: a.geographic_coordinates.latitude,
+          longitude: a.geographic_coordinates.longitude,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+// ── Helper: format Duffel Stays address object into a single line ─────────────
+function formatAddress(addr) {
+  if (!addr) return '';
+  return [addr.line_one, addr.city_name, addr.country_code]
+    .filter(Boolean)
+    .join(', ');
+}
+
+async function handleSearchHotels(args) {
+  const {
+    destination_iata,
+    check_in_date,
+    check_out_date,
+    rooms = 1,
+    guests = 1,
+    max_price_usd,
+    radius_km = 10,
+  } = args;
+
+  // Step 1: resolve destination to coordinates
+  let coords;
+  try {
+    coords = await resolveCoordinates(destination_iata);
+  } catch (err) {
+    console.error('[Duffel Bridge] search_hotels coordinate resolution failed:', err.message);
+    return JSON.stringify({ error: `Could not resolve ${destination_iata} to coordinates: ${err.message}` });
+  }
+
+  if (!coords) {
+    return JSON.stringify({ error: `Could not resolve ${destination_iata} to coordinates` });
+  }
+
+  // Step 2: POST to Duffel Stays search (SDK v1.7 has no stays namespace — use fetch)
+  const body = {
+    data: {
+      rooms,
+      guests: Array.from({ length: guests }, () => ({ type: 'adult' })),
+      check_in_date,
+      check_out_date,
+      location: {
+        radius: radius_km,
+        geographic_coordinates: {
+          latitude: coords.latitude,
+          longitude: coords.longitude,
+        },
+      },
+    },
+  };
+
+  let rawResponse;
+  try {
+    rawResponse = await fetch('https://api.duffel.com/stays/search', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${DUFFEL_TOKEN}`,
+        'Duffel-Version': DUFFEL_API_VERSION,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error('[Duffel Bridge] search_hotels fetch failed:', err.message);
+    return JSON.stringify({ error: `Hotel search request failed: ${err.message}` });
+  }
+
+  let payload;
+  try {
+    payload = await rawResponse.json();
+  } catch (err) {
+    return JSON.stringify({ error: 'Hotel search returned non-JSON response', code: rawResponse.status });
+  }
+
+  if (!rawResponse.ok) {
+    const detail =
+      payload?.errors?.[0]?.message ||
+      payload?.errors?.[0]?.title ||
+      payload?.error ||
+      'unknown error';
+    const code = payload?.errors?.[0]?.code || rawResponse.status;
+    console.error('[Duffel Bridge] search_hotels API error:', code, detail);
+    return JSON.stringify({
+      error: `Hotel search failed: ${detail}`,
+      code,
+      redirect_url: `https://app.duffel.com/stays?check_in_date=${check_in_date}&check_out_date=${check_out_date}`,
+    });
+  }
+
+  // Step 3: extract results
+  const results = payload?.data?.results || [];
+
+  // Step 4: filter by max_price_usd and sort ascending by price
+  const checkIn = new Date(check_in_date);
+  const checkOut = new Date(check_out_date);
+  const nights = Math.max(1, Math.floor((checkOut - checkIn) / (1000 * 60 * 60 * 24)));
+
+  let warnedCurrency = false;
+  let filtered = results;
+  if (max_price_usd != null) {
+    filtered = results.filter(r => {
+      const currency = r.cheapest_rate_currency || 'USD';
+      if (currency !== 'USD') {
+        if (!warnedCurrency) {
+          console.warn('[Duffel Bridge] search_hotels: skipping USD price filter for non-USD result(s):', currency);
+          warnedCurrency = true;
+        }
+        return true; // keep, can't compare
+      }
+      return parseFloat(r.cheapest_rate_total_amount || '0') <= max_price_usd;
+    });
+  }
+  filtered.sort(
+    (a, b) =>
+      parseFloat(a.cheapest_rate_total_amount || '0') -
+      parseFloat(b.cheapest_rate_total_amount || '0'),
+  );
+
+  if (filtered.length === 0) {
+    return JSON.stringify({
+      error: `No hotels found near ${destination_iata} for ${check_in_date} → ${check_out_date}.`,
+      redirect_url: `https://app.duffel.com/stays?check_in_date=${check_in_date}&check_out_date=${check_out_date}`,
+    });
+  }
+
+  // Step 5: shape results
+  const topHotels = filtered.slice(0, 10).map(result => {
+    const acc = result.accommodation || {};
+    const total = parseFloat(result.cheapest_rate_total_amount || '0');
+    return {
+      hotel_id: acc.id,
+      name: acc.name,
+      address: formatAddress(acc.location?.address),
+      star_rating: acc.rating ?? null,
+      review_score: acc.review_score ?? null,
+      photo_url: acc.photos?.[0]?.url || '',
+      price_per_night: parseFloat((total / nights).toFixed(2)),
+      total_price: total,
+      currency: result.cheapest_rate_currency || 'USD',
+      check_in_date,
+      check_out_date,
+      rooms,
+      guests,
+      redirect_url: `https://app.duffel.com/stays?check_in_date=${check_in_date}&check_out_date=${check_out_date}&accommodation_id=${acc.id}`,
+    };
+  });
+
+  return JSON.stringify(topHotels, null, 2);
+}
+
 // ── MCP Server Factory ───────────────────────────────────────────────────────
 function buildMCPServer() {
   const server = new Server(
@@ -318,6 +536,9 @@ function buildMCPServer() {
         break;
       case 'get_cheapest_offer':
         textContent = await handleGetCheapestOffer(args || {});
+        break;
+      case 'search_hotels':
+        textContent = await handleSearchHotels(args || {});
         break;
       default:
         textContent = JSON.stringify({ error: `Unknown tool: ${name}` });

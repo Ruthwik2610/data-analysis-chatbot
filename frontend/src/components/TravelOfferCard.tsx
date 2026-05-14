@@ -2,18 +2,69 @@ import React from "react";
 import type { TravelOffer } from "@/lib/types";
 import { ArrowRight, Clock, AlertTriangle, CheckCircle2 } from "lucide-react";
 
-export function TravelOfferCard({ offer }: { offer: TravelOffer }) {
-  // Format dates: ISO to time (e.g. "14:30")
-  const formatTime = (isoString: string) => {
-    if (!isoString) return "";
-    return new Date(isoString).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  };
+const formatTime = (iso: string) => {
+  if (!iso) return "";
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+};
 
-  const formatDuration = (mins: number) => {
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    return `${h}h ${m}m`;
-  };
+const formatDuration = (mins: number) => {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
+};
+
+const formatCurrency = (amount: number, currency: string) => {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currency || "USD",
+      maximumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    return `${currency || "USD"} ${Math.round(amount).toLocaleString()}`;
+  }
+};
+
+type RouteRowProps = {
+  departure_at: string;
+  origin: string;
+  arrival_at: string;
+  destination: string;
+  duration_minutes: number;
+  stops: number;
+};
+
+function RouteRow({ departure_at, origin, arrival_at, destination, duration_minutes, stops }: RouteRowProps) {
+  return (
+    <div className="flex items-center justify-between mb-5">
+      <div className="flex flex-col items-start">
+        <span className="text-[20px] font-bold text-[var(--color-text-primary)]">{formatTime(departure_at)}</span>
+        <span className="text-[13px] font-medium" style={{ color: "var(--color-text-secondary)" }}>{origin}</span>
+      </div>
+
+      <div className="flex flex-col items-center flex-1 px-4">
+        <span className="text-[10px] font-bold tracking-widest uppercase mb-1" style={{ color: "var(--color-text-tertiary)" }}>
+          {formatDuration(duration_minutes)}
+        </span>
+        <div className="w-full relative flex items-center justify-center h-[2px] bg-white/10 rounded-full">
+           <div className="absolute w-[6px] h-[6px] rounded-full border-[1.5px] border-[var(--color-text-primary)] bg-transparent left-0" />
+           <div className="absolute w-[6px] h-[6px] rounded-full border-[1.5px] border-[var(--color-text-primary)] bg-transparent right-0" />
+        </div>
+        <span className="text-[11px] font-medium mt-1" style={{ color: "var(--color-text-secondary)" }}>
+          {stops === 0 ? "Direct" : `${stops} Stop${stops > 1 ? "s" : ""}`}
+        </span>
+      </div>
+
+      <div className="flex flex-col items-end">
+        <span className="text-[20px] font-bold text-[var(--color-text-primary)]">{formatTime(arrival_at)}</span>
+        <span className="text-[13px] font-medium" style={{ color: "var(--color-text-secondary)" }}>{destination}</span>
+      </div>
+    </div>
+  );
+}
+
+export function TravelOfferCard({ offer }: { offer: TravelOffer }) {
+  const hasReturn = !!offer.return_slice;
 
   return (
     <div className="flex flex-col p-5 rounded-[20px] glass shadow-lg border border-white/5 transition-transform hover:-translate-y-1 hover:shadow-xl w-full min-w-[300px]">
@@ -50,30 +101,34 @@ export function TravelOfferCard({ offer }: { offer: TravelOffer }) {
       </div>
 
       {/* Middle row: Route & Times */}
-      <div className="flex items-center justify-between mb-5">
-        <div className="flex flex-col items-start">
-          <span className="text-[20px] font-bold text-[var(--color-text-primary)]">{formatTime(offer.departure_at)}</span>
-          <span className="text-[13px] font-medium" style={{ color: "var(--color-text-secondary)" }}>{offer.origin}</span>
-        </div>
-        
-        <div className="flex flex-col items-center flex-1 px-4">
-          <span className="text-[10px] font-bold tracking-widest uppercase mb-1" style={{ color: "var(--color-text-tertiary)" }}>
-            {formatDuration(offer.duration_minutes)}
+      {hasReturn && (
+        <span className="text-[11px] font-medium tracking-wide uppercase opacity-70 mb-1" style={{ color: "var(--color-text-tertiary)" }}>
+          Outbound
+        </span>
+      )}
+      <RouteRow
+        departure_at={offer.departure_at}
+        origin={offer.origin}
+        arrival_at={offer.arrival_at}
+        destination={offer.destination}
+        duration_minutes={offer.duration_minutes}
+        stops={offer.stops}
+      />
+      {offer.return_slice && (
+        <>
+          <span className="text-[11px] font-medium tracking-wide uppercase opacity-70 mb-1" style={{ color: "var(--color-text-tertiary)" }}>
+            Return
           </span>
-          <div className="w-full relative flex items-center justify-center h-[2px] bg-white/10 rounded-full">
-             <div className="absolute w-[6px] h-[6px] rounded-full border-[1.5px] border-[var(--color-text-primary)] bg-transparent left-0" />
-             <div className="absolute w-[6px] h-[6px] rounded-full border-[1.5px] border-[var(--color-text-primary)] bg-transparent right-0" />
-          </div>
-          <span className="text-[11px] font-medium mt-1" style={{ color: "var(--color-text-secondary)" }}>
-            {offer.stops === 0 ? "Direct" : `${offer.stops} Stop${offer.stops > 1 ? "s" : ""}`}
-          </span>
-        </div>
-
-        <div className="flex flex-col items-end">
-          <span className="text-[20px] font-bold text-[var(--color-text-primary)]">{formatTime(offer.arrival_at)}</span>
-          <span className="text-[13px] font-medium" style={{ color: "var(--color-text-secondary)" }}>{offer.destination}</span>
-        </div>
-      </div>
+          <RouteRow
+            departure_at={offer.return_slice.departure_at}
+            origin={offer.return_slice.origin}
+            arrival_at={offer.return_slice.arrival_at}
+            destination={offer.return_slice.destination}
+            duration_minutes={offer.return_slice.duration_minutes}
+            stops={offer.return_slice.stops}
+          />
+        </>
+      )}
 
       {/* Bottom row: Price & Book */}
       <div className="flex items-end justify-between mt-auto pt-4 border-t border-white/5">
@@ -82,7 +137,7 @@ export function TravelOfferCard({ offer }: { offer: TravelOffer }) {
             Total ({offer.currency})
           </span>
           <span className="text-[24px] font-black tracking-tight" style={{ color: "var(--color-text-primary)" }}>
-            ${offer.price_usd.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+            {formatCurrency(offer.price_usd, offer.currency)}
           </span>
         </div>
         
