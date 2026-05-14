@@ -140,7 +140,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   };
 
   const goNextFromHotel = () => setStep("itinerary");
-  const goBackFromItinerary = () => setStep(hasHotels ? "hotel" : (hasFlights ? (selectedFlight?.return_slice ? "return_flight" : "outbound_flight") : "flight"));
+  const goBackFromItinerary = () => setStep(hasHotels ? "hotel" : (hasFlights ? (selectedFlight?.return_slice ? "return_flight" : "outbound_flight") : "outbound_flight"));
 
   const downloadItinerary = async () => {
     if (!canPersist) return;
