@@ -461,6 +461,14 @@ export default function Home() {
               fullText += ev.data.delta;
               const snapshot = fullText;
               updateMessage(assistantId, { content: snapshot, thinking: null });
+            } else if (ev.event === "travel_result") {
+              updateMessage(assistantId, {
+                content: ev.data.text,
+                travel_intent: ev.data.travel_intent,
+                travel_offers: ev.data.travel_offers,
+                thinking: null,
+              });
+              setLoading(false);
             } else if (ev.event === "clarify") {
               updateMessage(assistantId, {
                 content: ev.data.content,

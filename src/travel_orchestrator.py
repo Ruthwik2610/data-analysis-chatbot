@@ -37,6 +37,7 @@ class TravelIntent:
     confidence: float = 0.0
     raw_question: str = ""
     date_assumed: bool = False
+    duffel_offline: bool = False
 
 
 @dataclass
@@ -209,6 +210,29 @@ class TravelOrchestrator:
             span.set_attribute("intent.origin", intent.origin or "")
             span.set_attribute("intent.destination", intent.destination or "")
 
+            # Early-exit if we still can't parse origin / destination as IATA codes.
+            # Without this, Duffel returns nothing and the user sees a generic
+            # "No flights found for None → None" string.
+            if not intent.origin or not intent.destination:
+                yield {
+                    "kind": "travel_result",
+                    "text": (
+                        "I couldn't pin down a clear origin and destination from your question. "
+                        "Try naming the cities or 3-letter airport codes — for example "
+                        "`flights from HYD to RUH on 2026-05-30 returning 2026-06-05`."
+                    ),
+                    "travel_offers": [],
+                    "travel_intent": {
+                        "origin": intent.origin,
+                        "destination": intent.destination,
+                        "departure_date": intent.departure_date,
+                        "return_date": intent.return_date,
+                        "passengers": intent.passengers,
+                        "cabin_class": intent.cabin_class,
+                    },
+                }
+                return
+
             # ── Phase 2: DB History (parallel inner loop) ─────────────────
             yield {"kind": "thinking", "step": "🗄️ Checking travel history & policy…", "progress": 40}
             history = await self._db_history_agent(intent, source_ids, db)
@@ -244,31 +268,48 @@ class TravelOrchestrator:
         """Ask LLM to fill missing intent fields when heuristic confidence < 0.9."""
         if not getattr(router, "available", False):
             return partial
+        today_iso = date.today().isoformat()
         prompt = (
             "Extract travel booking intent from this request as JSON with these exact keys: "
-            "origin (IATA code or city), destination (IATA code or city), "
-            "departure_date (YYYY-MM-DD or null), return_date (YYYY-MM-DD or null), "
-            "passengers (integer), cabin_class (economy|premium_economy|business|first).\n\n"
+            "origin (the 3-letter IATA airport code, uppercase, e.g. HYD for Hyderabad; "
+            "if the user named a city or country, return the primary international airport's IATA code), "
+            "destination (same rules as origin), "
+            "departure_date (strict YYYY-MM-DD; resolve natural-language dates like "
+            "\"30 may 2026\" or \"next Friday\" to the absolute date; "
+            f"today is {today_iso}; if year is missing, assume the next occurrence on or after today), "
+            "return_date (same rules as departure_date, or null for one-way), "
+            "passengers (positive integer, default 1), "
+            "cabin_class (one of: economy, premium_economy, business, first).\n\n"
             f"Request: {question}\n\n"
             f"Already extracted: origin={partial.origin}, destination={partial.destination}, "
             f"departure_date={partial.departure_date}, passengers={partial.passengers}, "
             f"cabin_class={partial.cabin_class}\n\n"
-            "Return ONLY the JSON object, no explanation."
+            "Return ONLY the JSON object, no explanation. Use null for any field you cannot determine."
         )
+        iata_re = re.compile(r"^[A-Z]{3}$")
+        date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
         try:
             data, _ = await asyncio.to_thread(router._generate_json, prompt, request_id)
-            if data.get("origin"):
-                partial.origin = str(data["origin"])
-            if data.get("destination"):
-                partial.destination = str(data["destination"])
-            if data.get("departure_date"):
-                partial.departure_date = str(data["departure_date"])
-            if data.get("return_date"):
-                partial.return_date = str(data["return_date"])
+            origin = str(data.get("origin") or "").strip().upper()
+            if iata_re.match(origin):
+                partial.origin = origin
+            dest = str(data.get("destination") or "").strip().upper()
+            if iata_re.match(dest):
+                partial.destination = dest
+            dep = str(data.get("departure_date") or "").strip()
+            if date_re.match(dep):
+                partial.departure_date = dep
+            ret = str(data.get("return_date") or "").strip()
+            if date_re.match(ret):
+                partial.return_date = ret
             if data.get("passengers"):
-                partial.passengers = int(data["passengers"])
-            if data.get("cabin_class"):
-                partial.cabin_class = str(data["cabin_class"])
+                try:
+                    partial.passengers = max(1, int(data["passengers"]))
+                except (TypeError, ValueError):
+                    pass
+            cabin = str(data.get("cabin_class") or "").strip().lower()
+            if cabin in {"economy", "premium_economy", "business", "first"}:
+                partial.cabin_class = cabin
             partial.confidence = 0.95
         except Exception:
             pass
@@ -343,6 +384,7 @@ class TravelOrchestrator:
 
             if not duffel_cid:
                 span.set_attribute("duffel.available", False)
+                intent.duffel_offline = True
                 return []
 
             if not intent.origin or not intent.destination:
@@ -474,12 +516,19 @@ class TravelOrchestrator:
 
             # Text summary for markdown fallback
             if not offers:
-                summary = (
-                    f"{assumed_note}"
-                    f"No flights returned for **{intent.origin} → {intent.destination}** "
-                    f"on {intent.departure_date} in {intent.cabin_class}. "
-                    "Try a different date, cabin class, or nearby airports."
-                )
+                if intent.duffel_offline:
+                    summary = (
+                        "The Duffel flight-search bridge is offline right now, so I couldn't "
+                        "look up live availability. Reconnect the Duffel MCP from the connector "
+                        "panel (plug icon) and try again."
+                    )
+                else:
+                    summary = (
+                        f"{assumed_note}"
+                        f"No flights returned for **{intent.origin} → {intent.destination}** "
+                        f"on {intent.departure_date} in {intent.cabin_class}. "
+                        "Try a different date, cabin class, or nearby airports."
+                    )
             else:
                 best = offers[0]
                 compliant_count = sum(1 for o in offers if o.policy_compliant)
