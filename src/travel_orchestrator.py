@@ -146,6 +146,10 @@ _HOTEL_KEYWORDS_RE = re.compile(
     r'\b(hotel|hotels|stay|stays|lodging|accommodation|accommodations|room|rooms)\b',
     re.IGNORECASE,
 )
+_NO_HOTEL_RE = re.compile(
+    r'\b(?:flight(?:s)? only|only flight(?:s)?|no hotel|no hotels|without hotel|without hotels|skip hotel|skip hotels)\b',
+    re.IGNORECASE,
+)
 _FLIGHT_KEYWORDS_RE = re.compile(
     r'\b(flight|flights|fly|flying|airline|airfare|ticket|tickets|airport)\b',
     re.IGNORECASE,
@@ -190,13 +194,14 @@ def extract_travel_intent(question: str) -> TravelIntent:
             break
 
     mentions_hotel = bool(_HOTEL_KEYWORDS_RE.search(question))
+    declines_hotel = bool(_NO_HOTEL_RE.search(question))
     mentions_flight = bool(_FLIGHT_KEYWORDS_RE.search(question))
     if mentions_hotel and not mentions_flight:
         intent.wants_flights = False
-        intent.wants_hotels = True
+        intent.wants_hotels = not declines_hotel
     elif mentions_hotel and mentions_flight:
         intent.wants_flights = True
-        intent.wants_hotels = True
+        intent.wants_hotels = not declines_hotel
     elif mentions_flight:
         intent.wants_flights = True
         intent.wants_hotels = False
@@ -209,11 +214,17 @@ def extract_travel_intent(question: str) -> TravelIntent:
     if guests_match:
         intent.guests = int(guests_match.group(1))
 
+    _apply_default_hotel_for_round_trip(intent, question)
+
+    return intent
+
+
+def _apply_default_hotel_for_round_trip(intent: TravelIntent, question: str) -> None:
+    if intent.wants_flights and intent.return_date and not _NO_HOTEL_RE.search(question):
+        intent.wants_hotels = True
     if intent.wants_hotels:
         intent.check_in_date = intent.check_in_date or intent.departure_date
         intent.check_out_date = intent.check_out_date or intent.return_date
-
-    return intent
 
 
 def _extract_preferred_airline_from_dfs(dataframes: list[Any]) -> str | None:
@@ -524,6 +535,7 @@ class TravelOrchestrator:
             # Fast-path: heuristic already confident
             if chain.should_continue(0, intent.confidence):
                 intent = await self._llm_fill_intent(question, intent, router, request_id)
+            _apply_default_hotel_for_round_trip(intent, question)
             return intent
 
     async def _llm_fill_intent(

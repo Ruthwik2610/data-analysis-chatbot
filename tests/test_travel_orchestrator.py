@@ -234,6 +234,59 @@ def test_intent_flight_only_regression():
     assert intent.wants_hotels is False
 
 
+def test_round_trip_flight_defaults_to_hotel_step():
+    intent = extract_travel_intent("Find flights from HYD to JNB on 2026-05-30 returning 2026-06-10")
+    assert intent.wants_flights is True
+    assert intent.wants_hotels is True
+    assert intent.check_in_date == "2026-05-30"
+    assert intent.check_out_date == "2026-06-10"
+
+
+def test_round_trip_flight_only_can_skip_hotel_step():
+    intent = extract_travel_intent(
+        "Find flight only from HYD to JNB on 2026-05-30 returning 2026-06-10"
+    )
+    assert intent.wants_flights is True
+    assert intent.wants_hotels is False
+
+
+def test_customer_context_defaults_llm_round_trip_to_hotel_step():
+    class Router:
+        available = True
+
+        def _generate_json(self, prompt, request_id):
+            return (
+                {
+                    "origin": "HYD",
+                    "destination": "JNB",
+                    "departure_date": "2026-05-30",
+                    "return_date": "2026-06-10",
+                    "passengers": 1,
+                    "cabin_class": "economy",
+                    "wants_flights": True,
+                    "wants_hotels": False,
+                    "check_in_date": None,
+                    "check_out_date": None,
+                    "rooms": 1,
+                    "guests": 1,
+                },
+                None,
+            )
+
+    intent = asyncio.run(
+        TravelOrchestrator()._customer_context_agent(
+            "find flights from Hyd to johannesberg on 30 may return would be on 10th june. no prefrence for airline",
+            Router(),
+            "req-1",
+        )
+    )
+
+    assert intent.wants_flights is True
+    assert intent.wants_hotels is True
+    assert intent.check_in_date == "2026-05-30"
+    assert intent.check_out_date == "2026-06-10"
+
+
 def test_airline_followup_uses_previous_travel_question_for_intent():
     previous_question = "Find flights from SFO to JFK on 2026-06-01 returning 2026-06-05"
     history = [
