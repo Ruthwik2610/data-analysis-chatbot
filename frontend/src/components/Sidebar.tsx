@@ -41,7 +41,57 @@ const KIND_COLOR: Record<string, string> = {
   multi: "var(--color-text-warning)",
 };
 
+type SourceGroup = Source & {
+  sourceIds: string[];
+  sheetCount?: number;
+};
+
+function workbookNameForSource(source: Source): string | null {
+  if (source.kind !== "xlsx") return null;
+  const match = source.name.match(/^(.+\.xlsx?)\s+-\s+.+$/i);
+  return match?.[1] ?? null;
+}
+
+function groupSourceRows(sources: Source[]): SourceGroup[] {
+  const groups: SourceGroup[] = [];
+  const byWorkbookName = new Map<string, SourceGroup>();
+
+  for (const source of sources) {
+    const workbookName = workbookNameForSource(source);
+    if (!workbookName) {
+      groups.push({ ...source, sourceIds: [source.id] });
+      continue;
+    }
+
+    const key = `${source.kind}:${workbookName.toLowerCase()}`;
+    const existing = byWorkbookName.get(key);
+    if (existing) {
+      existing.sourceIds.push(source.id);
+      existing.rows += source.rows;
+      existing.active = existing.active || source.active;
+      existing.loaded = existing.loaded !== false && source.loaded !== false;
+      existing.sheetCount = (existing.sheetCount || 1) + 1;
+      continue;
+    }
+
+    const group = {
+      ...source,
+      id: key,
+      name: workbookName,
+      rows: source.rows,
+      sourceIds: [source.id],
+      sheetCount: 1,
+    };
+    byWorkbookName.set(key, group);
+    groups.push(group);
+  }
+
+  return groups;
+}
+
 export function Sidebar(p: SidebarProps) {
+  const sourceRows = groupSourceRows(p.sources);
+
   return (
     <aside
       className="flex flex-col h-full flex-shrink-0 relative z-20"
@@ -125,20 +175,28 @@ export function Sidebar(p: SidebarProps) {
         <div className="mt-4">
           <SectionLabel>Sources</SectionLabel>
         </div>
-        {p.sources.length === 0 && (
+        {sourceRows.length === 0 && (
           <EmptyState>No sources attached</EmptyState>
         )}
         <div className="px-3">
-          {p.sources.slice(0, 7).map((src) => (
+          {sourceRows.map((src) => {
+            const allSelected = src.sourceIds.every((id) => p.selectedSourceIds.includes(id));
+            const anySelected = src.sourceIds.some((id) => p.selectedSourceIds.includes(id));
+            return (
             <KbRow
               key={src.id}
               source={src}
-              selected={p.selectedSourceIds.includes(src.id)}
-              onToggle={() => p.onToggleSource(src.id)}
-              onDelete={() => p.onDeleteSource(src.id)}
-              onPreview={() => p.onPreviewSource?.(src.id)}
+              selected={anySelected}
+              onToggle={() => {
+                src.sourceIds
+                  .filter((id) => allSelected ? p.selectedSourceIds.includes(id) : !p.selectedSourceIds.includes(id))
+                  .forEach((id) => p.onToggleSource(id));
+              }}
+              onDelete={() => src.sourceIds.forEach((id) => p.onDeleteSource(id))}
+              onPreview={() => p.onPreviewSource?.(src.sourceIds[0])}
             />
-          ))}
+          );
+          })}
         </div>
       </div>
 
@@ -312,20 +370,24 @@ function KbRow({
   onDelete,
   onPreview,
 }: {
-  source: Source;
+  source: SourceGroup;
   selected: boolean;
   onToggle: () => void;
   onDelete: () => void;
   onPreview?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const displayName = displaySourceName(source.name);
+  const sourceCountLabel = source.sheetCount && source.sheetCount > 1
+    ? `${source.sheetCount} sheets`
+    : `${source.rows.toLocaleString()} ${source.kind === "mcp" ? "tools" : "rows"}`;
   return (
     <div className="group relative flex items-center gap-1.5 py-1.5">
         <button
           onClick={onToggle}
           className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-[12px]"
           style={{ color: "var(--color-text-secondary)" }}
-          title={`${source.kind.toUpperCase()} · ${source.rows.toLocaleString()} ${source.kind === "mcp" ? "tools" : "rows"}`}
+          title={`${source.kind.toUpperCase()} · ${sourceCountLabel}`}
         >
           <div
             className="w-3 h-3 rounded-[4px] flex-shrink-0"
@@ -335,7 +397,7 @@ function KbRow({
             }}
           />
           <span className="truncate" style={{ color: selected ? "var(--color-text-primary)" : undefined }}>
-            {displaySourceName(source.name)}
+            {displayName}
           </span>
         </button>
       {source.kind !== "mcp" && onPreview && (
@@ -363,7 +425,8 @@ function KbRow({
         <button
           onClick={() => setConfirming(true)}
           className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/5"
-          title="Remove"
+          aria-label={`Delete ${displayName}`}
+          title={`Delete ${displayName}`}
         >
           <X size={11} stroke="var(--color-text-tertiary)" />
         </button>

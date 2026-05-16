@@ -103,4 +103,38 @@ describe("Sidebar", () => {
     expect(screen.getByRole("link", { name: "Admin Control Center" })).toHaveAttribute("href", "/admin");
     expect(screen.getByRole("link", { name: "Debug review inbox" })).toHaveAttribute("href", "/admin/feedback");
   });
+
+  it("groups workbook sheet sources under one removable workbook row", () => {
+    const sheetSources: Source[] = Array.from({ length: 9 }, (_, index) => ({
+      id: `sheet_${index + 1}`,
+      name: `travel_report.xlsx - Sheet ${index + 1}`,
+      kind: "xlsx",
+      rows: 10 + index,
+      active: index === 0,
+    }));
+
+    render(
+      <Sidebar
+        chats={chats}
+        currentChatId="c1"
+        sources={sheetSources}
+        selectedSourceIds={["sheet_1"]}
+        onNewChat={vi.fn()}
+        onSelectChat={vi.fn()}
+        onDeleteChat={vi.fn()}
+        onToggleSource={vi.fn()}
+        onDeleteSource={vi.fn()}
+        projects={projects}
+        currentProjectId={null}
+        onSelectProject={vi.fn()}
+        onNewProject={vi.fn()}
+        onDeleteProject={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("travel_report")).toBeInTheDocument();
+    expect(screen.queryByText("travel_report.xlsx - Sheet 8")).not.toBeInTheDocument();
+    expect(screen.queryByText("travel_report.xlsx - Sheet 9")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete travel_report" })).toBeInTheDocument();
+  });
 });

@@ -141,7 +141,7 @@ _IATA_RE = re.compile(r'\b([A-Z]{3})\b')
 _DATE_RE = re.compile(r'\b(\d{4}-\d{2}-\d{2})\b')
 _PAX_RE  = re.compile(r'\b(\d+)\s*(?:passenger|pax|adult|people|person|travell?er)', re.I)
 _AIRLINE_COL_RE = re.compile(r'(?i)(preferred|favorite|favourite|fav)[\s_]*(airline|carrier)')
-_NO_PREF_RE = re.compile(r'(?i)\b(no preference|no preferred|none|skip|any airline|any carrier|doesn.?t matter|don.?t care)\b')
+_NO_PREF_RE = re.compile(r'(?i)\b(no pref(?:erence|rence)|no preferred|none|skip|any airline|any carrier|doesn.?t matter|don.?t care)\b')
 _HOTEL_KEYWORDS_RE = re.compile(
     r'\b(hotel|hotels|stay|stays|lodging|accommodation|accommodations|room|rooms)\b',
     re.IGNORECASE,
@@ -282,6 +282,26 @@ def _extract_airline_answer_from_history(
     return cleaned[:40] if cleaned else None
 
 
+def _question_for_airline_followup(current_question: str, chat_history: list[dict[str, Any]]) -> str:
+    if _extract_airline_answer_from_history(current_question, chat_history) is None:
+        return current_question
+
+    skipped_current_user = False
+    saw_airline_clarify = False
+    for msg in reversed(chat_history):
+        role = (msg.get("role") or "").lower()
+        content = str(msg.get("content") or "").strip()
+        if role == "user" and not skipped_current_user:
+            skipped_current_user = True
+            continue
+        if role == "assistant" and AIRLINE_CLARIFY_MARKER in content:
+            saw_airline_clarify = True
+            continue
+        if saw_airline_clarify and role == "user" and content:
+            return content
+    return current_question
+
+
 def _load_policy() -> dict[str, Any]:
     try:
         return json.loads(POLICY_PATH.read_text(encoding="utf-8"))
@@ -382,7 +402,8 @@ class TravelOrchestrator:
 
             # ── Phase 1: Customer Context (inner loop) ────────────────────
             yield {"kind": "thinking", "step": "✈️ Extracting travel intent…", "progress": 15}
-            intent = await self._customer_context_agent(question, router, request_id)
+            intent_question = _question_for_airline_followup(question, chat_history or [])
+            intent = await self._customer_context_agent(intent_question, router, request_id)
             span.set_attribute("intent.origin", intent.origin or "")
             span.set_attribute("intent.destination", intent.destination or "")
 
@@ -440,6 +461,8 @@ class TravelOrchestrator:
                     history.user_preferred_airline = None  # user explicitly said no preference
                 elif from_history:
                     history.user_preferred_airline = from_history
+                elif _NO_PREF_RE.search(question):
+                    history.user_preferred_airline = None  # user included no preference in the original request
                 else:
                     # First time we hit this question for this trip — ask.
                     yield {

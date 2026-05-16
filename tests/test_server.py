@@ -299,6 +299,36 @@ def test_query_endpoint_answer_prompt_builder_is_imported(isolated_server):
     assert callable(server.build_answer_prompt)
 
 
+def test_travel_fast_path_handles_airline_preference_reply(isolated_server):
+    server, _storage, _pool = isolated_server
+    history = [
+        {
+            "role": "assistant",
+            "content": "Before I search, which is your **preferred airline for this trip**?",
+        },
+        {"role": "user", "content": "no preference"},
+    ]
+
+    assert server._is_travel_fast_path("no preference", "", history) is True
+    assert server._is_travel_fast_path("no prefrence for airline", "", history) is True
+    assert server._is_travel_fast_path("United", "", history) is True
+    assert server._is_travel_fast_path("no preference", "", []) is False
+
+
+def test_travel_queries_do_not_require_attached_source(isolated_server):
+    server, _storage, _pool = isolated_server
+    history = [
+        {
+            "role": "assistant",
+            "content": "Before I search, which is your **preferred airline for this trip**?",
+        },
+    ]
+
+    assert server._query_requires_source("find flights from HYD to JNB", "", [], has_mcp=False) is False
+    assert server._query_requires_source("no prefrence for airline", "", history, has_mcp=False) is False
+    assert server._query_requires_source("what is revenue?", "", [], has_mcp=False) is True
+
+
 def test_admin_feedback_endpoint_lists_review_items(isolated_server, monkeypatch):
     server, storage, _pool = isolated_server
     from fastapi.testclient import TestClient

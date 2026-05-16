@@ -144,6 +144,50 @@ describe("TravelResultPanel workflow", () => {
     expect(screen.getByRole("button", { name: "Select Hudson Hotel" })).toHaveTextContent("Select");
   });
 
+  it("only shows valid return flight choices for the selected outbound flight", () => {
+    const oneWaySameOutbound = {
+      ...offers[0],
+      offer_id: "flight_without_return",
+      price_usd: 300,
+      return_slice: null,
+    };
+    const roundTripSameOutbound = {
+      ...offers[0],
+      offer_id: "flight_with_return",
+      price_usd: 410,
+    };
+
+    render(<TravelResultPanel offers={[oneWaySameOutbound, roundTripSameOutbound]} hotels={hotels} intent={intent} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select outbound flight to JFK" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(screen.queryByText("SFO → JFK (Outbound)")).not.toBeInTheDocument();
+    expect(screen.queryByText("$300")).not.toBeInTheDocument();
+    expect(screen.getByText("$410")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select return flight to SFO" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(screen.getByText("Hotels in JFK")).toBeInTheDocument();
+  });
+
+  it("shows the hotel step when hotels were requested but no hotel offers returned", () => {
+    render(<TravelResultPanel offers={offers} hotels={[]} intent={intent} />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(screen.getByText("Hotels in JFK")).toBeInTheDocument();
+    expect(screen.getByText("No hotel options returned for this trip.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue without hotel" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue without hotel" }));
+    expect(screen.getByText("Itinerary")).toBeInTheDocument();
+  });
+
   it("shows booking redirects only on the itinerary step", () => {
     render(<TravelResultPanel offers={offers} hotels={hotels} intent={intent} />);
 
@@ -197,6 +241,39 @@ describe("TravelResultPanel workflow", () => {
     expect(screen.getByText("Flight required to save itinerary")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Book flight" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Book hotel" })).toHaveAttribute("href", hotels[0].redirect_url);
+    expect(screen.getByRole("button", { name: "Download PDF itinerary" })).toBeDisabled();
+  });
+
+  it("does not save a hotel-only itinerary when download is clicked", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<TravelResultPanel offers={[]} hotels={hotels} intent={{ ...intent, wants_flights: false }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select Hudson Hotel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download PDF itinerary" }));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("clears stale hotel selection when changing the selected flight path", () => {
+    render(<TravelResultPanel offers={offers} hotels={hotels} intent={intent} />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select Hudson Hotel" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select outbound flight to JFK" })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(screen.getByRole("button", { name: "Select Hudson Hotel" })).toHaveTextContent(/^Select$/);
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
   });
 
   it("does not combine mixed-currency flight and hotel totals", () => {
@@ -211,8 +288,48 @@ describe("TravelResultPanel workflow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
 
     expect(screen.getByText("Mixed currencies")).toBeInTheDocument();
-    expect(screen.getByText(/\$410.*\+.*€720/)).toBeInTheDocument();
+    expect(screen.getByText(/\$820.*\+.*€720/)).toBeInTheDocument();
     expect(screen.queryByText("$1,130")).not.toBeInTheDocument();
+  });
+
+  it("includes both selected outbound and return card prices in the itinerary total", () => {
+    const americanOffers: TravelOffer[] = [
+      {
+        ...offers[0],
+        offer_id: "american_outbound_low_return",
+        airline: "American Airlines",
+        airline_iata: "AA",
+        price_usd: 314,
+        return_slice: {
+          ...offers[0].return_slice!,
+          airline: "American Airlines",
+          airline_iata: "AA",
+          departure_at: "2026-06-05T11:00:00Z",
+        },
+      },
+      {
+        ...offers[0],
+        offer_id: "american_outbound_selected_return",
+        airline: "American Airlines",
+        airline_iata: "AA",
+        price_usd: 334,
+        return_slice: {
+          ...offers[0].return_slice!,
+          airline: "American Airlines",
+          airline_iata: "AA",
+          departure_at: "2026-06-05T13:00:00Z",
+        },
+      },
+    ];
+
+    render(<TravelResultPanel offers={americanOffers} hotels={[]} intent={{ ...intent, wants_hotels: false }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select outbound flight to JFK" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Select return flight to SFO" })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(screen.getAllByText("$648").length).toBeGreaterThan(0);
   });
 
   it("shows a simple error when itinerary download save fails", async () => {

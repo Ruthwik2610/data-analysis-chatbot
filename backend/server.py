@@ -206,7 +206,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.agents import DomainAgent, get_agent_for_domain
 from src.config import AppConfig
-from src.travel_orchestrator import TravelOrchestrator
+from src.travel_orchestrator import AIRLINE_CLARIFY_MARKER, TravelOrchestrator
 from src.data_sources import (
     DataSource,
     dataframe_to_duckdb_source,
@@ -353,6 +353,37 @@ def _router_for_model_mode(mode: str | None) -> LLMRouter:
 
 
 PUBLIC_PATHS = {"/health", "/auth/login", "/auth/register", "/admin/login"}
+
+TRAVEL_KEYWORDS = (
+    "flight", "airline", "airport", "fly ", "depart",
+    "cabin class", "economy class", "business class",
+    "travel to", "itinerary", " pnr ",
+    "hotel", "hotels", "stay", "lodging",
+    "accommodation", "check-in", "check in",
+)
+
+
+def _is_reply_to_airline_clarify(history: list[dict[str, Any]]) -> bool:
+    for msg in reversed(history):
+        role = str(msg.get("role") or "").lower()
+        if role == "user":
+            continue
+        if role == "assistant":
+            return AIRLINE_CLARIFY_MARKER in str(msg.get("content") or "")
+    return False
+
+
+def _is_travel_fast_path(question: str, project_category: str, history: list[dict[str, Any]]) -> bool:
+    lowered = question.lower()
+    return (
+        project_category == "travel"
+        or any(kw in lowered for kw in TRAVEL_KEYWORDS)
+        or _is_reply_to_airline_clarify(history)
+    )
+
+
+def _query_requires_source(question: str, project_category: str, history: list[dict[str, Any]], has_mcp: bool) -> bool:
+    return not has_mcp and not _is_travel_fast_path(question, project_category, history)
 
 
 @contextlib.asynccontextmanager
@@ -3908,8 +3939,9 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
             use_active_fallback=not body.source_ids,
             owner_id=owner_id,
         )
+        pre_source_history = _load_history(chat_id, owner_id=owner_id, include_legacy=include_legacy)
 
-        if not selected_sources and not has_mcp:
+        if not selected_sources and _query_requires_source(question, "", pre_source_history, has_mcp):
             raise HTTPException(status_code=400, detail="Attach a source first")
 
         active_for_legacy = selected_sources[0] if len(selected_sources) == 1 else None
@@ -3995,15 +4027,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
 
                 # ── Travel domain fast-path ─────────────────────────────────────────
                 _proj_category = (project_instructions or {}).get("category", "")
-                _travel_keywords = ("flight", "airline", "airport", "fly ", "depart",
-                                    "cabin class", "economy class", "business class",
-                                    "travel to", "itinerary", " pnr ",
-                                    "hotel", "hotels", "stay", "lodging",
-                                    "accommodation", "check-in", "check in")
-                _is_travel_query = (
-                    _proj_category == "travel"
-                    or any(kw in question.lower() for kw in _travel_keywords)
-                )
+                _is_travel_query = _is_travel_fast_path(question, _proj_category, history)
                 if _is_travel_query and CONFIG.duffel_api_token:
                     try:
                         orchestrator = TravelOrchestrator()
