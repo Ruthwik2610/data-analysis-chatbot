@@ -19,6 +19,21 @@ type SortOption = "price" | "score" | "duration";
 type HotelSortOption = "score" | "price" | "rating";
 type Step = "outbound_flight" | "return_flight" | "hotel" | "itinerary";
 
+const RATES_PER_USD: Record<string, number> = {
+  USD: 1,
+  AED: 3.6725,
+  AUD: 1.52,
+  CAD: 1.36,
+  EUR: 0.92,
+  GBP: 0.79,
+  INR: 83,
+  JPY: 156,
+  SAR: 3.75,
+  ZAR: 18.5,
+};
+
+const DOWNLOAD_CURRENCIES = ["USD", "INR", "AED", "EUR", "GBP", "ZAR"];
+
 const formatCurrency = (amount: number, currency: string) => {
   try {
     return new Intl.NumberFormat(undefined, {
@@ -29,6 +44,16 @@ const formatCurrency = (amount: number, currency: string) => {
   } catch {
     return `${currency || "USD"} ${Math.round(amount).toLocaleString()}`;
   }
+};
+
+const convertFromUsd = (amount: number, currency: string) => amount * (RATES_PER_USD[currency] ?? 1);
+
+const getHotelUsdTotal = (hotel: HotelOffer | null) => {
+  if (!hotel) return 0;
+  if (typeof hotel.total_price_usd === "number" && Number.isFinite(hotel.total_price_usd)) return hotel.total_price_usd;
+  if ((hotel.currency || "USD").toUpperCase() === "USD") return hotel.total_price;
+  const rate = RATES_PER_USD[(hotel.currency || "").toUpperCase()];
+  return rate ? hotel.total_price / rate : 0;
 };
 
 const getOutboundKey = (o: TravelOffer) => `${o.airline}-${o.departure_at}-${o.arrival_at}`;
@@ -45,6 +70,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   const [hotelSkipped, setHotelSkipped] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [downloadCurrency, setDownloadCurrency] = useState("USD");
 
   const hasFlights = offers.length > 0;
   const hasHotels = hotels.length > 0;
@@ -98,25 +124,26 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   const selectedOutboundFlight = offers.find((offer) => offer.offer_id === selectedOutboundOfferId) || null;
   const selectedHotel = hotels.find((hotel) => hotel.hotel_id === selectedHotelId) || null;
   const hasSelectedReturn = !!selectedFlight?.return_slice;
-  const selectedFlightPrice = selectedFlight
+  const selectedFlightPriceUsd = selectedFlight
     ? selectedFlight.price_usd + (hasSelectedReturn ? (selectedOutboundFlight?.price_usd || 0) : 0)
     : selectedOutboundFlight?.price_usd || 0;
-  const selectedFlightCurrency = selectedFlight?.currency || selectedOutboundFlight?.currency || "USD";
-  const hasMixedCurrencies = !!(selectedFlight || selectedOutboundFlight) && !!selectedHotel && selectedFlightCurrency !== selectedHotel.currency;
-  const totalLabel = hasMixedCurrencies ? "Mixed currencies" : "Total";
-  const totalValue = hasMixedCurrencies
-    ? `${formatCurrency(selectedFlightPrice, selectedFlightCurrency)} + ${formatCurrency(selectedHotel.total_price, selectedHotel.currency)}`
-    : formatCurrency(
-        selectedFlightPrice + (selectedHotel?.total_price || 0),
-        selectedFlightCurrency || selectedHotel?.currency || "USD",
-      );
+  const selectedHotelTotalUsd = getHotelUsdTotal(selectedHotel);
+  const totalUsd = selectedFlightPriceUsd + selectedHotelTotalUsd;
+  const totalValue = formatCurrency(totalUsd, "USD");
+  const downloadTotalValue = formatCurrency(convertFromUsd(totalUsd, downloadCurrency), downloadCurrency);
+  const downloadCurrencyOptions = Array.from(new Set([
+    ...DOWNLOAD_CURRENCIES,
+    selectedHotel?.currency?.toUpperCase(),
+    selectedFlight?.original_currency?.toUpperCase(),
+  ].filter(Boolean) as string[])).filter((currency) => RATES_PER_USD[currency]);
   const canPersist = !!selectedFlight;
   const persistedFlight = selectedFlight && selectedOutboundFlight && hasSelectedReturn
     ? {
         ...selectedFlight,
         outbound_offer_id: selectedOutboundFlight.offer_id,
         return_offer_id: selectedFlight.offer_id,
-        price_usd: selectedFlightPrice,
+        price_usd: selectedFlightPriceUsd,
+        currency: "USD",
       }
     : selectedFlight;
 
@@ -253,9 +280,9 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
         startY: currentY,
         head: [["Item", "Price"]],
         body: [
-          ...(selectedFlight ? [["Flight Total", formatCurrency(selectedFlightPrice, selectedFlightCurrency)]] : []),
-          ...(selectedHotel ? [["Hotel Total", formatCurrency(selectedHotel.total_price, selectedHotel.currency)]] : []),
-          ["Grand Total", totalValue]
+          ...(selectedFlight ? [["Flight Total", formatCurrency(convertFromUsd(selectedFlightPriceUsd, downloadCurrency), downloadCurrency)]] : []),
+          ...(selectedHotel ? [["Hotel Total", formatCurrency(convertFromUsd(selectedHotelTotalUsd, downloadCurrency), downloadCurrency)]] : []),
+          ["Grand Total", downloadTotalValue]
         ],
           theme: 'plain',
           styles: { fontStyle: 'bold' },
@@ -458,9 +485,29 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
             </p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <SummaryTile label="Flight" value={selectedFlight ? formatCurrency(selectedFlightPrice, selectedFlightCurrency) : "Not selected"} />
+            <SummaryTile label="Flight" value={selectedFlight ? formatCurrency(selectedFlightPriceUsd, "USD") : "Not selected"} />
             <SummaryTile label="Hotel" value={selectedHotel ? formatCurrency(selectedHotel.total_price, selectedHotel.currency) : "Hotel skipped"} />
-            <SummaryTile label={totalLabel} value={totalValue} />
+            <SummaryTile label="Total" value={totalValue} />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-[minmax(180px,240px)_1fr] gap-3 items-end">
+            <label className="flex flex-col gap-1 text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--color-text-tertiary)" }}>
+              Download currency
+              <select
+                value={downloadCurrency}
+                onChange={(event) => setDownloadCurrency(event.target.value)}
+                className="rounded-[10px] px-3 py-2 text-[13px] font-bold outline-none"
+                style={{
+                  color: "var(--color-text-primary)",
+                  background: "var(--color-background-elevated)",
+                  border: "1px solid var(--color-border-secondary)",
+                }}
+              >
+                {downloadCurrencyOptions.map((currency) => (
+                  <option key={currency} value={currency}>{currency}</option>
+                ))}
+              </select>
+            </label>
+            <SummaryTile label="Download total" value={downloadTotalValue} />
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={goBackFromItinerary} className={actionButtonClass} style={secondaryButtonStyle}>

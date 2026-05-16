@@ -122,7 +122,7 @@ def test_create_travel_journey_persists_downloaded_itinerary_with_hotel(storage)
     assert row["hotel_offer_json"] == json.dumps(hotel_offer)
 
 
-def test_create_travel_journey_excludes_non_usd_hotel_total_from_usd_total(storage):
+def test_create_travel_journey_uses_normalized_non_usd_hotel_total(storage):
     flight_offer = {
         "offer_id": "flight_123",
         "price_usd": 750,
@@ -131,6 +131,7 @@ def test_create_travel_journey_excludes_non_usd_hotel_total_from_usd_total(stora
     hotel_offer = {
         "hotel_id": "hotel_456",
         "total_price": 900,
+        "total_price_usd": 990,
         "currency": "EUR",
     }
 
@@ -143,8 +144,8 @@ def test_create_travel_journey_excludes_non_usd_hotel_total_from_usd_total(stora
         status="downloaded",
     )
 
-    assert journey["total_price_usd"] == 750
-    assert storage.list_travel_journeys(owner_id="user_123")[0]["total_price_usd"] == 750
+    assert journey["total_price_usd"] == 1740
+    assert storage.list_travel_journeys(owner_id="user_123")[0]["total_price_usd"] == 1740
 
 
 def test_post_journeys_saves_downloaded_itinerary_with_hotel(monkeypatch, tmp_path):

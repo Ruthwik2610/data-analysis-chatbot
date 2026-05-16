@@ -138,6 +138,8 @@ export interface HotelOffer {
   photo_url: string;
   price_per_night: number;
   total_price: number;
+  price_per_night_usd?: number | null;
+  total_price_usd?: number | null;
   currency: string;
   check_in_date: string;
   check_out_date: string;
@@ -162,6 +164,8 @@ export interface TravelOffer {
   cabin_class: string;
   price_usd: number;
   currency: string;
+  original_price?: number | null;
+  original_currency?: string | null;
   policy_compliant: boolean;
   policy_violation_reason: string | null;
   booking_redirect_url: string;

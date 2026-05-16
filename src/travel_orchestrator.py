@@ -17,6 +17,7 @@ from typing import Any, AsyncIterator
 
 from opentelemetry import trace
 
+from src.currency import convert_money
 from src.mcp_pool import extract_text_content
 
 TRACER = trace.get_tracer(__name__)
@@ -83,6 +84,8 @@ class HotelOffer:
     policy_compliant: bool
     policy_violation_reason: str | None
     score: float = 0.0
+    price_per_night_usd: float | None = None
+    total_price_usd: float | None = None
 
 
 @dataclass
@@ -108,6 +111,8 @@ class FlightOffer:
     # untouched so the UI can render outbound + return on the same card. None
     # for one-way offers.
     return_slice: dict[str, Any] | None = None
+    original_price: float | None = None
+    original_currency: str | None = None
 
 
 # ── Multi-loop thinking chain ─────────────────────────────────────────────────
@@ -363,14 +368,16 @@ def _score_offer(offer_data: dict[str, Any], history: TravelHistory, policy_tier
 def _score_hotel(
     raw: dict[str, Any], history: TravelHistory, policy_tier: dict[str, Any]
 ) -> tuple[float, bool, str | None]:
-    price_per_night = float(raw.get("price_per_night") or 0)
+    price_per_night_raw = float(raw.get("price_per_night") or 0)
     per_night_cap = float(policy_tier.get("hotel_max_per_night_usd") or 200)
     currency = str(raw.get("currency") or "USD")
+    converted_price = convert_money(price_per_night_raw, currency, "USD")
+    price_per_night = converted_price.amount if converted_price else price_per_night_raw
     star = raw.get("star_rating")
     star_score = (star / 5.0) if isinstance(star, (int, float)) else 0.5
     review = raw.get("review_score")
     review_score_val = (review / 10.0) if isinstance(review, (int, float)) else 0.5
-    if currency != "USD":
+    if currency.upper() != "USD" and converted_price is None:
         price_score = 0.5
         composite = 0.5 * price_score + 0.3 * star_score + 0.2 * review_score_val
         return composite, False, f"Cannot verify ${per_night_cap:.0f}/night cap — hotel priced in {currency}"
@@ -746,7 +753,15 @@ class TravelOrchestrator:
             policy_tier = history.policy
             offers: list[FlightOffer] = []
             for raw in raw_offers[:10]:
-                score, compliant, violation = _score_offer(raw, history, policy_tier)
+                original_currency = str(raw.get("currency") or "USD").upper()
+                try:
+                    original_price = float(raw.get("price_usd") or 0)
+                except (TypeError, ValueError):
+                    original_price = 0.0
+                converted = convert_money(original_price, original_currency, "USD")
+                price_usd = converted.amount if converted else original_price
+                scored_raw = {**raw, "price_usd": price_usd, "currency": "USD"}
+                score, compliant, violation = _score_offer(scored_raw, history, policy_tier)
                 offers.append(FlightOffer(
                     offer_id=str(raw.get("offer_id") or ""),
                     airline=str(raw.get("airline") or ""),
@@ -758,14 +773,16 @@ class TravelOrchestrator:
                     duration_minutes=int(raw.get("duration_minutes") or 0),
                     stops=int(raw.get("stops") or 0),
                     cabin_class=str(raw.get("cabin_class") or intent.cabin_class),
-                    price_usd=float(raw.get("price_usd") or 0),
-                    currency=str(raw.get("currency") or "USD"),
+                    price_usd=price_usd,
+                    currency="USD",
                     policy_compliant=compliant,
                     policy_violation_reason=violation,
                     booking_redirect_url=str(raw.get("booking_redirect_url") or ""),
                     expires_at=raw.get("expires_at"),
                     score=score,
                     return_slice=raw.get("return_slice") if isinstance(raw.get("return_slice"), dict) else None,
+                    original_price=original_price,
+                    original_currency=original_currency,
                 ))
 
             offers.sort(key=lambda o: (-o.score, o.price_usd))
@@ -857,6 +874,11 @@ class TravelOrchestrator:
             hotels: list[HotelOffer] = []
             for raw in parsed[:10]:
                 score, compliant, violation = _score_hotel(raw, history, policy_tier)
+                currency = str(raw.get("currency") or "USD").upper()
+                price_per_night = float(raw.get("price_per_night") or 0)
+                total_price = float(raw.get("total_price") or 0)
+                converted_nightly = convert_money(price_per_night, currency, "USD")
+                converted_total = convert_money(total_price, currency, "USD")
                 hotels.append(HotelOffer(
                     hotel_id=str(raw.get("hotel_id") or ""),
                     name=str(raw.get("name") or ""),
@@ -864,9 +886,9 @@ class TravelOrchestrator:
                     star_rating=raw.get("star_rating"),
                     review_score=raw.get("review_score"),
                     photo_url=str(raw.get("photo_url") or ""),
-                    price_per_night=float(raw.get("price_per_night") or 0),
-                    total_price=float(raw.get("total_price") or 0),
-                    currency=str(raw.get("currency") or "USD"),
+                    price_per_night=price_per_night,
+                    total_price=total_price,
+                    currency=currency,
                     check_in_date=str(raw.get("check_in_date") or check_in),
                     check_out_date=str(raw.get("check_out_date") or check_out),
                     rooms=int(raw.get("rooms") or intent.rooms),
@@ -875,9 +897,11 @@ class TravelOrchestrator:
                     policy_compliant=compliant,
                     policy_violation_reason=violation,
                     score=score,
+                    price_per_night_usd=converted_nightly.amount if converted_nightly else None,
+                    total_price_usd=converted_total.amount if converted_total else None,
                 ))
 
-            hotels.sort(key=lambda h: (-h.score, h.total_price))
+            hotels.sort(key=lambda h: (-h.score, h.total_price_usd if h.total_price_usd is not None else h.total_price))
             span.set_attribute("hotels.returned", len(hotels))
             return hotels
 
@@ -905,6 +929,8 @@ class TravelOrchestrator:
                     "cabin_class": o.cabin_class,
                     "price_usd": o.price_usd,
                     "currency": o.currency,
+                    "original_price": o.original_price,
+                    "original_currency": o.original_currency,
                     "policy_compliant": o.policy_compliant,
                     "policy_violation_reason": o.policy_violation_reason,
                     "booking_redirect_url": o.booking_redirect_url,
@@ -925,6 +951,8 @@ class TravelOrchestrator:
                     "photo_url": h.photo_url,
                     "price_per_night": h.price_per_night,
                     "total_price": h.total_price,
+                    "price_per_night_usd": h.price_per_night_usd,
+                    "total_price_usd": h.total_price_usd,
                     "currency": h.currency,
                     "check_in_date": h.check_in_date,
                     "check_out_date": h.check_out_date,

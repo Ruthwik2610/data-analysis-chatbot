@@ -328,6 +328,15 @@ def test_score_hotel_compliant():
     assert 0.0 <= composite <= 1.0
 
 
+def test_score_hotel_converts_non_usd_price_for_policy_check():
+    raw = {"price_per_night": 500, "currency": "AED", "star_rating": 4, "review_score": 8.5}
+    history = TravelHistory()
+    policy_tier = _make_policy_tier(per_night_cap=200)
+    _, compliant, reason = _score_hotel(raw, history, policy_tier)
+    assert compliant is True
+    assert reason is None
+
+
 def test_score_hotel_over_cap():
     raw = {"price_per_night": 250, "currency": "USD", "star_rating": 5, "review_score": 9.0}
     history = TravelHistory()

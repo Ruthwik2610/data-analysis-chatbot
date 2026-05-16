@@ -10,6 +10,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from src.currency import convert_money
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -475,10 +477,15 @@ class Storage:
     def _hotel_price_usd(hotel_offer: dict[str, Any] | None) -> float:
         if not hotel_offer:
             return 0.0
+        explicit = Storage._offer_price_usd(hotel_offer, "total_price_usd")
+        if explicit:
+            return explicit
         currency = str(hotel_offer.get("currency") or "USD").upper()
-        if currency != "USD":
-            return 0.0
-        return Storage._offer_price_usd(hotel_offer, "total_price")
+        total = Storage._offer_price_usd(hotel_offer, "total_price")
+        if currency == "USD":
+            return total
+        converted = convert_money(total, currency, "USD")
+        return converted.amount if converted else 0.0
 
     @staticmethod
     def _travel_journey_record(row: sqlite3.Row) -> dict[str, Any]:
