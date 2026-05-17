@@ -431,7 +431,9 @@ app.add_middleware(
 )
 
 from backend.routes.travel_routes import router as travel_router
+from backend.routes.travel_agent_routes import router as travel_agent_router
 app.include_router(travel_router)
+app.include_router(travel_agent_router)
 
 
 @app.middleware("http")
@@ -442,6 +444,7 @@ async def auth_middleware(request: Request, call_next):
     if (
         request.method == "OPTIONS"
         or path in PUBLIC_PATHS
+        or path == "/api/travel/agent/plan"
         or path.startswith("/admin/")
         or path.startswith("/mcp/workbooks/")
     ):

@@ -7,6 +7,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -289,7 +290,54 @@ CREATE TABLE IF NOT EXISTS travel_journeys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_travel_journeys_owner ON travel_journeys(owner_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS travel_agent_trips (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
+  status TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_travel_agent_trips_owner ON travel_agent_trips(owner_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS travel_agent_audit_events (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
+  trip_id TEXT,
+  event_type TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_travel_agent_audit_owner ON travel_agent_audit_events(owner_id, created_at DESC);
 """
+
+
+def _parse_iso_timestamp(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return time.time()
+    return time.time()
+
+
+def _format_unix_timestamp(value: Any) -> str:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        timestamp = time.time()
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+def _redact_travel_agent_text(text: str) -> str:
+    from src.travel_agent_security import redact_sensitive_text
+
+    return redact_sensitive_text(text)
 
 
 class Storage:
@@ -463,6 +511,94 @@ class Storage:
         with self._conn() as con:
             rows = con.execute("SELECT * FROM travel_journeys WHERE owner_id = ? ORDER BY created_at DESC", (owner_id,)).fetchall()
         return [dict(r) for r in rows]
+
+    # -- travel agent product -----------------------------------------------
+    def save_travel_agent_trip(self, owner_id: str, trip: dict[str, Any], events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        trip_id = str(trip["id"])
+        created_at = _parse_iso_timestamp(trip.get("created_at"))
+        payload_json = json.dumps(trip)
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT OR REPLACE INTO travel_agent_trips (id, owner_id, status, risk, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (trip_id, owner_id, trip.get("status", "draft"), trip.get("risk", "low"), payload_json, created_at),
+            )
+            for event in events or []:
+                self.save_travel_agent_audit_event(owner_id=owner_id, event=event, conn=con)
+            row = con.execute(
+                "SELECT payload_json FROM travel_agent_trips WHERE id = ? AND owner_id = ?",
+                (trip_id, owner_id),
+            ).fetchone()
+        return json.loads(row["payload_json"])
+
+    def list_travel_agent_trips(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT payload_json FROM travel_agent_trips WHERE owner_id = ? ORDER BY created_at DESC",
+                (owner_id,),
+            ).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    def save_travel_agent_audit_event(
+        self,
+        owner_id: str,
+        event: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        params = (
+            event["id"],
+            owner_id,
+            event.get("trip_id"),
+            event["event_type"],
+            _redact_travel_agent_text(str(event.get("message") or "")),
+            _parse_iso_timestamp(event.get("created_at")),
+        )
+        sql = """
+            INSERT OR REPLACE INTO travel_agent_audit_events
+              (id, owner_id, trip_id, event_type, message, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """
+        if conn is not None:
+            conn.execute(sql, params)
+            return event
+        with self._conn() as local_conn:
+            local_conn.execute(sql, params)
+        return event
+
+    def list_travel_agent_audit_events(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT id, trip_id, event_type, message, created_at
+                FROM travel_agent_audit_events
+                WHERE owner_id = ?
+                ORDER BY created_at DESC
+                """,
+                (owner_id,),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "trip_id": row["trip_id"],
+                "event_type": row["event_type"],
+                "message": row["message"],
+                "created_at": _format_unix_timestamp(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def travel_agent_admin_summary(self, owner_id: str = "legacy") -> dict[str, int]:
+        trips = self.list_travel_agent_trips(owner_id=owner_id)
+        audit_count = len(self.list_travel_agent_audit_events(owner_id=owner_id))
+        return {
+            "total_trips": len(trips),
+            "draft_trips": sum(1 for trip in trips if trip.get("status") == "draft"),
+            "booked_trips": sum(1 for trip in trips if trip.get("status") == "booked"),
+            "high_risk_trips": sum(1 for trip in trips if trip.get("risk") == "high"),
+            "audit_events": audit_count,
+        }
 
     @staticmethod
     def _offer_price_usd(offer: dict[str, Any] | None, key: str) -> float:
