@@ -49,6 +49,31 @@ def test_travel_agent_plan_runs_on_shared_backend_without_internal_details(isola
     assert body["audit_events"]
 
 
+def test_travel_agent_plan_rejects_invalid_return_dates(isolated_server):
+    server, _storage, _pool = isolated_server
+    client = TestClient(server.app)
+    payload = _payload()
+    payload["return_date"] = str(date.today() + timedelta(days=3))
+    payload["depart_date"] = str(date.today() + timedelta(days=5))
+
+    response = client.post("/api/travel/agent/plan", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_travel_agent_stored_endpoints_require_login_when_auth_is_enabled(isolated_server, monkeypatch):
+    server, _storage, _pool = isolated_server
+    monkeypatch.setattr(server, "API_KEY", "test-api-key")
+    monkeypatch.setattr(server, "JWT_SECRET", "test-jwt-secret")
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
+    client = TestClient(server.app)
+
+    assert client.get("/api/travel/trips").status_code == 401
+    assert client.post("/api/travel/trips", json=_payload()).status_code == 401
+    assert client.get("/api/travel/admin/summary").status_code == 401
+    assert client.get("/api/travel/admin/audit").status_code == 401
+
+
 def test_travel_agent_trip_persistence_uses_shared_storage(isolated_server):
     server, _storage, _pool = isolated_server
     client = TestClient(server.app)
