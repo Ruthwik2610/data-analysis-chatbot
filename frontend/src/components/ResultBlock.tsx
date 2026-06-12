@@ -972,9 +972,7 @@ async function downloadPdf(result: ResultPayload, options: PdfExportOptions = {}
 
   const chartImage = options.includeChart
     ? await chartImageDataUrl(result, options.chartRef)
-    : result.image_b64
-      ? `data:image/png;base64,${result.image_b64}`
-      : null;
+    : null;
 
   if (chartImage) {
     y = addPdfSection(doc, "Graph", y + 4, pageHeight);

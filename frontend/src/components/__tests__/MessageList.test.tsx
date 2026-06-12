@@ -80,8 +80,9 @@ describe("MessageList markdown rendering", () => {
     );
 
     expect(screen.getByText(/Revenue by category/)).toBeInTheDocument();
-    expect(screen.getByTitle("Download CSV")).toBeInTheDocument();
-    expect(screen.getByTitle("Show table")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Export result" }));
+    expect(screen.getByRole("button", { name: "Export result as CSV" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export result as PDF" })).toBeInTheDocument();
   });
 
   it("uses a responsive layout for empty-state action cards", () => {
