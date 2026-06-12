@@ -53,6 +53,8 @@ describe("Topbar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("link", { name: "Feedback inbox" })).not.toBeInTheDocument();
+    expect(screen.getByTitle("Switch to dark mode")).toHaveAttribute("aria-label", "Switch to dark mode");
+    expect(screen.getByText("Pizza analysis").closest(".chat-content-frame")).not.toBeNull();
   });
 
   it("shows admin feedback navigation only when admin access is verified", () => {

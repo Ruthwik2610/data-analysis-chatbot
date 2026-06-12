@@ -133,6 +133,7 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByRole("button", { name: "Copy answer" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save to project notes" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Ask follow-up" })).toBeInTheDocument();
+    expect(screen.getByText("Revenue increased by 12%.").closest(".chat-content-frame")).not.toBeNull();
   });
 
   it("lets users rerun the previous question without showing debug reporting in chat", () => {

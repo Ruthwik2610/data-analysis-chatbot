@@ -61,7 +61,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
 
   return (
     <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col min-h-0">
-      <div className="flex flex-col gap-6 mt-auto justify-end">
+      <div className="chat-content-frame flex flex-col gap-6 mt-auto justify-end">
         {messages.map((msg, idx) => {
             const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
             const previousUserMessage = msg.role === "assistant"

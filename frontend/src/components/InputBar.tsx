@@ -124,7 +124,7 @@ export function InputBar({
   return (
     <div className="px-6 py-4 relative z-30" style={{ background: "transparent" }}>
       <div
-        className="mx-auto flex max-w-[920px] flex-col gap-2 px-4 py-3 relative glass"
+        className="chat-content-frame flex flex-col gap-2 px-4 py-3 relative glass"
         style={{
           borderRadius: 22,
           boxShadow: "var(--shadow-xl)",

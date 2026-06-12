@@ -64,6 +64,19 @@ describe("InputBar", () => {
     expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
   });
 
+  it("uses the shared chat content frame for composer alignment", () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onPickFile={vi.fn()}
+        onAttached={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    expect(screen.getByRole("textbox").closest(".chat-content-frame")).not.toBeNull();
+  });
+
   it("lets users choose the query model mode in the composer", () => {
     const onModelModeChange = vi.fn();
     render(

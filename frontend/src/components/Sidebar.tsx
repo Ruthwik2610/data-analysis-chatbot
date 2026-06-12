@@ -81,6 +81,7 @@ export function Sidebar(p: SidebarProps) {
             onClick={p.onNewChat}
             className="p-1.5 rounded-full transition-colors"
             title="New chat"
+            aria-label="New chat"
             style={{ color: "var(--color-text-tertiary)" }}
           >
             <Plus size={13} />
@@ -105,7 +106,7 @@ export function Sidebar(p: SidebarProps) {
 
         <div className="mt-4 flex items-center justify-between pr-3">
           <SectionLabel>Projects</SectionLabel>
-          <button onClick={p.onNewProject} className="p-1.5 rounded-full transition-colors" title="New Project" style={{ color: "var(--color-text-tertiary)" }}>
+          <button onClick={p.onNewProject} className="p-1.5 rounded-full transition-colors" title="New Project" aria-label="New project" style={{ color: "var(--color-text-tertiary)" }}>
             <Plus size={13} />
           </button>
         </div>
@@ -217,6 +218,7 @@ function ProjectRow({
   onSelect: () => void;
   onDelete: () => void;
 }) {
+  const title = project.title || "Untitled project";
   return (
     <div
       className={clsx("group mx-3 mb-1 flex items-center pr-1 transition-colors")}
@@ -231,10 +233,10 @@ function ProjectRow({
         onClick={onSelect}
         className="flex-1 truncate text-left px-3 py-2.5 text-[13px] flex items-center gap-2"
         style={{ color: isActive ? "var(--color-text-primary)" : "var(--color-text-secondary)" }}
-        title={project.title}
+        title={title}
       >
         <Folder size={12} strokeWidth={1.5} />
-        {project.title}
+        {title}
       </button>
       <button
         onClick={(e) => {
@@ -243,6 +245,7 @@ function ProjectRow({
         }}
         className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/5"
         title="Delete Project"
+        aria-label={`Delete project ${title}`}
       >
         <X size={12} stroke="var(--color-text-tertiary)" />
       </button>
@@ -272,6 +275,7 @@ function ChatRow({
   onSelect: () => void;
   onDelete: () => void;
 }) {
+  const title = chat.title || "Untitled chat";
   return (
     <div
       className={clsx("group mx-3 mb-1 flex items-center pr-1 transition-colors")}
@@ -286,10 +290,10 @@ function ChatRow({
         onClick={onSelect}
         className="flex-1 truncate text-left px-3 py-2.5 text-[13px] flex items-center gap-2"
         style={{ color: isActive ? "var(--color-text-primary)" : "var(--color-text-secondary)" }}
-        title={chat.title}
+        title={title}
       >
         <MessageSquare size={13} strokeWidth={1.6} />
-        <span className="truncate">{chat.title || "New chat"}</span>
+        <span className="truncate">{title}</span>
       </button>
       <button
         onClick={(e) => {
@@ -298,6 +302,7 @@ function ChatRow({
         }}
         className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/5"
         title="Delete"
+        aria-label={`Delete ${title}`}
       >
         <X size={12} stroke="var(--color-text-tertiary)" />
       </button>

@@ -30,6 +30,7 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
     toggleTheme();
     setThemeState((t) => (t === "dark" ? "light" : "dark"));
   };
+  const themeToggleLabel = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
 
   return (
     <div
@@ -41,6 +42,7 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
         WebkitBackdropFilter: "blur(12px)",
       }}
     >
+      <div className="chat-content-frame flex min-w-0 flex-1 items-center justify-between gap-4">
       <div className="flex min-w-0 flex-1 items-center gap-3">
         {!sidebarOpen && (
           <button
@@ -74,7 +76,8 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
       <div className="flex items-center gap-2">
       <button
         onClick={handleToggle}
-        title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        title={themeToggleLabel}
+        aria-label={themeToggleLabel}
         className="h-9 w-9 rounded-full transition-colors flex-shrink-0 flex items-center justify-center"
         style={{
           background: "transparent",
@@ -112,6 +115,7 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
             <LogOut size={13} /> Logout
           </button>
         </div>
+      </div>
       </div>
       </div>
     </div>
