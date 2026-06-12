@@ -85,6 +85,58 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByRole("button", { name: "Export result as PDF" })).toBeInTheDocument();
   });
 
+  it("hides raw SQL from assistant markdown text", () => {
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: [
+          "Revenue increased in May.",
+          "SQL: SELECT category, revenue FROM sales WHERE token = 'secret'",
+          "**Margin** also improved.",
+        ].join("\n"),
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Revenue increased in May.")).toBeInTheDocument();
+    expect(screen.getByText("Margin")).toBeInTheDocument();
+    expect(screen.queryByText(/select|token|secret|sql/i)).not.toBeInTheDocument();
+  });
+
+  it("hides internal details from assistant error messages", () => {
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Traceback: SELECT * FROM users WHERE api_key = 'abc'",
+        error: true,
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Something went wrong. Please try again.")).toBeInTheDocument();
+    expect(screen.queryByText(/select|api_key|traceback/i)).not.toBeInTheDocument();
+  });
+
   it("keeps a single structured chart inline even when artifacts are enabled", () => {
     const onOpenArtifact = vi.fn();
     const messages: Message[] = [

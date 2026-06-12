@@ -17,6 +17,7 @@ import { displaySourceName } from "@/lib/displayNames";
 import { artifactItems } from "@/lib/artifacts";
 import { formatArchiveSkippedNote, formatWorkbookMCPConnectedMessage } from "@/lib/uploadMessages";
 import { buildCustomSheetQuestion, buildSheetModeQuestion } from "@/lib/uploadPending";
+import { sanitizeThinkingStep, sanitizeUserVisibleError } from "@/lib/userFacingText";
 import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
@@ -237,7 +238,7 @@ export default function Home() {
           updateMessage(placeholderId, {
             thinking: null,
             progress: null,
-            content: `Couldn't load ${displaySourceName(file.name)}: ${e?.message || "unknown error"}`,
+            content: `Couldn't load ${displaySourceName(file.name)}: ${sanitizeUserVisibleError(e?.message, "Please try another file.")}`,
             error: true,
           });
         }
@@ -268,7 +269,11 @@ export default function Home() {
             });
             refreshSources();
           } catch (e: any) {
-            updateMessage(messageId, { thinking: null, content: `Couldn't connect: ${e?.message || "unknown error"}`, error: true });
+            updateMessage(messageId, {
+              thinking: null,
+              content: `Couldn't connect: ${sanitizeUserVisibleError(e?.message, "Please check the connection details and try again.")}`,
+              error: true,
+            });
           }
         } else {
           updateMessage(messageId, { resolved: true, content: msg.content + "\n\nOK, I'll send it as a question." });
@@ -307,7 +312,11 @@ export default function Home() {
           });
           refreshSources();
         } catch (e: any) {
-          updateMessage(messageId, { thinking: null, content: `I loaded the file, but couldn't save that rule: ${e?.message || "unknown"}`, error: true });
+          updateMessage(messageId, {
+            thinking: null,
+            content: `I loaded the file, but couldn't save that rule: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
+            error: true,
+          });
         }
         return;
       }
@@ -347,7 +356,11 @@ export default function Home() {
             return;
           }
         } catch (e: any) {
-          updateMessage(messageId, { thinking: null, content: `Couldn't finish loading: ${e?.message || "unknown"}`, error: true });
+          updateMessage(messageId, {
+            thinking: null,
+            content: `Couldn't finish loading: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
+            error: true,
+          });
         }
         return;
       }
@@ -393,7 +406,11 @@ export default function Home() {
         }
         refreshSources();
       } catch (e: any) {
-        updateMessage(messageId, { thinking: null, content: `Couldn't finish loading: ${e?.message || "unknown"}`, error: true });
+        updateMessage(messageId, {
+          thinking: null,
+          content: `Couldn't finish loading: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
+          error: true,
+        });
       }
     },
     [updateMessage, refreshSources],
@@ -468,7 +485,7 @@ export default function Home() {
               }
               updateMessage(assistantId, { source: ev.data.source });
             } else if (ev.event === "thinking") {
-              updateMessage(assistantId, { thinking: ev.data.step });
+              updateMessage(assistantId, { thinking: sanitizeThinkingStep(ev.data.step) });
             } else if (ev.event === "result") {
               updateMessage(assistantId, { result: ev.data as ResultPayload, thinking: null });
               setLoading(false);
@@ -502,7 +519,7 @@ export default function Home() {
               });
               setLoading(false);
             } else if (ev.event === "error") {
-              updateMessage(assistantId, { content: ev.data.message, error: true, thinking: null });
+              updateMessage(assistantId, { content: sanitizeUserVisibleError(ev.data.message), error: true, thinking: null });
               setLoading(false);
             } else if (ev.event === "notice") {
               updateMessage(assistantId, { notice: ev.data });
@@ -521,7 +538,12 @@ export default function Home() {
             thinking: null,
           });
         } else {
-          updateMessage(assistantId, { content: e?.message || "Network error", error: true, streaming: false, thinking: null });
+          updateMessage(assistantId, {
+            content: sanitizeUserVisibleError(e?.message, "Network error. Please try again."),
+            error: true,
+            streaming: false,
+            thinking: null,
+          });
         }
       } finally {
         setLoading(false);
@@ -739,7 +761,7 @@ export default function Home() {
       addMessage({
         id: `local_${Date.now()}`,
         role: "assistant",
-        content: `Couldn't save that note: ${e?.message || "unknown error"}`,
+        content: `Couldn't save that note: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
         error: true,
       });
     }
@@ -764,7 +786,7 @@ export default function Home() {
       addMessage({
         id: `local_feedback_err_${Date.now()}`,
         role: "assistant",
-        content: `Couldn't save feedback: ${e?.message || "unknown error"}`,
+        content: `Couldn't save feedback: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
         error: true,
       });
     }

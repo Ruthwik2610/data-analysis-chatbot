@@ -21,6 +21,7 @@ import {
   YAxis,
 } from "recharts";
 import type { ResultPayload } from "@/lib/types";
+import { isLikelyInternalDetail, sanitizeAssistantContent } from "@/lib/userFacingText";
 
 interface ResultBlockProps {
   result: ResultPayload;
@@ -1110,12 +1111,13 @@ function emojiImageDataUrl(emoji: string) {
 
 function cleanNarrative(text?: string | null) {
   if (!text) return "";
-  return text
+  return sanitizeAssistantContent(text)
     .replace(/```[\s\S]*?```/g, "")
     .split("\n")
     .filter((line) => {
       const trimmed = line.trim();
       if (!trimmed) return true;
+      if (isLikelyInternalDetail(trimmed)) return false;
       if (/^\|.*\|$/.test(trimmed)) return false;
       if (/^[-:| ]+$/.test(trimmed)) return false;
       return true;

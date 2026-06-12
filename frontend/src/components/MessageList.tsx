@@ -13,6 +13,7 @@ import { TravelResultPanel } from "./TravelResultPanel";
 import { FollowUpChips } from "./FollowUpChips";
 import { artifactItems } from "@/lib/artifacts";
 import { extractFirstMarkdownTable, tableCoversResult } from "@/lib/markdownTable";
+import { sanitizeAssistantContent, sanitizeUserVisibleError } from "@/lib/userFacingText";
 
 interface MessageListProps {
   messages: Message[];
@@ -164,7 +165,7 @@ const Bubble = React.memo(function Bubble({
                 </div>
                 <span className="text-[10px] font-bold uppercase tracking-[0.2em] opacity-40" style={{ color: "var(--color-text-tertiary)" }}>Intelligence Engine</span>
             </div>
-            <AssistantMarkdown content={message.content} streaming={!!message.streaming} />
+            <AssistantMarkdown content={sanitizeAssistantContent(message.content)} streaming={!!message.streaming} />
             {message.streaming && (
               <span
                 className="inline-block w-[6px] h-[12px] ml-[1px] align-middle"
@@ -238,7 +239,7 @@ const Bubble = React.memo(function Bubble({
             <AlertTriangle size={16} className="text-red-500 mt-0.5" />
             <div className="flex flex-col gap-1">
                 <span className="font-bold uppercase tracking-widest text-[10px]">Processing Fault</span>
-                <span className="opacity-80">{message.content}</span>
+                <span className="opacity-80">{sanitizeUserVisibleError(message.content)}</span>
             </div>
           </div>
         )}

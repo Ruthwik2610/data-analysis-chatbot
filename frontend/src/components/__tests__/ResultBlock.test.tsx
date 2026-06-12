@@ -94,4 +94,27 @@ describe("ResultBlock", () => {
       }),
     );
   });
+
+  it("keeps SQL and internal details out of PDF narrative text", async () => {
+    render(
+      <ResultBlock
+        result={result}
+        narrative={[
+          "Revenue increased in May.",
+          "SQL: SELECT category, revenue FROM sales WHERE token = 'secret'",
+          "**Margin** also improved.",
+        ].join("\n")}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Visualization"), { target: { value: "table" } });
+    fireEvent.click(screen.getByRole("button", { name: "Export result" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export result as PDF" }));
+
+    await waitFor(() => expect(pdfMocks.lastDoc.save).toHaveBeenCalled());
+    const textCalls = pdfMocks.lastDoc.text.mock.calls.flat().join(" ");
+    expect(textCalls).toContain("Revenue increased in May.");
+    expect(textCalls).toContain("Margin also improved.");
+    expect(textCalls).not.toMatch(/select|token|secret|sql/i);
+  });
 });

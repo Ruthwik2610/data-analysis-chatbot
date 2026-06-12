@@ -102,6 +102,22 @@ describe("AssistantMarkdown", () => {
     expect(emphasized).toEqual(["All four categories are close.", "Classic is slightly ahead."]);
   });
 
+  it("renders bold, italic, and combined emphasis cleanly", () => {
+    const { container } = render(
+      <AssistantMarkdown
+        content={"**Revenue** improved, *margin* held, and ***profit quality*** was strong."}
+        streaming={false}
+      />,
+    );
+
+    expect(container.querySelector("strong")?.textContent).toBe("Revenue");
+    expect(Array.from(container.querySelectorAll("em")).map((node) => node.textContent)).toEqual([
+      "margin",
+      "profit quality",
+    ]);
+    expect(container.querySelector("strong em")?.textContent).toBe("profit quality");
+  });
+
   it("uses lightweight rendering while streaming", () => {
     const { container } = render(<AssistantMarkdown content={insightAnswer} streaming />);
 

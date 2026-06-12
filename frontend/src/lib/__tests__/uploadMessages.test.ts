@@ -43,4 +43,21 @@ describe("formatWorkbookMCPConnectedMessage", () => {
       },
     )).toContain("MCP URL: https://unipro-workbook.workers.dev/mcp");
   });
+
+  it("does not expose raw MCP deployment errors", () => {
+    const message = formatWorkbookMCPConnectedMessage(
+      [{ id: "src_orders", name: "operations.xlsx - Orders", kind: "xlsx", rows: 2, active: false }],
+      {
+        id: "mcp_workbook",
+        name: "operations.xlsx workbook",
+        url: null,
+        status: "connected",
+        tools: [],
+      },
+      "Traceback: SELECT * FROM secrets WHERE api_key = 'abc'",
+    );
+
+    expect(message).toContain("public MCP URL could not be created");
+    expect(message).not.toMatch(/select|api_key|traceback/i);
+  });
 });

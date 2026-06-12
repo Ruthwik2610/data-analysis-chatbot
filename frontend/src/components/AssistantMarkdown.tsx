@@ -312,13 +312,26 @@ function renderInline(text: string): React.ReactNode {
       break;
     }
     if (next > i) parts.push(text.slice(i, next));
-    if (kind === "bold") {
+    if (kind === "boldItalic") {
+      const marker = text.slice(next, next + 3);
+      const close = text.indexOf(marker, next + 3);
+      if (close < 0) {
+        parts.push(text.slice(next));
+        break;
+      }
+      parts.push(
+        <strong key={key++}>
+          <em>{renderInline(text.slice(next + 3, close))}</em>
+        </strong>,
+      );
+      i = close + 3;
+    } else if (kind === "bold") {
       const close = text.indexOf("**", next + 2);
       if (close < 0) {
         parts.push(text.slice(next));
         break;
       }
-      parts.push(<strong key={key++}>{text.slice(next + 2, close)}</strong>);
+      parts.push(<strong key={key++}>{renderInline(text.slice(next + 2, close))}</strong>);
       i = close + 2;
     } else if (kind === "code") {
       const close = text.indexOf("`", next + 1);
@@ -336,16 +349,18 @@ function renderInline(text: string): React.ReactNode {
         i = next + 1;
         continue;
       }
-      parts.push(<em key={key++}>{text.slice(next + 1, close)}</em>);
+      parts.push(<em key={key++}>{renderInline(text.slice(next + 1, close))}</em>);
       i = close + 1;
     }
   }
   return parts;
 }
 
-function findNextInlineToken(text: string, start: number): { kind: "bold" | "code" | "italic"; index: number } | null {
-  let best: { kind: "bold" | "code" | "italic"; index: number } | null = null;
-  const candidates: Array<{ kind: "bold" | "code"; marker: string }> = [
+function findNextInlineToken(text: string, start: number): { kind: "boldItalic" | "bold" | "code" | "italic"; index: number } | null {
+  let best: { kind: "boldItalic" | "bold" | "code" | "italic"; index: number } | null = null;
+  const candidates: Array<{ kind: "boldItalic" | "bold" | "code"; marker: string }> = [
+    { kind: "boldItalic", marker: "***" },
+    { kind: "boldItalic", marker: "___" },
     { kind: "bold", marker: "**" },
     { kind: "code", marker: "`" },
   ];
@@ -370,7 +385,7 @@ function findNextInlineToken(text: string, start: number): { kind: "bold" | "cod
 
 function findClosingEmphasis(text: string, marker: string, start: number): number {
   for (let index = start; index < text.length; index += 1) {
-    if (text[index] === marker && text[index + 1] !== marker && canCloseEmphasis(text, index)) {
+    if (text[index] === marker && text[index - 1] !== marker && text[index + 1] !== marker && canCloseEmphasis(text, index)) {
       return index;
     }
   }
