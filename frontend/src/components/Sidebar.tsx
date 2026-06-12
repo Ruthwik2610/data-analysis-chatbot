@@ -1,9 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Bug, Folder, MessageSquare, Plus, X, Eye, ChevronLeft, UserRound, LayoutGrid } from "lucide-react";
-import type { ChatSummary, Source, Project } from "@/lib/types";
-import { displaySourceName } from "@/lib/displayNames";
+import { Bug, Folder, MessageSquare, Plus, X, ChevronLeft, UserRound, LayoutGrid } from "lucide-react";
+import type { ChatSummary, Project } from "@/lib/types";
 import { SkeletonChatList } from "./SkeletonLoader";
 import Link from "next/link";
 import clsx from "clsx";
@@ -11,35 +9,19 @@ import clsx from "clsx";
 interface SidebarProps {
   chats: ChatSummary[];
   currentChatId: string | null;
-  sources: Source[];
-  selectedSourceIds: string[];
   onNewChat: () => void;
   onSelectChat: (id: string) => void;
   onDeleteChat: (id: string) => void;
-  onToggleSource: (id: string) => void;
-  onDeleteSource: (id: string) => void;
   projects: Project[];
   currentProjectId: string | null;
   onSelectProject: (id: string) => void;
   onNewProject: () => void;
   onDeleteProject: (id: string) => void;
   chatLoading?: boolean;
-  onPreviewSource?: (id: string) => void;
   userEmail?: string;
   onToggleCollapse?: () => void;
   isAdmin?: boolean;
 }
-
-const KIND_COLOR: Record<string, string> = {
-  csv: "var(--color-text-success)",
-  xlsx: "var(--color-text-success)",
-  json: "var(--color-text-success)",
-  pdf: "var(--color-text-success)",
-  duckdb: "var(--color-text-warning)",
-  api: "var(--color-text-info)",
-  mcp: "var(--color-text-warning)",
-  multi: "var(--color-text-warning)",
-};
 
 export function Sidebar(p: SidebarProps) {
   return (
@@ -122,25 +104,6 @@ export function Sidebar(p: SidebarProps) {
             onDelete={() => p.onDeleteProject(project.id)}
           />
         ))}
-
-        <div className="mt-4">
-          <SectionLabel>Sources</SectionLabel>
-        </div>
-        {p.sources.length === 0 && (
-          <EmptyState>No sources attached</EmptyState>
-        )}
-        <div className="px-3">
-          {p.sources.slice(0, 7).map((src) => (
-            <KbRow
-              key={src.id}
-              source={src}
-              selected={p.selectedSourceIds.includes(src.id)}
-              onToggle={() => p.onToggleSource(src.id)}
-              onDelete={() => p.onDeleteSource(src.id)}
-              onPreview={() => p.onPreviewSource?.(src.id)}
-            />
-          ))}
-        </div>
       </div>
 
       {/* Footer / Admin */}
@@ -306,83 +269,6 @@ function ChatRow({
       >
         <X size={12} stroke="var(--color-text-tertiary)" />
       </button>
-    </div>
-  );
-}
-
-function KbRow({
-  source,
-  selected,
-  onToggle,
-  onDelete,
-  onPreview,
-}: {
-  source: Source;
-  selected: boolean;
-  onToggle: () => void;
-  onDelete: () => void;
-  onPreview?: () => void;
-}) {
-  const [confirming, setConfirming] = useState(false);
-  return (
-    <div className="group relative flex items-center gap-1.5 py-1.5">
-        <button
-          onClick={onToggle}
-          className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-[12px]"
-          style={{ color: "var(--color-text-secondary)" }}
-          title={`${source.kind.toUpperCase()} · ${source.rows.toLocaleString()} ${source.kind === "mcp" ? "tools" : "rows"}`}
-        >
-          <div
-            className="w-3 h-3 rounded-[4px] flex-shrink-0"
-            style={{
-              background: selected ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "transparent",
-              border: `1px solid ${selected ? KIND_COLOR[source.kind] || "var(--color-text-success)" : "var(--color-border-secondary)"}`,
-            }}
-          />
-          <span className="truncate" style={{ color: selected ? "var(--color-text-primary)" : undefined }}>
-            {displaySourceName(source.name)}
-          </span>
-        </button>
-      {source.kind !== "mcp" && onPreview && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onPreview();
-          }}
-          className="p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-          style={{ color: "var(--color-text-tertiary)" }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.color = "var(--color-text-primary)";
-            e.currentTarget.style.background = "var(--color-background-secondary)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.color = "var(--color-text-tertiary)";
-            e.currentTarget.style.background = "transparent";
-          }}
-          title="Preview Data"
-        >
-          <Eye size={13} strokeWidth={1.5} />
-        </button>
-      )}
-      {source.kind !== "mcp" && (
-        <button
-          onClick={() => setConfirming(true)}
-          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/5"
-          title="Remove"
-        >
-          <X size={11} stroke="var(--color-text-tertiary)" />
-        </button>
-      )}
-      {confirming && (
-        <div className="absolute right-0 top-7 z-20 w-[220px] rounded-[10px] p-3 text-[12px]" style={{ background: "var(--color-background-elevated)", border: "1px solid var(--color-border-secondary)", boxShadow: "var(--shadow-lg)" }}>
-          <div className="font-semibold" style={{ color: "var(--color-text-primary)" }}>Delete this file?</div>
-          <div className="mt-1" style={{ color: "var(--color-text-tertiary)" }}>This removes it from your workspace.</div>
-          <div className="mt-3 flex justify-end gap-2">
-            <button type="button" onClick={() => setConfirming(false)} className="rounded-[8px] px-2.5 py-1.5" style={{ color: "var(--color-text-secondary)", border: "1px solid var(--color-border-tertiary)" }}>Cancel</button>
-            <button type="button" onClick={() => { setConfirming(false); onDelete(); }} className="rounded-[8px] px-2.5 py-1.5 font-medium" style={{ background: "#dc2626", color: "#ffffff" }}>Delete</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

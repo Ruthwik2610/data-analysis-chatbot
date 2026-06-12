@@ -10,7 +10,6 @@ import { MessageList } from "@/components/MessageList";
 import { ArtifactsPanel } from "@/components/ArtifactsPanel";
 import { InputBar } from "@/components/InputBar";
 import { StreamingBar } from "@/components/StreamingBar";
-import { SourcePreviewDrawer } from "@/components/SourcePreviewDrawer";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, clearAuthToken, getAuthToken, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
@@ -783,6 +782,7 @@ export default function Home() {
   }, []);
 
   const handleOpenArtifact = useCallback((artifactId: string) => {
+    setPreviewSourceId(null);
     setSelectedArtifactId(artifactId);
     setArtifactsOpen(true);
   }, []);
@@ -793,6 +793,7 @@ export default function Home() {
 
   const handlePreviewSource = useCallback(async (id: string) => {
     setPreviewSourceId(id);
+    setArtifactsOpen(true);
     setPreviewLoading(true);
     try {
       const data = await api.previewSource(id);
@@ -826,14 +827,9 @@ export default function Home() {
         <Sidebar
           chats={chats}
           currentChatId={currentChatId}
-          sources={sources}
-          selectedSourceIds={selectedSourceIds}
           onNewChat={() => { handleNewChat(); }}
           onSelectChat={(id) => { handleSelectChat(id); }}
           onDeleteChat={handleDeleteChat}
-          onToggleSource={handleToggleSource}
-          onDeleteSource={handleDeleteSource}
-          onPreviewSource={handlePreviewSource}
           projects={projects}
           currentProjectId={currentProjectId}
           onSelectProject={(id) => { handleSelectProject(id); }}
@@ -858,7 +854,7 @@ export default function Home() {
           sidebarOpen={sidebarOpen}
           onOpenSettings={() => setSettingsOpen(true)}
           isAdmin={isAdmin}
-          artifactCount={artifacts.length}
+          artifactCount={artifacts.length + sources.length}
           artifactsOpen={artifactsOpen}
           onToggleArtifacts={() => setArtifactsOpen((open) => !open)}
         />
@@ -892,9 +888,17 @@ export default function Home() {
       </main>
       <ArtifactsPanel
         messages={messages}
+        sources={sources}
+        selectedSourceIds={selectedSourceIds}
         open={artifactsOpen}
         selectedArtifactId={selectedArtifactId}
-        onSelectArtifact={setSelectedArtifactId}
+        selectedSourceId={previewSourceId}
+        sourcePreviewData={previewData}
+        sourcePreviewLoading={previewLoading}
+        onSelectArtifact={handleOpenArtifact}
+        onOpenSource={handlePreviewSource}
+        onToggleSource={handleToggleSource}
+        onDeleteSource={handleDeleteSource}
         onClose={() => setArtifactsOpen(false)}
       />
       {projectDialogOpen && currentProjectId && (
@@ -904,15 +908,6 @@ export default function Home() {
           onUpdate={() => { refreshProjects(); refreshSources(); }}
         />
       )}
-      <SourcePreviewDrawer
-        open={previewSourceId !== null}
-        onClose={() => {
-          setPreviewSourceId(null);
-          setPreviewData(null);
-        }}
-        data={previewData}
-        loading={previewLoading}
-      />
       {settingsOpen && (
         <SettingsPanel
           modelMode={modelMode}
