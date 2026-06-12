@@ -2995,6 +2995,30 @@ def _df_to_payload(df: pd.DataFrame, limit: int = 200) -> dict[str, Any]:
     }
 
 
+def _title_from_answer_text(question: str, answer: str, fallback: str) -> str:
+    """Use the visible answer as the result-card title when it has a real headline."""
+    text = re.sub(r"```[\s\S]*?```", "", answer or "")
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("|") or re.fullmatch(r"[-:| ]+", line):
+            continue
+        line = re.sub(r"^#{1,6}\s+", "", line)
+        line = re.sub(r"^>\s*", "", line)
+        line = re.sub(r"^[-*]\s+", "", line)
+        line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+        line = re.sub(r"\*([^*]+)\*", r"\1", line)
+        line = re.sub(r"`([^`]+)`", r"\1", line)
+        line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)
+        line = re.sub(r"[\U00010000-\U0010ffff]", "", line)
+        line = re.sub(r"[\ufe0e\ufe0f]", "", line)
+        line = re.split(r"(?<=[.!?])\s+", line, maxsplit=1)[0].strip(" .!?")
+        if line:
+            return line[:80].rstrip()
+
+    cleaned_question = re.sub(r"\s+", " ", question or "").strip(" .!?")
+    return cleaned_question[:80].rstrip() or fallback
+
+
 def _format_period_for_llm(value: Any) -> Any:
     if value is None or pd.isna(value):
         return None
@@ -3601,8 +3625,9 @@ async def _run_local_agent(
         if collected:
             sql, df = collected[-1]
             viz = choose_visualization(question, {}, df)
+            result_title = _title_from_answer_text(question, full_text, "Multi-step Result")
             result_payload = {
-                "title": "Multi-step Result",
+                "title": result_title,
                 "viz": viz,
                 "elapsed_ms": 0,
                 "sql": sql,
@@ -3803,8 +3828,9 @@ async def _run_multi_source_agent(
         if collected:
             sql, df, elapsed_ms = collected[-1]
             viz = choose_visualization(question, {}, df)
+            result_title = _title_from_answer_text(question, full_text, "Multi-source Result")
             result_payload = {
-                "title": "Multi-source Result",
+                "title": result_title,
                 "viz": viz,
                 "elapsed_ms": elapsed_ms,
                 "sql": sql,

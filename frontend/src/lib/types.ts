@@ -76,7 +76,7 @@ export interface InstructionsResponse {
 
 export interface ResultPayload {
   title: string;
-  viz: "bar" | "line" | "pie" | "card" | "table";
+  viz: "bar" | "line" | "pie" | "card" | "table" | "chart";
   elapsed_ms: number;
   sql: string;
   how: string;
@@ -85,6 +85,8 @@ export interface ResultPayload {
   row_count: number;
   truncated: boolean;
   view_type?: string;
+  image_b64?: string | null;
+  text_output?: string | null;
 }
 
 export type PendingResolver =

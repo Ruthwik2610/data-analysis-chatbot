@@ -177,7 +177,7 @@ const Bubble = React.memo(function Bubble({
             onFeedback={(rating, category) => onFeedback?.(message, rating, category)}
           />
         )}
-        {message.result && <ResultBlock result={message.result} />}
+        {message.result && <ResultBlock result={message.result} narrative={message.content} />}
         {hasTravelData && message.travel_intent && (
           <TravelResultPanel
             offers={message.travel_offers || []}
