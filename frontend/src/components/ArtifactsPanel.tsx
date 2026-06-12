@@ -1,6 +1,6 @@
 "use client";
 
-import { Database, Eye, Layers3, Table2, Trash2, X } from "lucide-react";
+import { CheckCircle2, Database, Eye, Layers3, Table2, Trash2, X } from "lucide-react";
 import { ResultBlock } from "./ResultBlock";
 import { artifactItems } from "@/lib/artifacts";
 import { displaySourceName } from "@/lib/displayNames";
@@ -28,6 +28,7 @@ interface ArtifactsPanelProps {
   onOpenSource?: (sourceId: string) => void;
   onToggleSource?: (sourceId: string) => void;
   onDeleteSource?: (sourceId: string) => void;
+  onCloseSourcePreview?: () => void;
   onClose: () => void;
 }
 
@@ -44,6 +45,7 @@ export function ArtifactsPanel({
   onOpenSource,
   onToggleSource,
   onDeleteSource,
+  onCloseSourcePreview,
   onClose,
 }: ArtifactsPanelProps) {
   const artifacts = artifactItems(messages);
@@ -52,6 +54,7 @@ export function ArtifactsPanel({
     ? messages.find((message) => message.id === selected.messageId && message.role === "assistant")
     : null;
   const subtitle = formatPanelCount(artifacts.length, sources.length);
+  const showSourcePreview = selectedSourceId ? selectedSourceIds.includes(selectedSourceId) : false;
 
   if (!open) return null;
 
@@ -139,8 +142,8 @@ export function ArtifactsPanel({
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scrollbar-thin">
-        {selectedSourceId ? (
-          <SourcePreviewContent data={sourcePreviewData} loading={sourcePreviewLoading} />
+        {showSourcePreview ? (
+          <SourcePreviewContent data={sourcePreviewData} loading={sourcePreviewLoading} onClose={onCloseSourcePreview} />
         ) : selected?.result ? (
           <ResultBlock result={selected.result} narrative={selectedMessage?.role === "assistant" ? selectedMessage.content : null} />
         ) : (
@@ -170,6 +173,7 @@ function SourceRow({
 }) {
   const name = displaySourceName(source.name);
   const detail = source.kind === "mcp" ? `${source.rows.toLocaleString()} tools` : `${source.rows.toLocaleString()} rows`;
+  const canPreview = selected && Boolean(onOpen);
 
   return (
     <div
@@ -183,20 +187,24 @@ function SourceRow({
         type="button"
         aria-label={`Toggle source ${name}`}
         onClick={() => onToggle?.(source.id)}
-        className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-[6px]"
-        style={{
-          background: selected ? "var(--color-text-success)" : "transparent",
-          border: `1px solid ${selected ? "var(--color-text-success)" : "var(--color-border-secondary)"}`,
-        }}
+        className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full"
+        style={{ color: selected ? "var(--color-text-success)" : "var(--color-text-tertiary)" }}
       >
-        <span className="sr-only">{selected ? "Selected" : "Not selected"}</span>
+        {selected ? (
+          <CheckCircle2 aria-label={`Source selected ${name}`} role="img" size={15} strokeWidth={2.2} />
+        ) : (
+          <span aria-hidden className="h-[13px] w-[13px] rounded-full" style={{ border: "1px solid var(--color-border-secondary)" }} />
+        )}
       </button>
       <button
         type="button"
         aria-label={`Preview source ${name}`}
-        onClick={() => onOpen?.(source.id)}
+        disabled={!canPreview}
+        onClick={() => {
+          if (canPreview) onOpen?.(source.id);
+        }}
         className="min-w-0 flex-1 text-left"
-        style={{ color: "var(--color-text-secondary)" }}
+        style={{ color: "var(--color-text-secondary)", opacity: canPreview ? 1 : 0.72 }}
       >
         <div className="truncate text-[12px] font-semibold" style={{ color: "var(--color-text-primary)" }}>{name}</div>
         <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px]" style={{ color: "var(--color-text-tertiary)" }}>
@@ -208,9 +216,12 @@ function SourceRow({
       <button
         type="button"
         aria-label={`Open source preview ${name}`}
-        onClick={() => onOpen?.(source.id)}
+        disabled={!canPreview}
+        onClick={() => {
+          if (canPreview) onOpen?.(source.id);
+        }}
         className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[8px]"
-        style={{ color: "var(--color-text-tertiary)" }}
+        style={{ color: "var(--color-text-tertiary)", opacity: canPreview ? 1 : 0.45 }}
       >
         <Eye size={13} strokeWidth={1.7} />
       </button>
@@ -229,7 +240,7 @@ function SourceRow({
   );
 }
 
-function SourcePreviewContent({ data, loading }: { data: SourcePreviewData | null; loading: boolean }) {
+function SourcePreviewContent({ data, loading, onClose }: { data: SourcePreviewData | null; loading: boolean; onClose?: () => void }) {
   if (loading || !data) {
     return (
       <div className="space-y-3">
@@ -243,7 +254,20 @@ function SourcePreviewContent({ data, loading }: { data: SourcePreviewData | nul
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-[14px] font-medium" style={{ color: "var(--color-text-primary)" }}>Source Preview</h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-[14px] font-medium" style={{ color: "var(--color-text-primary)" }}>Source Preview</h2>
+          {onClose && (
+            <button
+              type="button"
+              aria-label="Close source preview"
+              onClick={onClose}
+              className="flex h-7 w-7 items-center justify-center rounded-full"
+              style={{ color: "var(--color-text-tertiary)" }}
+            >
+              <X size={14} strokeWidth={1.8} />
+            </button>
+          )}
+        </div>
         <h3 className="mt-4 text-[13px] font-medium" style={{ color: "var(--color-text-primary)" }}>
           {data.name}
         </h3>

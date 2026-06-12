@@ -47,7 +47,7 @@ const messages: Message[] = [
 
 const sources: Source[] = [
   { id: "s1", name: "pizza_sales.csv", kind: "csv", rows: 48620, active: true },
-  { id: "s2", name: "warehouse_mcp", kind: "mcp", rows: 6, active: false },
+  { id: "s2", name: "orders.csv", kind: "csv", rows: 9994, active: false },
 ];
 
 const sourcePreview = {
@@ -117,9 +117,13 @@ describe("ArtifactsPanel", () => {
     expect(screen.getByText("Sources")).toBeInTheDocument();
     expect(screen.getByText("pizza_sales")).toBeInTheDocument();
     expect(screen.getByText("48,620 rows")).toBeInTheDocument();
+    expect(screen.getByLabelText("Source selected pizza_sales")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Preview source pizza_sales" }));
     expect(onOpenSource).toHaveBeenCalledWith("s1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview source orders" }));
+    expect(onOpenSource).not.toHaveBeenCalledWith("s2");
 
     fireEvent.click(screen.getByRole("button", { name: "Toggle source pizza_sales" }));
     expect(onToggleSource).toHaveBeenCalledWith("s1");
@@ -143,6 +147,7 @@ describe("ArtifactsPanel", () => {
         onOpenSource={vi.fn()}
         onToggleSource={vi.fn()}
         onDeleteSource={vi.fn()}
+        onCloseSourcePreview={vi.fn()}
         onClose={vi.fn()}
       />,
     );
@@ -152,5 +157,54 @@ describe("ArtifactsPanel", () => {
     expect(screen.getAllByText("category").length).toBeGreaterThan(0);
     expect(screen.getByText("Classic")).toBeInTheDocument();
     expect(screen.getByText("206987")).toBeInTheDocument();
+  });
+
+  it("does not render source preview content for an unselected source", () => {
+    render(
+      <ArtifactsPanel
+        messages={messages}
+        sources={sources}
+        selectedSourceIds={["s1"]}
+        open
+        selectedArtifactId="a1:artifact:0"
+        selectedSourceId="s2"
+        sourcePreviewData={{ ...sourcePreview, name: "orders.csv" }}
+        sourcePreviewLoading={false}
+        onSelectArtifact={vi.fn()}
+        onOpenSource={vi.fn()}
+        onToggleSource={vi.fn()}
+        onDeleteSource={vi.fn()}
+        onCloseSourcePreview={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Source Preview")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Revenue by category").length).toBeGreaterThan(0);
+  });
+
+  it("lets users close source preview without closing artifacts", () => {
+    const onCloseSourcePreview = vi.fn();
+    render(
+      <ArtifactsPanel
+        messages={messages}
+        sources={sources}
+        selectedSourceIds={["s1"]}
+        open
+        selectedArtifactId="a1:artifact:0"
+        selectedSourceId="s1"
+        sourcePreviewData={sourcePreview}
+        sourcePreviewLoading={false}
+        onSelectArtifact={vi.fn()}
+        onOpenSource={vi.fn()}
+        onToggleSource={vi.fn()}
+        onDeleteSource={vi.fn()}
+        onCloseSourcePreview={onCloseSourcePreview}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Close source preview" }));
+    expect(onCloseSourcePreview).toHaveBeenCalledTimes(1);
   });
 });

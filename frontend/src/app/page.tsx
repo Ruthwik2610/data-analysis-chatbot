@@ -41,6 +41,9 @@ export default function Home() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [previewSourceId, setPreviewSourceId] = useState<string | null>(null);
+  const [previewData, setPreviewData] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
@@ -685,20 +688,29 @@ export default function Home() {
   }, [currentChatId, refreshChats, abortInFlight]);
 
   const handleToggleSource = useCallback(async (id: string) => {
+    const wasSelected = selectedSourceIds.includes(id);
     setSelectedSourceIds((prev) => (
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     ));
+    if (wasSelected && id === previewSourceId) {
+      setPreviewSourceId(null);
+      setPreviewData(null);
+    }
     if (id !== "mcp") {
       await api.activateSource(id).catch(() => {});
       refreshSources();
     }
-  }, [refreshSources]);
+  }, [previewSourceId, refreshSources, selectedSourceIds]);
 
   const handleDeleteSource = useCallback(async (id: string) => {
     await api.deleteSource(id);
     setSelectedSourceIds((prev) => prev.filter((x) => x !== id));
+    if (id === previewSourceId) {
+      setPreviewSourceId(null);
+      setPreviewData(null);
+    }
     refreshSources();
-  }, [refreshSources]);
+  }, [previewSourceId, refreshSources]);
 
   const handleAttachedFromInput = useCallback((s: Source) => {
     setSelectedSourceIds((ids) => Array.from(new Set([...ids, s.id])));
@@ -787,11 +799,8 @@ export default function Home() {
     setArtifactsOpen(true);
   }, []);
 
-  const [previewSourceId, setPreviewSourceId] = useState<string | null>(null);
-  const [previewData, setPreviewData] = useState<any>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-
   const handlePreviewSource = useCallback(async (id: string) => {
+    if (!selectedSourceIds.includes(id)) return;
     setPreviewSourceId(id);
     setArtifactsOpen(true);
     setPreviewLoading(true);
@@ -804,6 +813,11 @@ export default function Home() {
     } finally {
       setPreviewLoading(false);
     }
+  }, [selectedSourceIds]);
+
+  const handleCloseSourcePreview = useCallback(() => {
+    setPreviewSourceId(null);
+    setPreviewData(null);
   }, []);
 
   useKeyboardShortcuts({
@@ -899,6 +913,7 @@ export default function Home() {
         onOpenSource={handlePreviewSource}
         onToggleSource={handleToggleSource}
         onDeleteSource={handleDeleteSource}
+        onCloseSourcePreview={handleCloseSourcePreview}
         onClose={() => setArtifactsOpen(false)}
       />
       {projectDialogOpen && currentProjectId && (
