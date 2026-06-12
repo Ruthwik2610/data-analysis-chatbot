@@ -204,7 +204,7 @@ export type Message =
     };
 
 export type SSEEvent =
-  | { event: "meta"; data: { chat_id: string; source: { id: string | null; name: string; kind: string; rows: number } } }
+  | { event: "meta"; data: { chat_id: string; chat_title?: string | null; source: { id: string | null; name: string; kind: string; rows: number } } }
   | { event: "thinking"; data: { step: string } }
   | { event: "result"; data: ResultPayload }
   | { event: "text"; data: { delta: string } }

@@ -299,6 +299,63 @@ def test_query_endpoint_answer_prompt_builder_is_imported(isolated_server):
     assert callable(server.build_answer_prompt)
 
 
+def test_chat_title_summary_cleans_question_text(isolated_server):
+    server, _storage, _pool = isolated_server
+
+    title = server._summarize_chat_title("Can you please show me total revenue by pizza category and month?")
+
+    assert title == "Total Revenue By Pizza Category"
+    assert server._summarize_chat_title("What is monthly sales by region?") == "Monthly Sales By Region"
+
+
+def test_chat_title_summary_hides_internal_query_text(isolated_server):
+    server, _storage, _pool = isolated_server
+
+    title = server._summarize_chat_title("SQL: SELECT * FROM users WHERE api_key = 'abc'")
+
+    assert title == "New analysis"
+    assert "SELECT" not in title
+    assert "api_key" not in title
+
+
+def test_query_endpoint_emits_summarized_chat_title(isolated_server, tmp_path, monkeypatch):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    source_id = "src_sales"
+    csv_path = tmp_path / "sales.csv"
+    csv_path.write_text("category,revenue\nClassic,100\nVeggie,80\n", encoding="utf-8")
+    storage.upsert_source(
+        source_id=source_id,
+        name="sales.csv",
+        kind="csv",
+        rows=2,
+        schema_json='{"columns":[{"name":"category"},{"name":"revenue"}],"row_count":2}',
+        origin={"type": "csv_memory", "path": str(csv_path)},
+    )
+
+    class DummyRouter:
+        available = True
+
+        def classify_intent(self, **kwargs):
+            return {"intent_type": "unsupported", "route": "ambiguous"}, "dummy", {}
+
+    monkeypatch.setattr(server, "LLMRouter", lambda *a, **kw: DummyRouter())
+
+    response = TestClient(server.app).post(
+        "/query",
+        json={
+            "question": "Can you please show me total revenue by pizza category and month?",
+            "source_ids": [source_id],
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"chat_title": "Total Revenue By Pizza Category"' in response.text
+    chat_id = response.text.split('"chat_id": "')[1].split('"')[0]
+    assert storage.get_chat(chat_id)["title"] == "Total Revenue By Pizza Category"
+
+
 def test_admin_feedback_endpoint_lists_review_items(isolated_server, monkeypatch):
     server, storage, _pool = isolated_server
     from fastapi.testclient import TestClient

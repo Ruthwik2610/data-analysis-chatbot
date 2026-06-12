@@ -2432,6 +2432,76 @@ def _learn_project_vocabulary(project_id: str, owner_id: str, question: str) -> 
     DB.rebuild_project_memory(project_id)
 
 
+CHAT_TITLE_MAX_WORDS = 5
+CHAT_TITLE_MAX_CHARS = 48
+CHAT_TITLE_FALLBACK = "New analysis"
+CHAT_TITLE_INTERNAL_RE = re.compile(
+    r"\b(?:select|with)\b[\s\S]{0,160}\b(?:from|where|join|limit)\b"
+    r"|\bsql\s*:"
+    r"|\b(?:api[_-]?key|token|secret|password|credential|bearer)\b",
+    re.IGNORECASE,
+)
+CHAT_TITLE_PREFIX_RE = re.compile(
+    r"^(?:can|could|would)\s+you\s+|^(?:please\s+)?(?:show|give|tell|find|calculate|analy[sz]e|summari[sz]e)\s+(?:me\s+)?",
+    re.IGNORECASE,
+)
+CHAT_TITLE_SKIP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "can",
+    "could",
+    "for",
+    "from",
+    "in",
+    "is",
+    "me",
+    "of",
+    "please",
+    "show",
+    "tell",
+    "the",
+    "to",
+    "what",
+    "you",
+}
+
+
+def _summarize_chat_title(text: str | None) -> str:
+    if not text:
+        return CHAT_TITLE_FALLBACK
+    if CHAT_TITLE_INTERNAL_RE.search(text):
+        return CHAT_TITLE_FALLBACK
+
+    clean = re.sub(r"```[\s\S]*?```|`[^`]+`", " ", text)
+    clean = re.sub(r"https?://\S+", " ", clean)
+    clean = re.sub(r"[^A-Za-z0-9&/%+.$' -]+", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip(" -_.,:;?!")
+    clean = CHAT_TITLE_PREFIX_RE.sub("", clean).strip()
+
+    words: list[str] = []
+    for raw_word in clean.split():
+        word = raw_word.strip(".,:;?!()[]{}\"'")
+        if not word:
+            continue
+        lower = word.lower()
+        if lower in CHAT_TITLE_SKIP_WORDS:
+            continue
+        words.append(_chat_title_word(word))
+        if len(words) >= CHAT_TITLE_MAX_WORDS:
+            break
+
+    title = " ".join(words).strip()
+    return title[:CHAT_TITLE_MAX_CHARS].rstrip(" -_.,:;?!") or CHAT_TITLE_FALLBACK
+
+
+def _chat_title_word(word: str) -> str:
+    if word.isupper() or any(char.isdigit() for char in word):
+        return word.upper()
+    return word[:1].upper() + word[1:].lower()
+
+
 # -- chats -----------------------------------------------------------------
 @app.get("/chats")
 def list_chats(request: Request, project_id: str | None = None) -> list[dict[str, Any]]:
@@ -3946,8 +4016,10 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
         user_payload: dict[str, Any] = {"source_ids": [row["id"] for row, _ in selected_sources]}
         user_msg = DB.add_message(chat_id, "user", question, payload=user_payload, trace_id=trace_id)
         chat = DB.get_chat(chat_id, owner_id=owner_id, include_legacy=include_legacy)
+        chat_title = (chat or {}).get("title") or ""
         if chat and (not chat.get("title") or chat["title"] == "New chat"):
-            DB.update_chat_title(chat_id, question[:60], owner_id=owner_id)
+            chat_title = _summarize_chat_title(question)
+            DB.update_chat_title(chat_id, chat_title, owner_id=owner_id)
 
         history = _load_history(chat_id, owner_id=owner_id, include_legacy=include_legacy)
         project_instructions: dict[str, Any] | None = None
@@ -4015,7 +4087,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     meta_source = {"id": None, "name": "No source", "kind": "none", "rows": 0}
                 yield {
                     "event": "meta",
-                    "data": json.dumps({"chat_id": chat_id, "source": meta_source}),
+                    "data": json.dumps({"chat_id": chat_id, "chat_title": chat_title, "source": meta_source}),
                 }
                 yield {"event": "thinking", "data": json.dumps({"step": "Reading your question"})}
 

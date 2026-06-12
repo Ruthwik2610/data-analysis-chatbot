@@ -483,6 +483,9 @@ export default function Home() {
                 }
                 setCurrentChatId(ev.data.chat_id);
               }
+              if (ev.data.chat_title?.trim()) {
+                setChatTitle(ev.data.chat_title.trim());
+              }
               updateMessage(assistantId, { source: ev.data.source });
             } else if (ev.event === "thinking") {
               updateMessage(assistantId, { thinking: sanitizeThinkingStep(ev.data.step) });
