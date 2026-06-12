@@ -9,21 +9,15 @@ export interface ArtifactItem {
 }
 
 export function shouldUseArtifact(result: ResultPayload): boolean {
-  if (result.view_type === "timetable") return true;
-  if (result.viz !== "card") return true;
-  return result.row_count > 8 || result.columns.length > 4;
+  return result.viz === "bar" || result.viz === "line" || result.viz === "pie" || result.viz === "chart";
 }
 
 export function artifactItems(messages: Message[]): ArtifactItem[] {
   const items: ArtifactItem[] = [];
   for (const message of messages) {
     if (message.role !== "assistant" || message.streaming) continue;
-    const explicitArtifacts = (message.artifacts || []).filter(shouldUseArtifact);
-    const resultArtifacts = explicitArtifacts.length > 0
-      ? explicitArtifacts
-      : message.result && shouldUseArtifact(message.result)
-        ? [message.result]
-        : [];
+    const resultArtifacts = (message.artifacts || []).filter(shouldUseArtifact);
+    if (resultArtifacts.length <= 1) continue;
 
     resultArtifacts.forEach((result, index) => {
       items.push({

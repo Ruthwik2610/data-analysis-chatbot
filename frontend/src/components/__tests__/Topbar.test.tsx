@@ -73,22 +73,32 @@ describe("Topbar", () => {
 
   it("shows and toggles the artifacts panel control", () => {
     const onToggleArtifacts = vi.fn();
+    const onToggleSources = vi.fn();
     render(
       <Topbar
         title="Pizza analysis"
         activeSource={sources[0]}
         selectedSources={sources}
         artifactCount={2}
+        sourceCount={3}
         artifactsOpen
+        sourcesOpen={false}
         onToggleArtifacts={onToggleArtifacts}
+        onToggleSources={onToggleSources}
       />,
     );
 
-    const toggle = screen.getByRole("button", { name: "Toggle artifacts panel" });
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    const artifactsToggle = screen.getByRole("button", { name: "Toggle artifacts panel" });
+    const sourcesToggle = screen.getByRole("button", { name: "Toggle sources panel" });
+    expect(artifactsToggle).toHaveAttribute("aria-pressed", "true");
+    expect(sourcesToggle).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
 
-    fireEvent.click(toggle);
+    fireEvent.click(artifactsToggle);
     expect(onToggleArtifacts).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(sourcesToggle);
+    expect(onToggleSources).toHaveBeenCalledTimes(1);
   });
 });

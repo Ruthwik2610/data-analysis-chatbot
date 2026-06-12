@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Bell, Layers3, LogOut, Menu, Moon, Settings, Sun, UserRound, Zap } from "lucide-react";
+import { Bell, Database, Layers3, LogOut, Menu, Moon, Settings, Sun, UserRound, Zap } from "lucide-react";
 import type { Source } from "@/lib/types";
 import { getTheme, toggleTheme, type Theme } from "@/lib/theme";
 
@@ -20,6 +20,9 @@ interface TopbarProps {
   artifactCount?: number;
   artifactsOpen?: boolean;
   onToggleArtifacts?: () => void;
+  sourceCount?: number;
+  sourcesOpen?: boolean;
+  onToggleSources?: () => void;
 }
 
 export function Topbar({
@@ -34,6 +37,9 @@ export function Topbar({
   artifactCount = 0,
   artifactsOpen = false,
   onToggleArtifacts,
+  sourceCount = 0,
+  sourcesOpen = false,
+  onToggleSources,
 }: TopbarProps) {
   const [theme, setThemeState] = useState<Theme>("light");
 
@@ -89,6 +95,31 @@ export function Topbar({
       </div>
 
       <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={onToggleSources}
+        aria-label="Toggle sources panel"
+        aria-pressed={sourcesOpen}
+        title="Sources"
+        className="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold transition-colors"
+        style={{
+          background: sourcesOpen ? "var(--color-background-info)" : "transparent",
+          border: `0.5px solid ${sourcesOpen ? "var(--color-border-info)" : "var(--color-border-secondary)"}`,
+          color: sourcesOpen ? "var(--color-text-info)" : "var(--color-text-secondary)",
+        }}
+      >
+        <Database size={14} strokeWidth={1.8} />
+        <span className="hidden sm:inline">Sources</span>
+        <span
+          className="rounded-full px-1.5 py-[1px] text-[10px] tabular-nums"
+          style={{
+            background: "var(--color-background-secondary)",
+            color: "var(--color-text-tertiary)",
+          }}
+        >
+          {sourceCount}
+        </span>
+      </button>
       <button
         type="button"
         onClick={onToggleArtifacts}

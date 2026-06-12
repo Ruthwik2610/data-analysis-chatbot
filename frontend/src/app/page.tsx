@@ -8,6 +8,7 @@ import { AuthScreen } from "@/components/AuthScreen";
 import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
 import { ArtifactsPanel } from "@/components/ArtifactsPanel";
+import { SourcesPanel } from "@/components/SourcesPanel";
 import { InputBar } from "@/components/InputBar";
 import { StreamingBar } from "@/components/StreamingBar";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
@@ -40,6 +41,7 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [previewSourceId, setPreviewSourceId] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<any>(null);
@@ -796,13 +798,15 @@ export default function Home() {
   const handleOpenArtifact = useCallback((artifactId: string) => {
     setPreviewSourceId(null);
     setSelectedArtifactId(artifactId);
+    setSourcesOpen(false);
     setArtifactsOpen(true);
   }, []);
 
   const handlePreviewSource = useCallback(async (id: string) => {
     if (!selectedSourceIds.includes(id)) return;
     setPreviewSourceId(id);
-    setArtifactsOpen(true);
+    setArtifactsOpen(false);
+    setSourcesOpen(true);
     setPreviewLoading(true);
     try {
       const data = await api.previewSource(id);
@@ -868,9 +872,18 @@ export default function Home() {
           sidebarOpen={sidebarOpen}
           onOpenSettings={() => setSettingsOpen(true)}
           isAdmin={isAdmin}
-          artifactCount={artifacts.length + sources.length}
+          artifactCount={artifacts.length}
           artifactsOpen={artifactsOpen}
-          onToggleArtifacts={() => setArtifactsOpen((open) => !open)}
+          onToggleArtifacts={() => {
+            setArtifactsOpen((open) => !open);
+            setSourcesOpen(false);
+          }}
+          sourceCount={sources.length}
+          sourcesOpen={sourcesOpen}
+          onToggleSources={() => {
+            setSourcesOpen((open) => !open);
+            setArtifactsOpen(false);
+          }}
         />
         <MessageList
           messages={messages}
@@ -902,19 +915,23 @@ export default function Home() {
       </main>
       <ArtifactsPanel
         messages={messages}
-        sources={sources}
-        selectedSourceIds={selectedSourceIds}
         open={artifactsOpen}
         selectedArtifactId={selectedArtifactId}
+        onSelectArtifact={handleOpenArtifact}
+        onClose={() => setArtifactsOpen(false)}
+      />
+      <SourcesPanel
+        open={sourcesOpen}
+        sources={sources}
+        selectedSourceIds={selectedSourceIds}
         selectedSourceId={previewSourceId}
         sourcePreviewData={previewData}
         sourcePreviewLoading={previewLoading}
-        onSelectArtifact={handleOpenArtifact}
         onOpenSource={handlePreviewSource}
         onToggleSource={handleToggleSource}
         onDeleteSource={handleDeleteSource}
         onCloseSourcePreview={handleCloseSourcePreview}
-        onClose={() => setArtifactsOpen(false)}
+        onClose={() => setSourcesOpen(false)}
       />
       {projectDialogOpen && currentProjectId && (
         <ProjectDialog

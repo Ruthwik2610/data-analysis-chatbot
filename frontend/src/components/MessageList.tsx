@@ -11,7 +11,7 @@ import { AssistantMarkdown } from "./AssistantMarkdown";
 import { AnswerActions } from "./AnswerActions";
 import { TravelResultPanel } from "./TravelResultPanel";
 import { FollowUpChips } from "./FollowUpChips";
-import { artifactItems, shouldUseArtifact } from "@/lib/artifacts";
+import { artifactItems } from "@/lib/artifacts";
 import { extractFirstMarkdownTable, tableCoversResult } from "@/lib/markdownTable";
 
 interface MessageListProps {
@@ -185,21 +185,21 @@ const Bubble = React.memo(function Bubble({
         )}
         {message.result && (() => {
           const messageArtifacts = artifactItems([message]);
-          if (!message.streaming && message.content && messageArtifacts.length <= 1) {
+          if (!message.streaming && onOpenArtifact && messageArtifacts.length > 1) {
+            const primaryArtifact = messageArtifacts[0];
+            return (
+              <ArtifactReference
+                result={primaryArtifact.result}
+                artifactCount={messageArtifacts.length}
+                onOpen={() => onOpenArtifact(primaryArtifact.id)}
+              />
+            );
+          }
+          if (!message.streaming && message.content) {
             const markdownTable = extractFirstMarkdownTable(message.content);
             if (markdownTable && tableCoversResult(markdownTable.columns, message.result.columns)) {
               return null;
             }
-          }
-          if (!message.streaming && onOpenArtifact && shouldUseArtifact(message.result)) {
-            const primaryArtifact = messageArtifacts[0];
-            return (
-              <ArtifactReference
-                result={primaryArtifact?.result || message.result}
-                artifactCount={Math.max(1, messageArtifacts.length)}
-                onOpen={() => onOpenArtifact(primaryArtifact?.id || `${message.id}:artifact:0`)}
-              />
-            );
           }
           return <ResultBlock result={message.result} narrative={message.content} />;
         })()}

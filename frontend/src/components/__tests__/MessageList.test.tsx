@@ -85,7 +85,7 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByRole("button", { name: "Export result as PDF" })).toBeInTheDocument();
   });
 
-  it("routes rich structured results to an artifact reference when enabled", () => {
+  it("keeps a single structured chart inline even when artifacts are enabled", () => {
     const onOpenArtifact = vi.fn();
     const messages: Message[] = [
       {
@@ -117,8 +117,69 @@ describe("MessageList markdown rendering", () => {
       />,
     );
 
+    expect(screen.getByRole("button", { name: "Export result" })).toBeInTheDocument();
+    expect(screen.queryByText(/open side panel/i)).not.toBeInTheDocument();
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+  });
+
+  it("routes multiple structured charts from one answer to artifacts", () => {
+    const onOpenArtifact = vi.fn();
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here are the revenue charts.",
+        result: {
+          title: "Revenue by category",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select category, revenue from sales",
+          how: "Grouped revenue by category.",
+          columns: ["category", "revenue"],
+          rows: [["Classic", 206987], ["Veggie", 176577]],
+          row_count: 2,
+          truncated: false,
+        },
+        artifacts: [
+          {
+            title: "Revenue by category",
+            viz: "bar",
+            elapsed_ms: 12,
+            sql: "select category, revenue from sales",
+            how: "Grouped revenue by category.",
+            columns: ["category", "revenue"],
+            rows: [["Classic", 206987], ["Veggie", 176577]],
+            row_count: 2,
+            truncated: false,
+          },
+          {
+            title: "Revenue by month",
+            viz: "line",
+            elapsed_ms: 14,
+            sql: "select month, revenue from sales",
+            how: "Grouped revenue by month.",
+            columns: ["month", "revenue"],
+            rows: [["2026-05-01", 817860], ["2026-06-01", 912000]],
+            row_count: 2,
+            truncated: false,
+          },
+        ],
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+        onOpenArtifact={onOpenArtifact}
+      />,
+    );
+
     expect(screen.queryByRole("button", { name: "Export result" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Revenue by category/i }));
+    fireEvent.click(screen.getByRole("button", { name: /2 artifacts/i }));
     expect(onOpenArtifact).toHaveBeenCalledWith("a1:artifact:0");
   });
 
