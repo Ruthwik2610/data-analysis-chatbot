@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef } from "react";
 import { AlertTriangle, ArrowRight, Paperclip, Plug, Sparkles } from "lucide-react";
-import type { Message, ModelFallbackNotice } from "@/lib/types";
+import type { Message, ModelFallbackNotice, ResultPayload } from "@/lib/types";
 import { ResultBlock } from "./ResultBlock";
 import { InlineQuestion } from "./InlineQuestion";
 import { ThinkingIndicator } from "./ThinkingIndicator";
@@ -11,6 +11,8 @@ import { AssistantMarkdown } from "./AssistantMarkdown";
 import { AnswerActions } from "./AnswerActions";
 import { TravelResultPanel } from "./TravelResultPanel";
 import { FollowUpChips } from "./FollowUpChips";
+import { artifactItems, shouldUseArtifact } from "@/lib/artifacts";
+import { extractFirstMarkdownTable, tableCoversResult } from "@/lib/markdownTable";
 
 interface MessageListProps {
   messages: Message[];
@@ -24,6 +26,7 @@ interface MessageListProps {
   onAskFollowUp?: (content: string) => void;
   onRetryQuestion?: (content: string) => void;
   onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
+  onOpenArtifact?: (artifactId: string) => void;
 }
 
 function formatRelative(ts?: number): string {
@@ -35,7 +38,7 @@ function formatRelative(ts?: number): string {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
-export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentChatId, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback }: MessageListProps) {
+export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentChatId, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback, onOpenArtifact }: MessageListProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isStreaming = messages.some((m) => m.role === "assistant" && m.streaming);
 
@@ -78,6 +81,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
                 onAskFollowUp={onAskFollowUp}
                 onRetryQuestion={previousUserMessage && onRetryQuestion ? () => onRetryQuestion(previousUserMessage.content) : undefined}
                 onFeedback={onFeedback}
+                onOpenArtifact={onOpenArtifact}
                 />
                 {idx === lastResultIdx && onAskFollowUp && (
                 <div className="mt-4">
@@ -101,6 +105,7 @@ const Bubble = React.memo(function Bubble({
   onAskFollowUp,
   onRetryQuestion,
   onFeedback,
+  onOpenArtifact,
 }: {
   message: Message;
   onChoose: (messageId: string, value: string | string[]) => void;
@@ -110,6 +115,7 @@ const Bubble = React.memo(function Bubble({
   onAskFollowUp?: (content: string) => void;
   onRetryQuestion?: () => void;
   onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
+  onOpenArtifact?: (artifactId: string) => void;
 }) {
   if (message.role === "user") {
     return (
@@ -177,7 +183,26 @@ const Bubble = React.memo(function Bubble({
             onFeedback={(rating, category) => onFeedback?.(message, rating, category)}
           />
         )}
-        {message.result && <ResultBlock result={message.result} narrative={message.content} />}
+        {message.result && (() => {
+          const messageArtifacts = artifactItems([message]);
+          if (!message.streaming && message.content && messageArtifacts.length <= 1) {
+            const markdownTable = extractFirstMarkdownTable(message.content);
+            if (markdownTable && tableCoversResult(markdownTable.columns, message.result.columns)) {
+              return null;
+            }
+          }
+          if (!message.streaming && onOpenArtifact && shouldUseArtifact(message.result)) {
+            const primaryArtifact = messageArtifacts[0];
+            return (
+              <ArtifactReference
+                result={primaryArtifact?.result || message.result}
+                artifactCount={Math.max(1, messageArtifacts.length)}
+                onOpen={() => onOpenArtifact(primaryArtifact?.id || `${message.id}:artifact:0`)}
+              />
+            );
+          }
+          return <ResultBlock result={message.result} narrative={message.content} />;
+        })()}
         {hasTravelData && message.travel_intent && (
           <TravelResultPanel
             offers={message.travel_offers || []}
@@ -222,6 +247,42 @@ const Bubble = React.memo(function Bubble({
     </div>
   );
 });
+
+function ArtifactReference({
+  result,
+  artifactCount,
+  onOpen,
+}: {
+  result: ResultPayload;
+  artifactCount: number;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="mt-3 flex w-full items-center justify-between gap-3 rounded-[14px] px-4 py-3 text-left transition-all hover:-translate-y-[1px]"
+      style={{
+        background: "var(--color-background-secondary)",
+        border: "1px solid var(--color-border-secondary)",
+        boxShadow: "var(--shadow-sm)",
+      }}
+    >
+      <div className="min-w-0">
+        <div className="text-[10px] font-bold uppercase tracking-[0.18em]" style={{ color: "var(--color-text-tertiary)" }}>
+          {artifactCount > 1 ? `${artifactCount} artifacts` : "Artifact"} · {result.viz}
+        </div>
+        <div className="mt-1 truncate text-[13px] font-semibold" style={{ color: "var(--color-text-primary)" }}>
+          {result.title}
+        </div>
+        <div className="mt-1 text-[11px]" style={{ color: "var(--color-text-secondary)" }}>
+          {artifactCount > 1 ? "Multiple visual results" : `${result.row_count.toLocaleString()} rows`} · open side panel
+        </div>
+      </div>
+      <ArrowRight size={16} strokeWidth={1.8} style={{ color: "var(--color-text-tertiary)" }} />
+    </button>
+  );
+}
 
 function FallbackNotice({ notice }: { notice: ModelFallbackNotice }) {
   const reasonText =

@@ -193,6 +193,7 @@ export type Message =
       progress?: number | null;
       source?: { id: string | null; name: string; kind: string; rows: number };
       result?: ResultPayload;
+      artifacts?: ResultPayload[];
       error?: boolean;
       pending?: Pending;
       resolved?: boolean;

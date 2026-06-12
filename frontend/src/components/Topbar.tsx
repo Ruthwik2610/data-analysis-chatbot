@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Bell, LogOut, Menu, Moon, Settings, Sun, UserRound, Zap } from "lucide-react";
+import { Bell, Layers3, LogOut, Menu, Moon, Settings, Sun, UserRound, Zap } from "lucide-react";
 import type { Source } from "@/lib/types";
 import { getTheme, toggleTheme, type Theme } from "@/lib/theme";
 
@@ -17,9 +17,24 @@ interface TopbarProps {
   sidebarOpen?: boolean;
   onOpenSettings?: () => void;
   isAdmin?: boolean;
+  artifactCount?: number;
+  artifactsOpen?: boolean;
+  onToggleArtifacts?: () => void;
 }
 
-export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar, sidebarOpen, onOpenSettings, isAdmin = false }: TopbarProps) {
+export function Topbar({
+  title,
+  projectName,
+  userEmail,
+  onLogout,
+  onOpenSidebar,
+  sidebarOpen,
+  onOpenSettings,
+  isAdmin = false,
+  artifactCount = 0,
+  artifactsOpen = false,
+  onToggleArtifacts,
+}: TopbarProps) {
   const [theme, setThemeState] = useState<Theme>("light");
 
   useEffect(() => {
@@ -74,6 +89,31 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
       </div>
 
       <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={onToggleArtifacts}
+        aria-label="Toggle artifacts panel"
+        aria-pressed={artifactsOpen}
+        title="Artifacts"
+        className="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold transition-colors"
+        style={{
+          background: artifactsOpen ? "var(--color-background-info)" : "transparent",
+          border: `0.5px solid ${artifactsOpen ? "var(--color-border-info)" : "var(--color-border-secondary)"}`,
+          color: artifactsOpen ? "var(--color-text-info)" : "var(--color-text-secondary)",
+        }}
+      >
+        <Layers3 size={14} strokeWidth={1.8} />
+        <span className="hidden sm:inline">Artifacts</span>
+        <span
+          className="rounded-full px-1.5 py-[1px] text-[10px] tabular-nums"
+          style={{
+            background: "var(--color-background-secondary)",
+            color: "var(--color-text-tertiary)",
+          }}
+        >
+          {artifactCount}
+        </span>
+      </button>
       <button
         onClick={handleToggle}
         title={themeToggleLabel}

@@ -70,4 +70,25 @@ describe("Topbar", () => {
 
     expect(screen.getByRole("link", { name: "Feedback inbox" })).toHaveAttribute("href", "/admin/feedback");
   });
+
+  it("shows and toggles the artifacts panel control", () => {
+    const onToggleArtifacts = vi.fn();
+    render(
+      <Topbar
+        title="Pizza analysis"
+        activeSource={sources[0]}
+        selectedSources={sources}
+        artifactCount={2}
+        artifactsOpen
+        onToggleArtifacts={onToggleArtifacts}
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: "Toggle artifacts panel" });
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("2")).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(onToggleArtifacts).toHaveBeenCalledTimes(1);
+  });
 });

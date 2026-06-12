@@ -1,10 +1,63 @@
 "use client";
 
-import { useMemo } from "react";
+import { Download, FileSpreadsheet, FileText } from "lucide-react";
+import { useMemo, useState } from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import * as XLSX from "xlsx";
+
+import { tableToCsv, type ParsedMarkdownTable } from "@/lib/markdownTable";
 
 interface AssistantMarkdownProps {
   content: string;
   streaming?: boolean;
+}
+
+function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function downloadTableAsCsv(table: ParsedMarkdownTable): void {
+  const csv = "\ufeff" + tableToCsv(table);
+  downloadBlob("assistant-table.csv", new Blob([csv], { type: "text/csv;charset=utf-8" }));
+}
+
+function tableRows(table: ParsedMarkdownTable): string[][] {
+  return table.rows.map((row) => {
+    const padded: string[] = [];
+    for (let i = 0; i < table.columns.length; i++) padded.push(row[i] ?? "");
+    return padded;
+  });
+}
+
+function downloadTableAsXlsx(table: ParsedMarkdownTable): void {
+  const ws = XLSX.utils.aoa_to_sheet([table.columns, ...tableRows(table)]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Table");
+  XLSX.writeFile(wb, "assistant-table.xlsx");
+}
+
+function downloadTableAsPdf(table: ParsedMarkdownTable): void {
+  const doc = new jsPDF({ orientation: table.columns.length > 5 ? "landscape" : "portrait" });
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(14);
+  doc.text("Assistant Table", 14, 18);
+  autoTable(doc, {
+    startY: 26,
+    head: [table.columns],
+    body: tableRows(table),
+    theme: "grid",
+    styles: { fontSize: 8, cellPadding: 3 },
+    headStyles: { fillColor: [37, 99, 235], textColor: 255 },
+  });
+  doc.save("assistant-table.pdf");
 }
 
 export function AssistantMarkdown({ content, streaming = false }: AssistantMarkdownProps) {
@@ -171,8 +224,10 @@ function isMarkdownTableStart(lines: string[], i: number): boolean {
 function renderTable(lines: string[], key: string): React.ReactNode {
   const parse = (line: string) =>
     line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
-  const header = parse(lines[0] ?? "");
+  const header = parse(lines[0] ?? "").filter(Boolean);
   const rows = lines.slice(2).map(parse).filter((row) => row.some(Boolean));
+  const downloadable: ParsedMarkdownTable = { columns: header, rows };
+  const canDownload = header.length > 0 && rows.length > 0;
 
   return (
     <div key={key} className="assistant-table-wrap">
@@ -186,6 +241,43 @@ function renderTable(lines: string[], key: string): React.ReactNode {
           ))}
         </tbody>
       </table>
+      {canDownload && <MarkdownTableExportMenu table={downloadable} />}
+    </div>
+  );
+}
+
+function MarkdownTableExportMenu({ table }: { table: ParsedMarkdownTable }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="assistant-table-actions">
+      <div className="assistant-table-export">
+        <button
+          type="button"
+          aria-label="Export table"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <Download size={12} strokeWidth={2} />
+          <span>Export</span>
+        </button>
+        {open && (
+          <div className="assistant-table-menu" role="menu">
+            <button type="button" aria-label="Export table as CSV" onClick={() => { setOpen(false); downloadTableAsCsv(table); }}>
+              <Download size={12} strokeWidth={2} />
+              <span>CSV</span>
+            </button>
+            <button type="button" aria-label="Export table as Excel" onClick={() => { setOpen(false); downloadTableAsXlsx(table); }}>
+              <FileSpreadsheet size={12} strokeWidth={2} />
+              <span>XLSX</span>
+            </button>
+            <button type="button" aria-label="Export table as PDF" onClick={() => { setOpen(false); downloadTableAsPdf(table); }}>
+              <FileText size={12} strokeWidth={2} />
+              <span>PDF</span>
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

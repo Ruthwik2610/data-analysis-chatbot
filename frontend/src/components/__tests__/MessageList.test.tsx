@@ -85,6 +85,84 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByRole("button", { name: "Export result as PDF" })).toBeInTheDocument();
   });
 
+  it("routes rich structured results to an artifact reference when enabled", () => {
+    const onOpenArtifact = vi.fn();
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here is the revenue chart.",
+        result: {
+          title: "Revenue by category",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select category, revenue from sales",
+          how: "Grouped revenue by category.",
+          columns: ["category", "revenue"],
+          rows: [["Classic", 206987], ["Veggie", 176577]],
+          row_count: 2,
+          truncated: false,
+        },
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+        onOpenArtifact={onOpenArtifact}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Export result" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Revenue by category/i }));
+    expect(onOpenArtifact).toHaveBeenCalledWith("a1:artifact:0");
+  });
+
+  it("suppresses the duplicate ResultBlock when assistant markdown already shows the result table", () => {
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: [
+          "Here are the rooms:",
+          "",
+          "| Room | Type | Bed | Rate | View |",
+          "|---|---|---|---|---|",
+          "| 207 | Deluxe | King/Twin | 6,350 | Pool View |",
+        ].join("\n"),
+        result: {
+          title: "Rooms result",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select room, type, bed, rate, view from rooms",
+          how: "Display: bar.",
+          columns: ["room", "type", "bed", "rate", "view"],
+          rows: [["207", "Deluxe", "King/Twin", 6350, "Pool View"]],
+          row_count: 1,
+          truncated: false,
+        },
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Rooms result")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Export table" }));
+    expect(screen.getByRole("button", { name: "Export table as PDF" })).toBeInTheDocument();
+  });
+
   it("uses a responsive layout for empty-state action cards", () => {
     render(
       <MessageList

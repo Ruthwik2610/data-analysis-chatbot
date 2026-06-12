@@ -1,18 +1,20 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { flushSync } from "react-dom";
 import { Sidebar } from "@/components/Sidebar";
 import { Topbar } from "@/components/Topbar";
 import { AuthScreen } from "@/components/AuthScreen";
 import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
+import { ArtifactsPanel } from "@/components/ArtifactsPanel";
 import { InputBar } from "@/components/InputBar";
 import { StreamingBar } from "@/components/StreamingBar";
 import { SourcePreviewDrawer } from "@/components/SourcePreviewDrawer";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, clearAuthToken, getAuthToken, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
+import { artifactItems } from "@/lib/artifacts";
 import { formatArchiveSkippedNote, formatWorkbookMCPConnectedMessage } from "@/lib/uploadMessages";
 import { buildCustomSheetQuestion, buildSheetModeQuestion } from "@/lib/uploadPending";
 import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
@@ -38,6 +40,8 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
 
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
@@ -108,6 +112,13 @@ export default function Home() {
 
   const selectedSources = sources.filter((s) => selectedSourceIds.includes(s.id));
   const activeSource = selectedSources[0] || sources.find((s) => s.active);
+  const artifacts = useMemo(() => artifactItems(messages), [messages]);
+
+  useEffect(() => {
+    if (selectedArtifactId && !artifacts.some((artifact) => artifact.id === selectedArtifactId)) {
+      setSelectedArtifactId(null);
+    }
+  }, [artifacts, selectedArtifactId]);
 
   const addMessage = useCallback((m: Message) => setMessages((prev) => [...prev, m]), []);
   const updateMessage = useCallback((id: string, patch: Partial<Message>) => {
@@ -609,6 +620,7 @@ export default function Home() {
           role: "assistant",
           content: m.content,
           result: m.payload?.result,
+          artifacts: m.payload?.artifacts,
           travel_intent: m.payload?.travel_intent,
           travel_offers: m.payload?.travel_offers,
           hotel_offers: m.payload?.hotel_offers,
@@ -770,6 +782,11 @@ export default function Home() {
     connectorClickRef.current();
   }, []);
 
+  const handleOpenArtifact = useCallback((artifactId: string) => {
+    setSelectedArtifactId(artifactId);
+    setArtifactsOpen(true);
+  }, []);
+
   const [previewSourceId, setPreviewSourceId] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<any>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -841,6 +858,9 @@ export default function Home() {
           sidebarOpen={sidebarOpen}
           onOpenSettings={() => setSettingsOpen(true)}
           isAdmin={isAdmin}
+          artifactCount={artifacts.length}
+          artifactsOpen={artifactsOpen}
+          onToggleArtifacts={() => setArtifactsOpen((open) => !open)}
         />
         <MessageList
           messages={messages}
@@ -854,6 +874,7 @@ export default function Home() {
           onAskFollowUp={handleSend}
           onFeedback={handleFeedback}
           onRetryQuestion={handleSend}
+          onOpenArtifact={handleOpenArtifact}
         />
         <InputBar
           onSend={handleSend}
@@ -869,6 +890,13 @@ export default function Home() {
           onModelModeChange={setModelMode}
         />
       </main>
+      <ArtifactsPanel
+        messages={messages}
+        open={artifactsOpen}
+        selectedArtifactId={selectedArtifactId}
+        onSelectArtifact={setSelectedArtifactId}
+        onClose={() => setArtifactsOpen(false)}
+      />
       {projectDialogOpen && currentProjectId && (
         <ProjectDialog
           projectId={currentProjectId}

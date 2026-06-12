@@ -1,5 +1,31 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { AssistantMarkdown } from "../AssistantMarkdown";
+import autoTable from "jspdf-autotable";
+
+const pdfMocks = vi.hoisted(() => ({
+  lastDoc: null as any,
+}));
+
+vi.mock("jspdf", () => {
+  return {
+    default: vi.fn().mockImplementation(function () {
+      pdfMocks.lastDoc = {
+        text: vi.fn(),
+        setFont: vi.fn(),
+        setFontSize: vi.fn(),
+        setTextColor: vi.fn(),
+        save: vi.fn(),
+      };
+      return pdfMocks.lastDoc;
+    }),
+  };
+});
+
+vi.mock("jspdf-autotable", () => {
+  return {
+    default: vi.fn(),
+  };
+});
 
 const insightAnswer = [
   "## Overall Business Summary",
@@ -14,6 +40,11 @@ const insightAnswer = [
 ].join("\n");
 
 describe("AssistantMarkdown", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pdfMocks.lastDoc = null;
+  });
+
   it("renders headings as chat-native sections without card wrappers", () => {
     const { container } = render(<AssistantMarkdown content={insightAnswer} streaming={false} />);
 
@@ -35,6 +66,22 @@ describe("AssistantMarkdown", () => {
     const table = screen.getByRole("table");
     expect(within(table).getByRole("columnheader", { name: "Category" })).toBeInTheDocument();
     expect(within(table).getByRole("cell", { name: "Classic" })).toBeInTheDocument();
+  });
+
+  it("exports rendered markdown tables to PDF", () => {
+    render(<AssistantMarkdown content={insightAnswer} streaming={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Export table" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export table as PDF" }));
+
+    expect(autoTable).toHaveBeenCalledWith(
+      pdfMocks.lastDoc,
+      expect.objectContaining({
+        head: [["Category", "Revenue", "Profit", "Margin"]],
+        body: [["Classic", "$206,987", "$53,131", "25.7%"], ["Veggie", "$176,577", "$36,418", "20.6%"]],
+      }),
+    );
+    expect(pdfMocks.lastDoc.save).toHaveBeenCalledWith("assistant-table.pdf");
   });
 
   it("renders blockquotes as callouts", () => {
