@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { api } from "@/lib/api";
 import {
   BarChart,
@@ -10,6 +10,30 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { Activity, AlertTriangle, Clock, Database, MessageSquare, Zap, ExternalLink, Folder, TrendingUp, LayoutGrid, FileText, Cpu, HardDrive, Trash2 } from "lucide-react";
+
+const textPrimary: CSSProperties = { color: "var(--color-text-primary)" };
+const textSecondary: CSSProperties = { color: "var(--color-text-secondary)" };
+const textTertiary: CSSProperties = { color: "var(--color-text-tertiary)" };
+const panelStyle: CSSProperties = {
+  background: "var(--color-background-elevated)",
+  border: "1px solid var(--color-border-secondary)",
+  boxShadow: "var(--shadow-sm)",
+};
+const panelSubtleStyle: CSSProperties = {
+  background: "var(--color-background-secondary)",
+  border: "1px solid var(--color-border-secondary)",
+};
+const chartGridColor = "var(--color-border-tertiary)";
+const chartAxisColor = "var(--color-text-tertiary)";
+const chartCursor = { fill: "var(--color-background-secondary)" };
+const chartTooltipStyle: CSSProperties = {
+  background: "var(--color-background-elevated)",
+  border: "1px solid var(--color-border-secondary)",
+  borderRadius: 12,
+  color: "var(--color-text-primary)",
+  fontSize: 10,
+  fontWeight: "bold",
+};
 
 export function AdminDashboard() {
   const [stats, setStats] = useState<any>(null);
@@ -56,7 +80,7 @@ export function AdminDashboard() {
     return (
         <div className="flex-1 flex flex-col items-center justify-center gap-4 bg-primary h-screen">
             <div className="w-12 h-12 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin" />
-            <div className="text-sm font-bold uppercase tracking-widest text-white/20">Synthesizing Insights...</div>
+            <div className="text-sm font-bold uppercase tracking-widest" style={textTertiary}>Synthesizing Insights...</div>
         </div>
     );
   }
@@ -76,10 +100,10 @@ export function AdminDashboard() {
         {/* Header Section */}
         <div className="flex items-center justify-between">
             <div className="flex flex-col gap-1">
-                <h1 className="text-2xl font-semibold text-white">System Insights</h1>
-                <p className="text-xs text-white/40 font-medium">Core performance metrics and usage analytics</p>
+                <h1 className="text-2xl font-semibold" style={textPrimary}>System Insights</h1>
+                <p className="text-xs font-medium" style={textSecondary}>Core performance metrics and usage analytics</p>
             </div>
-            <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-white/40 text-[10px] font-bold uppercase tracking-widest">
+            <div className="flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest" style={{ ...panelSubtleStyle, ...textSecondary }}>
                 <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" /> Live Status
             </div>
         </div>
@@ -118,10 +142,10 @@ export function AdminDashboard() {
 
         {/* VPS Health (New) */}
         <div className="flex flex-col gap-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 flex items-center gap-2" style={textTertiary}>
                 <LayoutGrid size={12} /> VPS Infrastructure Health
             </h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 p-8 rounded-[32px] bg-white/[0.03] border border-white/5 shadow-xl">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 p-8 rounded-[32px]" style={panelStyle}>
                 <HealthMetric 
                     label="CPU Load" 
                     value={`${stats.system_health?.cpu_percent || 0}%`} 
@@ -151,21 +175,24 @@ export function AdminDashboard() {
 
         {/* Maintenance (New) */}
         <div className="flex flex-col gap-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 flex items-center gap-2" style={textTertiary}>
                 <LayoutGrid size={12} /> System Maintenance
             </h3>
-            <div className="p-8 rounded-[32px] bg-white/[0.03] border border-white/5 flex flex-col gap-6">
+            <div className="p-8 rounded-[32px] flex flex-col gap-6" style={panelStyle}>
                 <div className="flex items-center justify-between">
                     <div className="flex flex-col gap-1">
-                        <div className="text-sm font-semibold text-white">System Cache</div>
-                        <div className="text-[10px] text-white/30 font-medium uppercase tracking-widest">Clear temporary files and free up disk space</div>
+                        <div className="text-sm font-semibold" style={textPrimary}>System Cache</div>
+                        <div className="text-[10px] font-medium uppercase tracking-widest" style={textTertiary}>Clear temporary files and free up disk space</div>
                     </div>
                     <button 
                         onClick={handleClearCache}
                         disabled={clearingCache}
-                        className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all ${clearingCache ? 'bg-white/5 text-white/20' : 'bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white border border-red-500/20'}`}
+                        className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all"
+                        style={clearingCache
+                          ? { ...panelSubtleStyle, color: "var(--color-text-tertiary)", opacity: 0.65 }
+                          : { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.22)", color: "#dc2626" }}
                     >
-                        {clearingCache ? <div className="w-3 h-3 border-2 border-white/10 border-t-white rounded-full animate-spin" /> : <Trash2 size={14} />}
+                        {clearingCache ? <div className="w-3 h-3 rounded-full animate-spin" style={{ border: "2px solid var(--color-border-secondary)", borderTopColor: "var(--color-text-primary)" }} /> : <Trash2 size={14} />}
                         {clearingCache ? 'Clearing...' : 'Clear Cache'}
                     </button>
                 </div>
@@ -179,24 +206,24 @@ export function AdminDashboard() {
 
         {/* Credit Tracker */}
         {stats.openrouter.limit !== null && (
-          <div className="p-8 rounded-[32px] bg-white/[0.03] border border-white/5 flex flex-col gap-6">
+          <div className="p-8 rounded-[32px] flex flex-col gap-6" style={panelStyle}>
             <div className="flex items-center justify-between">
-                <h2 className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/40 flex items-center gap-2">
+                <h2 className="text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-2" style={textTertiary}>
                     <TrendingUp size={12} /> Resource Allocation (OpenRouter)
                 </h2>
-                <span className="text-[10px] font-mono text-white/20 uppercase">{stats.openrouter.label}</span>
+                <span className="text-[10px] font-mono uppercase" style={textTertiary}>{stats.openrouter.label}</span>
             </div>
             
             <div className="flex items-end gap-4">
-              <div className="text-4xl font-bold text-white">
+              <div className="text-4xl font-bold" style={textPrimary}>
                 ${(stats.openrouter.usage || 0).toFixed(4)}
               </div>
-              <div className="text-xs font-medium text-white/30 mb-1.5 uppercase tracking-widest">
+              <div className="text-xs font-medium mb-1.5 uppercase tracking-widest" style={textTertiary}>
                 of ${(stats.openrouter.limit || 0).toFixed(2)} monthly quota
               </div>
             </div>
 
-            <div className="relative w-full h-1.5 bg-white/5 rounded-full overflow-hidden">
+            <div className="relative w-full h-1.5 rounded-full overflow-hidden" style={{ background: "var(--color-background-secondary)" }}>
               <div 
                 className="absolute inset-y-0 left-0 bg-blue-500 rounded-full transition-all duration-1000 shadow-[0_0_10px_rgba(59,130,246,0.5)]" 
                 style={{ width: `${Math.min(100, ((stats.openrouter.usage || 0) / (stats.openrouter.limit || 1)) * 100)}%` }} 
@@ -208,27 +235,27 @@ export function AdminDashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             {/* Token Consumption */}
             <div className="flex flex-col gap-4">
-                <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
+                <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 flex items-center gap-2" style={textTertiary}>
                     <Zap size={12} /> Consumption by Project
                 </h3>
-                <div className="p-6 rounded-[32px] bg-white/[0.02] border border-white/5 min-h-[300px]">
+                <div className="p-6 rounded-[32px] min-h-[300px]" style={panelStyle}>
                     {stats.token_usage_by_project && stats.token_usage_by_project.length > 0 ? (
                         <div className="h-[250px] w-full">
                             <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={stats.token_usage_by_project} layout="vertical" margin={{ left: 0, right: 20 }}>
-                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={chartGridColor} />
                                 <XAxis type="number" hide />
-                                <YAxis dataKey="project_name" type="category" width={100} stroke="rgba(255,255,255,0.3)" fontSize={10} fontWeight="bold" />
+                                <YAxis dataKey="project_name" type="category" width={100} stroke={chartAxisColor} fontSize={10} fontWeight="bold" />
                                 <Tooltip 
-                                    cursor={{ fill: "rgba(255,255,255,0.02)" }} 
-                                    contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, fontSize: 10, fontWeight: "bold" }} 
+                                    cursor={chartCursor}
+                                    contentStyle={chartTooltipStyle}
                                 />
                                 <Bar dataKey="total_tokens" name="Tokens" fill="#3b82f6" radius={[0, 8, 8, 0]} />
                             </BarChart>
                             </ResponsiveContainer>
                         </div>
                     ) : (
-                        <div className="h-[250px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-white/10">No consumption data</div>
+                        <div className="h-[250px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest" style={textTertiary}>No consumption data</div>
                     )}
                 </div>
             </div>
@@ -238,18 +265,18 @@ export function AdminDashboard() {
                 <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-amber-500/60 flex items-center gap-2">
                     <AlertTriangle size={12} /> Faithfulness Alerts
                 </h3>
-                <div className="p-4 rounded-[32px] bg-white/[0.02] border border-white/5 min-h-[300px] flex flex-col">
+                <div className="p-4 rounded-[32px] min-h-[300px] flex flex-col" style={panelStyle}>
                     {hallucinations.length > 0 ? (
                         <div className="flex-1 overflow-y-auto pr-2 flex flex-col gap-3 custom-scrollbar">
                             {hallucinations.map((log: any) => (
-                                <div key={log.id} className="p-4 rounded-2xl bg-white/5 border border-white/5 hover:bg-white/[0.08] transition-all group">
+                                <div key={log.id} className="p-4 rounded-2xl transition-all group" style={panelSubtleStyle}>
                                     <div className="flex justify-between items-start mb-2">
                                         <div className="flex flex-col gap-1">
                                             <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-500 w-fit uppercase tracking-wider">
                                                 Score: {(log.score * 100).toFixed(0)}%
                                             </span>
                                             {log.project_name && (
-                                                <span className="text-[9px] font-bold uppercase tracking-widest text-white/30 flex items-center gap-1">
+                                                <span className="text-[9px] font-bold uppercase tracking-widest flex items-center gap-1" style={textTertiary}>
                                                     <Folder size={8} /> {log.project_name}
                                                 </span>
                                             )}
@@ -266,16 +293,16 @@ export function AdminDashboard() {
                                                     <Zap size={12} />
                                                 </a>
                                             )}
-                                            <a href={`/?chat_id=${encodeURIComponent(log.chat_id)}`} className="p-2 rounded-lg bg-white/5 text-white/20 hover:text-blue-400 transition-all opacity-0 group-hover:opacity-100">
+                                            <a href={`/?chat_id=${encodeURIComponent(log.chat_id)}`} className="p-2 rounded-lg hover:text-blue-400 transition-all opacity-0 group-hover:opacity-100" style={{ ...panelSubtleStyle, ...textTertiary }}>
                                                 <ExternalLink size={12} />
                                             </a>
                                         </div>
                                     </div>
-                                    <p className="text-xs font-medium text-white/70 line-clamp-1 mb-1">
+                                    <p className="text-xs font-medium line-clamp-1 mb-1" style={textSecondary}>
                                         "{log.message_content}"
                                     </p>
                                     {log.reason && (
-                                        <p className="text-[9px] font-bold uppercase tracking-tighter text-white/20">
+                                        <p className="text-[9px] font-bold uppercase tracking-tighter" style={textTertiary}>
                                             Issue: {log.reason}
                                         </p>
                                     )}
@@ -287,7 +314,7 @@ export function AdminDashboard() {
                             <div className="p-4 rounded-full bg-green-500/5 text-green-500/20">
                                 <Activity size={32} strokeWidth={1} />
                             </div>
-                            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/10">100% Faithful System</p>
+                            <p className="text-[10px] font-bold uppercase tracking-[0.2em]" style={textTertiary}>100% Faithful System</p>
                         </div>
                     )}
                 </div>
@@ -297,77 +324,77 @@ export function AdminDashboard() {
         {/* Global Distribution */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             <div className="flex flex-col gap-4">
-                <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
+                <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 flex items-center gap-2" style={textTertiary}>
                     <LayoutGrid size={12} /> Project Engagement
                 </h3>
-                <div className="p-6 rounded-[32px] bg-white/[0.02] border border-white/5 min-h-[300px]">
+                <div className="p-6 rounded-[32px] min-h-[300px]" style={panelStyle}>
                     {stats.top_projects && stats.top_projects.length > 0 ? (
                         <div className="h-[250px] w-full">
                             <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={stats.top_projects} layout="vertical" margin={{ left: 0, right: 20 }}>
-                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={chartGridColor} />
                                 <XAxis type="number" hide />
-                                <YAxis dataKey="name" type="category" width={100} stroke="rgba(255,255,255,0.3)" fontSize={10} fontWeight="bold" />
+                                <YAxis dataKey="name" type="category" width={100} stroke={chartAxisColor} fontSize={10} fontWeight="bold" />
                                 <Tooltip 
-                                    cursor={{ fill: "rgba(255,255,255,0.02)" }} 
-                                    contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, fontSize: 10, fontWeight: "bold" }} 
+                                    cursor={chartCursor}
+                                    contentStyle={chartTooltipStyle}
                                 />
                                 <Bar dataKey="value" name="Messages" fill="#6366f1" radius={[0, 8, 8, 0]} />
                             </BarChart>
                             </ResponsiveContainer>
                         </div>
                     ) : (
-                        <div className="h-[250px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-white/10">No engagement data</div>
+                        <div className="h-[250px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest" style={textTertiary}>No engagement data</div>
                     )}
                 </div>
             </div>
 
             <div className="flex flex-col gap-4">
-                <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
+                <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 flex items-center gap-2" style={textTertiary}>
                     <FileText size={12} /> High-Traffic Sources
                 </h3>
-                <div className="p-6 rounded-[32px] bg-white/[0.02] border border-white/5 min-h-[300px]">
+                <div className="p-6 rounded-[32px] min-h-[300px]" style={panelStyle}>
                     {stats.top_sources && stats.top_sources.length > 0 ? (
                         <div className="h-[250px] w-full">
                             <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={stats.top_sources} layout="vertical" margin={{ left: 0, right: 20 }}>
-                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={chartGridColor} />
                                 <XAxis type="number" hide />
-                                <YAxis dataKey="name" type="category" width={100} stroke="rgba(255,255,255,0.3)" fontSize={10} fontWeight="bold" />
-                                <Tooltip 
-                                    cursor={{ fill: "rgba(255,255,255,0.02)" }} 
-                                    contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, fontSize: 10, fontWeight: "bold" }} 
+                                <YAxis dataKey="name" type="category" width={100} stroke={chartAxisColor} fontSize={10} fontWeight="bold" />
+                                <Tooltip
+                                    cursor={chartCursor}
+                                    contentStyle={chartTooltipStyle}
                                 />
                                 <Bar dataKey="value" name="Attachments" fill="#f59e0b" radius={[0, 8, 8, 0]} />
                             </BarChart>
                             </ResponsiveContainer>
                         </div>
                     ) : (
-                        <div className="h-[250px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-white/10">No traffic data</div>
+                        <div className="h-[250px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest" style={textTertiary}>No traffic data</div>
                     )}
                 </div>
             </div>
         </div>
 
         <div className="flex flex-col gap-4">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 text-white/40 flex items-center gap-2">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] px-2 flex items-center gap-2" style={textTertiary}>
                 <Zap size={12} /> Token Spend by Purpose
             </h3>
-            <div className="p-6 rounded-[32px] bg-white/[0.02] border border-white/5 min-h-[220px]">
+            <div className="p-6 rounded-[32px] min-h-[220px]" style={panelStyle}>
                 {stats.token_usage_by_purpose && stats.token_usage_by_purpose.length > 0 ? (
                     <div className="h-[180px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={stats.token_usage_by_purpose}>
-                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                                <XAxis dataKey="purpose" stroke="rgba(255,255,255,0.3)" fontSize={10} fontWeight="bold" />
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={chartGridColor} />
+                                <XAxis dataKey="purpose" stroke={chartAxisColor} fontSize={10} fontWeight="bold" />
                                 <YAxis hide />
-                                <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, fontSize: 10, fontWeight: "bold" }} />
+                                <Tooltip contentStyle={chartTooltipStyle} cursor={chartCursor} />
                                 <Bar dataKey="total_tokens" name="Tokens" fill="#10b981" radius={[8, 8, 0, 0]} />
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
                 ) : (
-                    <div className="h-[180px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest text-white/10">No token spend data</div>
+                    <div className="h-[180px] flex items-center justify-center text-[10px] font-bold uppercase tracking-widest" style={textTertiary}>No token spend data</div>
                 )}
             </div>
         </div>
@@ -382,7 +409,7 @@ export function AdminDashboard() {
             background: transparent;
             }
             .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: rgba(255,255,255,0.05);
+            background: var(--color-border-secondary);
             border-radius: 10px;
             }
         `}</style>
@@ -400,14 +427,14 @@ function HealthMetric({ icon, label, value, percent, color, warning }: any) {
     return (
         <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-white/40">
+                <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest" style={textTertiary}>
                     {icon} {label}
                 </div>
-                <div className={`text-[10px] font-mono font-bold ${warning ? 'text-red-400' : 'text-white/60'}`}>
+                <div className={`text-[10px] font-mono font-bold ${warning ? 'text-red-400' : ''}`} style={warning ? undefined : textSecondary}>
                     {value}
                 </div>
             </div>
-            <div className="relative w-full h-1.5 bg-white/5 rounded-full overflow-hidden">
+            <div className="relative w-full h-1.5 rounded-full overflow-hidden" style={{ background: "var(--color-background-secondary)" }}>
                 <div 
                     className={`absolute inset-y-0 left-0 rounded-full transition-all duration-1000 ${warning ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]' : colors[color] + ' shadow-[0_0_10px_rgba(59,130,246,0.3)]'}`}
                     style={{ width: `${Math.min(100, percent)}%` }} 
@@ -419,22 +446,23 @@ function HealthMetric({ icon, label, value, percent, color, warning }: any) {
 
 function InsightCard({ icon, label, value, description, color }: any) {
     const colorMap: any = {
-        blue: "text-blue-400 bg-blue-500/10 border-blue-500/20",
-        indigo: "text-indigo-400 bg-indigo-500/10 border-indigo-500/20",
-        emerald: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
-        amber: "text-amber-400 bg-amber-500/10 border-amber-500/20",
+        blue: "#2563eb",
+        indigo: "#4f46e5",
+        emerald: "#059669",
+        amber: "#d97706",
     };
+    const accent = colorMap[color] || colorMap.blue;
 
     return (
-        <div className="p-6 rounded-[24px] bg-white/[0.03] border border-white/5 flex flex-col gap-2 relative overflow-hidden group hover:bg-white/[0.05] transition-all">
+        <div className="p-6 rounded-[24px] flex flex-col gap-2 relative overflow-hidden group transition-all" style={panelStyle}>
             <div className={`absolute -right-4 -top-4 opacity-5 group-hover:opacity-10 transition-opacity scale-150`}>
                 {icon}
             </div>
-            <div className={`flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest ${colorMap[color].split(' ')[0]}`}>
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest" style={{ color: accent }}>
                 {icon} {label}
             </div>
-            <div className="text-3xl font-bold text-white leading-none">{value}</div>
-            <div className="text-[10px] font-bold uppercase tracking-tighter text-white/20">{description}</div>
+            <div className="text-3xl font-bold leading-none" style={textPrimary}>{value}</div>
+            <div className="text-[10px] font-bold uppercase tracking-tighter" style={textTertiary}>{description}</div>
         </div>
     );
 }

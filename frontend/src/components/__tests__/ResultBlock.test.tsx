@@ -1,6 +1,43 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ResultBlock } from "../ResultBlock";
 import type { ResultPayload } from "@/lib/types";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+
+const pdfMocks = vi.hoisted(() => ({
+  lastDoc: null as any,
+}));
+
+vi.mock("jspdf", () => {
+  return {
+    default: vi.fn().mockImplementation(function () {
+      pdfMocks.lastDoc = {
+        internal: {
+          pageSize: {
+            getWidth: vi.fn(() => 595),
+            getHeight: vi.fn(() => 842),
+          },
+        },
+        setFont: vi.fn(),
+        setFontSize: vi.fn(),
+        setTextColor: vi.fn(),
+        splitTextToSize: vi.fn((text: string) => [text]),
+        text: vi.fn(),
+        addPage: vi.fn(),
+        addImage: vi.fn(),
+        getImageProperties: vi.fn(() => ({ width: 1000, height: 500 })),
+        save: vi.fn(),
+      };
+      return pdfMocks.lastDoc;
+    }),
+  };
+});
+
+vi.mock("jspdf-autotable", () => {
+  return {
+    default: vi.fn(),
+  };
+});
 
 const result: ResultPayload = {
   title: "Revenue by category",
@@ -15,16 +52,69 @@ const result: ResultPayload = {
 };
 
 describe("ResultBlock", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pdfMocks.lastDoc = null;
+  });
+
   it("lets users refine the displayed chart type", () => {
     render(<ResultBlock result={result} />);
 
-    fireEvent.change(screen.getByLabelText("Chart type"), { target: { value: "pie" } });
+    fireEvent.change(screen.getByLabelText("Visualization"), { target: { value: "pie" } });
 
-    expect(screen.getByLabelText("Chart type")).toHaveValue("pie");
-    expect(screen.getByTitle("Show table")).toBeInTheDocument();
-    expect(screen.getByTitle("Download CSV")).toBeInTheDocument();
+    expect(screen.getByLabelText("Visualization")).toHaveValue("pie");
+    fireEvent.click(screen.getByRole("button", { name: "Export result" }));
+    expect(screen.getByRole("button", { name: "Export result as CSV" })).toBeInTheDocument();
     expect(screen.queryByTitle("Copy SQL")).not.toBeInTheDocument();
     expect(screen.queryByText("How I answered")).not.toBeInTheDocument();
     expect(screen.queryByText("select category, revenue from sales")).not.toBeInTheDocument();
+  });
+
+  it("exports table rows instead of an image when the visible PDF view is table", async () => {
+    const imageBackedResult: ResultPayload = {
+      ...result,
+      viz: "chart",
+      image_b64: "old-chart-image",
+    };
+
+    render(<ResultBlock result={imageBackedResult} />);
+
+    fireEvent.change(screen.getByLabelText("Visualization"), { target: { value: "table" } });
+    fireEvent.click(screen.getByRole("button", { name: "Export result" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export result as PDF" }));
+
+    await waitFor(() => expect(autoTable).toHaveBeenCalled());
+    const doc = pdfMocks.lastDoc;
+    expect(doc.addImage).not.toHaveBeenCalled();
+    expect(autoTable).toHaveBeenCalledWith(
+      doc,
+      expect.objectContaining({
+        head: [["Category", "Revenue"]],
+        body: [["Classic", "206,987"], ["Veggie", "176,577"]],
+      }),
+    );
+  });
+
+  it("keeps SQL and internal details out of PDF narrative text", async () => {
+    render(
+      <ResultBlock
+        result={result}
+        narrative={[
+          "Revenue increased in May.",
+          "SQL: SELECT category, revenue FROM sales WHERE token = 'secret'",
+          "**Margin** also improved.",
+        ].join("\n")}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Visualization"), { target: { value: "table" } });
+    fireEvent.click(screen.getByRole("button", { name: "Export result" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export result as PDF" }));
+
+    await waitFor(() => expect(pdfMocks.lastDoc.save).toHaveBeenCalled());
+    const textCalls = pdfMocks.lastDoc.text.mock.calls.flat().join(" ");
+    expect(textCalls).toContain("Revenue increased in May.");
+    expect(textCalls).toContain("Margin also improved.");
+    expect(textCalls).not.toMatch(/select|token|secret|sql/i);
   });
 });

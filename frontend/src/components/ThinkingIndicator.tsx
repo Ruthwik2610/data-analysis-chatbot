@@ -1,12 +1,15 @@
 "use client";
 
+import { sanitizeThinkingStep } from "@/lib/userFacingText";
+
 interface ThinkingIndicatorProps {
   step: string | null | undefined;
   progress?: number | null;
 }
 
 export function ThinkingIndicator({ step, progress }: ThinkingIndicatorProps) {
-  if (!step) return null;
+  const safeStep = sanitizeThinkingStep(step);
+  if (!safeStep) return null;
   const showProgress = typeof progress === "number" && progress >= 0 && progress <= 100;
   return (
     <div
@@ -31,7 +34,7 @@ export function ThinkingIndicator({ step, progress }: ThinkingIndicatorProps) {
         />
       </span>
       <span className="text-[12px]" style={{ color: "var(--color-text-secondary)" }}>
-        {step}
+        {safeStep}
         {showProgress ? ` · ${progress}%` : "…"}
       </span>
       {showProgress && (

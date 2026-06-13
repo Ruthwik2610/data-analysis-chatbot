@@ -80,8 +80,200 @@ describe("MessageList markdown rendering", () => {
     );
 
     expect(screen.getByText(/Revenue by category/)).toBeInTheDocument();
-    expect(screen.getByTitle("Download CSV")).toBeInTheDocument();
-    expect(screen.getByTitle("Show table")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Export result" }));
+    expect(screen.getByRole("button", { name: "Export result as CSV" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export result as PDF" })).toBeInTheDocument();
+  });
+
+  it("hides raw SQL from assistant markdown text", () => {
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: [
+          "Revenue increased in May.",
+          "SQL: SELECT category, revenue FROM sales WHERE token = 'secret'",
+          "**Margin** also improved.",
+        ].join("\n"),
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Revenue increased in May.")).toBeInTheDocument();
+    expect(screen.getByText("Margin")).toBeInTheDocument();
+    expect(screen.queryByText(/select|token|secret|sql/i)).not.toBeInTheDocument();
+  });
+
+  it("hides internal details from assistant error messages", () => {
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Traceback: SELECT * FROM users WHERE api_key = 'abc'",
+        error: true,
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Something went wrong. Please try again.")).toBeInTheDocument();
+    expect(screen.queryByText(/select|api_key|traceback/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps a single structured chart inline even when artifacts are enabled", () => {
+    const onOpenArtifact = vi.fn();
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here is the revenue chart.",
+        result: {
+          title: "Revenue by category",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select category, revenue from sales",
+          how: "Grouped revenue by category.",
+          columns: ["category", "revenue"],
+          rows: [["Classic", 206987], ["Veggie", 176577]],
+          row_count: 2,
+          truncated: false,
+        },
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+        onOpenArtifact={onOpenArtifact}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Export result" })).toBeInTheDocument();
+    expect(screen.queryByText(/open side panel/i)).not.toBeInTheDocument();
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+  });
+
+  it("routes multiple structured charts from one answer to artifacts", () => {
+    const onOpenArtifact = vi.fn();
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here are the revenue charts.",
+        result: {
+          title: "Revenue by category",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select category, revenue from sales",
+          how: "Grouped revenue by category.",
+          columns: ["category", "revenue"],
+          rows: [["Classic", 206987], ["Veggie", 176577]],
+          row_count: 2,
+          truncated: false,
+        },
+        artifacts: [
+          {
+            title: "Revenue by category",
+            viz: "bar",
+            elapsed_ms: 12,
+            sql: "select category, revenue from sales",
+            how: "Grouped revenue by category.",
+            columns: ["category", "revenue"],
+            rows: [["Classic", 206987], ["Veggie", 176577]],
+            row_count: 2,
+            truncated: false,
+          },
+          {
+            title: "Revenue by month",
+            viz: "line",
+            elapsed_ms: 14,
+            sql: "select month, revenue from sales",
+            how: "Grouped revenue by month.",
+            columns: ["month", "revenue"],
+            rows: [["2026-05-01", 817860], ["2026-06-01", 912000]],
+            row_count: 2,
+            truncated: false,
+          },
+        ],
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+        onOpenArtifact={onOpenArtifact}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Export result" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /2 artifacts/i }));
+    expect(onOpenArtifact).toHaveBeenCalledWith("a1:artifact:0");
+  });
+
+  it("suppresses the duplicate ResultBlock when assistant markdown already shows the result table", () => {
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: [
+          "Here are the rooms:",
+          "",
+          "| Room | Type | Bed | Rate | View |",
+          "|---|---|---|---|---|",
+          "| 207 | Deluxe | King/Twin | 6,350 | Pool View |",
+        ].join("\n"),
+        result: {
+          title: "Rooms result",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select room, type, bed, rate, view from rooms",
+          how: "Display: bar.",
+          columns: ["room", "type", "bed", "rate", "view"],
+          rows: [["207", "Deluxe", "King/Twin", 6350, "Pool View"]],
+          row_count: 1,
+          truncated: false,
+        },
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Rooms result")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Export table" }));
+    expect(screen.getByRole("button", { name: "Export table as PDF" })).toBeInTheDocument();
   });
 
   it("uses a responsive layout for empty-state action cards", () => {
@@ -132,6 +324,7 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByRole("button", { name: "Copy answer" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save to project notes" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Ask follow-up" })).toBeInTheDocument();
+    expect(screen.getByText("Revenue increased by 12%.").closest(".chat-content-frame")).not.toBeNull();
   });
 
   it("lets users rerun the previous question without showing debug reporting in chat", () => {

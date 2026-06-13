@@ -76,7 +76,7 @@ export interface InstructionsResponse {
 
 export interface ResultPayload {
   title: string;
-  viz: "bar" | "line" | "pie" | "card" | "table";
+  viz: "bar" | "line" | "pie" | "card" | "table" | "chart";
   elapsed_ms: number;
   sql: string;
   how: string;
@@ -85,6 +85,8 @@ export interface ResultPayload {
   row_count: number;
   truncated: boolean;
   view_type?: string;
+  image_b64?: string | null;
+  text_output?: string | null;
 }
 
 export type PendingResolver =
@@ -191,6 +193,7 @@ export type Message =
       progress?: number | null;
       source?: { id: string | null; name: string; kind: string; rows: number };
       result?: ResultPayload;
+      artifacts?: ResultPayload[];
       error?: boolean;
       pending?: Pending;
       resolved?: boolean;
@@ -201,7 +204,7 @@ export type Message =
     };
 
 export type SSEEvent =
-  | { event: "meta"; data: { chat_id: string; source: { id: string | null; name: string; kind: string; rows: number } } }
+  | { event: "meta"; data: { chat_id: string; chat_title?: string | null; source: { id: string | null; name: string; kind: string; rows: number } } }
   | { event: "thinking"; data: { step: string } }
   | { event: "result"; data: ResultPayload }
   | { event: "text"; data: { delta: string } }

@@ -12,6 +12,13 @@ describe("ThinkingIndicator", () => {
     expect(screen.getByText("Planning…")).toBeInTheDocument();
   });
 
+  it("does not render SQL or internal details from thinking text", () => {
+    render(<ThinkingIndicator step="Running SELECT * FROM orders WHERE token = 'secret'" />);
+
+    expect(screen.getByText("Working on your answer…")).toBeInTheDocument();
+    expect(screen.queryByText(/select|token|secret/i)).not.toBeInTheDocument();
+  });
+
   it("does not render when step is empty", () => {
     const { container } = render(<ThinkingIndicator step={null} />);
     expect(container).toBeEmptyDOMElement();

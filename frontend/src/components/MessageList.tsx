@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef } from "react";
 import { AlertTriangle, ArrowRight, Paperclip, Plug, Sparkles } from "lucide-react";
-import type { Message, ModelFallbackNotice } from "@/lib/types";
+import type { Message, ModelFallbackNotice, ResultPayload } from "@/lib/types";
 import { ResultBlock } from "./ResultBlock";
 import { InlineQuestion } from "./InlineQuestion";
 import { ThinkingIndicator } from "./ThinkingIndicator";
@@ -11,6 +11,9 @@ import { AssistantMarkdown } from "./AssistantMarkdown";
 import { AnswerActions } from "./AnswerActions";
 import { TravelResultPanel } from "./TravelResultPanel";
 import { FollowUpChips } from "./FollowUpChips";
+import { artifactItems } from "@/lib/artifacts";
+import { extractFirstMarkdownTable, tableCoversResult } from "@/lib/markdownTable";
+import { sanitizeAssistantContent, sanitizeUserVisibleError } from "@/lib/userFacingText";
 
 interface MessageListProps {
   messages: Message[];
@@ -24,6 +27,7 @@ interface MessageListProps {
   onAskFollowUp?: (content: string) => void;
   onRetryQuestion?: (content: string) => void;
   onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
+  onOpenArtifact?: (artifactId: string) => void;
 }
 
 function formatRelative(ts?: number): string {
@@ -35,7 +39,7 @@ function formatRelative(ts?: number): string {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
-export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentChatId, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback }: MessageListProps) {
+export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentChatId, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback, onOpenArtifact }: MessageListProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isStreaming = messages.some((m) => m.role === "assistant" && m.streaming);
 
@@ -61,7 +65,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
 
   return (
     <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col min-h-0">
-      <div className="flex flex-col gap-6 mt-auto justify-end">
+      <div className="chat-content-frame flex flex-col gap-6 mt-auto justify-end">
         {messages.map((msg, idx) => {
             const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
             const previousUserMessage = msg.role === "assistant"
@@ -78,6 +82,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
                 onAskFollowUp={onAskFollowUp}
                 onRetryQuestion={previousUserMessage && onRetryQuestion ? () => onRetryQuestion(previousUserMessage.content) : undefined}
                 onFeedback={onFeedback}
+                onOpenArtifact={onOpenArtifact}
                 />
                 {idx === lastResultIdx && onAskFollowUp && (
                 <div className="mt-4">
@@ -101,6 +106,7 @@ const Bubble = React.memo(function Bubble({
   onAskFollowUp,
   onRetryQuestion,
   onFeedback,
+  onOpenArtifact,
 }: {
   message: Message;
   onChoose: (messageId: string, value: string | string[]) => void;
@@ -110,6 +116,7 @@ const Bubble = React.memo(function Bubble({
   onAskFollowUp?: (content: string) => void;
   onRetryQuestion?: () => void;
   onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
+  onOpenArtifact?: (artifactId: string) => void;
 }) {
   if (message.role === "user") {
     return (
@@ -158,7 +165,7 @@ const Bubble = React.memo(function Bubble({
                 </div>
                 <span className="text-[10px] font-bold uppercase tracking-[0.2em] opacity-40" style={{ color: "var(--color-text-tertiary)" }}>Intelligence Engine</span>
             </div>
-            <AssistantMarkdown content={message.content} streaming={!!message.streaming} />
+            <AssistantMarkdown content={sanitizeAssistantContent(message.content)} streaming={!!message.streaming} />
             {message.streaming && (
               <span
                 className="inline-block w-[6px] h-[12px] ml-[1px] align-middle"
@@ -177,7 +184,26 @@ const Bubble = React.memo(function Bubble({
             onFeedback={(rating, category) => onFeedback?.(message, rating, category)}
           />
         )}
-        {message.result && <ResultBlock result={message.result} />}
+        {message.result && (() => {
+          const messageArtifacts = artifactItems([message]);
+          if (!message.streaming && onOpenArtifact && messageArtifacts.length > 1) {
+            const primaryArtifact = messageArtifacts[0];
+            return (
+              <ArtifactReference
+                result={primaryArtifact.result}
+                artifactCount={messageArtifacts.length}
+                onOpen={() => onOpenArtifact(primaryArtifact.id)}
+              />
+            );
+          }
+          if (!message.streaming && message.content) {
+            const markdownTable = extractFirstMarkdownTable(message.content);
+            if (markdownTable && tableCoversResult(markdownTable.columns, message.result.columns)) {
+              return null;
+            }
+          }
+          return <ResultBlock result={message.result} narrative={message.content} />;
+        })()}
         {hasTravelData && message.travel_intent && (
           <TravelResultPanel
             offers={message.travel_offers || []}
@@ -213,7 +239,7 @@ const Bubble = React.memo(function Bubble({
             <AlertTriangle size={16} className="text-red-500 mt-0.5" />
             <div className="flex flex-col gap-1">
                 <span className="font-bold uppercase tracking-widest text-[10px]">Processing Fault</span>
-                <span className="opacity-80">{message.content}</span>
+                <span className="opacity-80">{sanitizeUserVisibleError(message.content)}</span>
             </div>
           </div>
         )}
@@ -222,6 +248,42 @@ const Bubble = React.memo(function Bubble({
     </div>
   );
 });
+
+function ArtifactReference({
+  result,
+  artifactCount,
+  onOpen,
+}: {
+  result: ResultPayload;
+  artifactCount: number;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="mt-3 flex w-full items-center justify-between gap-3 rounded-[14px] px-4 py-3 text-left transition-all hover:-translate-y-[1px]"
+      style={{
+        background: "var(--color-background-secondary)",
+        border: "1px solid var(--color-border-secondary)",
+        boxShadow: "var(--shadow-sm)",
+      }}
+    >
+      <div className="min-w-0">
+        <div className="text-[10px] font-bold uppercase tracking-[0.18em]" style={{ color: "var(--color-text-tertiary)" }}>
+          {artifactCount > 1 ? `${artifactCount} artifacts` : "Artifact"} · {result.viz}
+        </div>
+        <div className="mt-1 truncate text-[13px] font-semibold" style={{ color: "var(--color-text-primary)" }}>
+          {result.title}
+        </div>
+        <div className="mt-1 text-[11px]" style={{ color: "var(--color-text-secondary)" }}>
+          {artifactCount > 1 ? "Multiple visual results" : `${result.row_count.toLocaleString()} rows`} · open side panel
+        </div>
+      </div>
+      <ArrowRight size={16} strokeWidth={1.8} style={{ color: "var(--color-text-tertiary)" }} />
+    </button>
+  );
+}
 
 function FallbackNotice({ notice }: { notice: ModelFallbackNotice }) {
   const reasonText =

@@ -1,20 +1,23 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { flushSync } from "react-dom";
 import { Sidebar } from "@/components/Sidebar";
 import { Topbar } from "@/components/Topbar";
 import { AuthScreen } from "@/components/AuthScreen";
 import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
+import { ArtifactsPanel } from "@/components/ArtifactsPanel";
+import { SourcesPanel } from "@/components/SourcesPanel";
 import { InputBar } from "@/components/InputBar";
 import { StreamingBar } from "@/components/StreamingBar";
-import { SourcePreviewDrawer } from "@/components/SourcePreviewDrawer";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, clearAuthToken, getAuthToken, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
+import { artifactItems } from "@/lib/artifacts";
 import { formatArchiveSkippedNote, formatWorkbookMCPConnectedMessage } from "@/lib/uploadMessages";
 import { buildCustomSheetQuestion, buildSheetModeQuestion } from "@/lib/uploadPending";
+import { sanitizeThinkingStep, sanitizeUserVisibleError } from "@/lib/userFacingText";
 import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
@@ -38,6 +41,12 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [previewSourceId, setPreviewSourceId] = useState<string | null>(null);
+  const [previewData, setPreviewData] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
@@ -108,6 +117,13 @@ export default function Home() {
 
   const selectedSources = sources.filter((s) => selectedSourceIds.includes(s.id));
   const activeSource = selectedSources[0] || sources.find((s) => s.active);
+  const artifacts = useMemo(() => artifactItems(messages), [messages]);
+
+  useEffect(() => {
+    if (selectedArtifactId && !artifacts.some((artifact) => artifact.id === selectedArtifactId)) {
+      setSelectedArtifactId(null);
+    }
+  }, [artifacts, selectedArtifactId]);
 
   const addMessage = useCallback((m: Message) => setMessages((prev) => [...prev, m]), []);
   const updateMessage = useCallback((id: string, patch: Partial<Message>) => {
@@ -222,7 +238,7 @@ export default function Home() {
           updateMessage(placeholderId, {
             thinking: null,
             progress: null,
-            content: `Couldn't load ${displaySourceName(file.name)}: ${e?.message || "unknown error"}`,
+            content: `Couldn't load ${displaySourceName(file.name)}: ${sanitizeUserVisibleError(e?.message, "Please try another file.")}`,
             error: true,
           });
         }
@@ -253,7 +269,11 @@ export default function Home() {
             });
             refreshSources();
           } catch (e: any) {
-            updateMessage(messageId, { thinking: null, content: `Couldn't connect: ${e?.message || "unknown error"}`, error: true });
+            updateMessage(messageId, {
+              thinking: null,
+              content: `Couldn't connect: ${sanitizeUserVisibleError(e?.message, "Please check the connection details and try again.")}`,
+              error: true,
+            });
           }
         } else {
           updateMessage(messageId, { resolved: true, content: msg.content + "\n\nOK, I'll send it as a question." });
@@ -292,7 +312,11 @@ export default function Home() {
           });
           refreshSources();
         } catch (e: any) {
-          updateMessage(messageId, { thinking: null, content: `I loaded the file, but couldn't save that rule: ${e?.message || "unknown"}`, error: true });
+          updateMessage(messageId, {
+            thinking: null,
+            content: `I loaded the file, but couldn't save that rule: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
+            error: true,
+          });
         }
         return;
       }
@@ -332,7 +356,11 @@ export default function Home() {
             return;
           }
         } catch (e: any) {
-          updateMessage(messageId, { thinking: null, content: `Couldn't finish loading: ${e?.message || "unknown"}`, error: true });
+          updateMessage(messageId, {
+            thinking: null,
+            content: `Couldn't finish loading: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
+            error: true,
+          });
         }
         return;
       }
@@ -378,7 +406,11 @@ export default function Home() {
         }
         refreshSources();
       } catch (e: any) {
-        updateMessage(messageId, { thinking: null, content: `Couldn't finish loading: ${e?.message || "unknown"}`, error: true });
+        updateMessage(messageId, {
+          thinking: null,
+          content: `Couldn't finish loading: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
+          error: true,
+        });
       }
     },
     [updateMessage, refreshSources],
@@ -451,9 +483,12 @@ export default function Home() {
                 }
                 setCurrentChatId(ev.data.chat_id);
               }
+              if (ev.data.chat_title?.trim()) {
+                setChatTitle(ev.data.chat_title.trim());
+              }
               updateMessage(assistantId, { source: ev.data.source });
             } else if (ev.event === "thinking") {
-              updateMessage(assistantId, { thinking: ev.data.step });
+              updateMessage(assistantId, { thinking: sanitizeThinkingStep(ev.data.step) });
             } else if (ev.event === "result") {
               updateMessage(assistantId, { result: ev.data as ResultPayload, thinking: null });
               setLoading(false);
@@ -487,7 +522,7 @@ export default function Home() {
               });
               setLoading(false);
             } else if (ev.event === "error") {
-              updateMessage(assistantId, { content: ev.data.message, error: true, thinking: null });
+              updateMessage(assistantId, { content: sanitizeUserVisibleError(ev.data.message), error: true, thinking: null });
               setLoading(false);
             } else if (ev.event === "notice") {
               updateMessage(assistantId, { notice: ev.data });
@@ -506,7 +541,12 @@ export default function Home() {
             thinking: null,
           });
         } else {
-          updateMessage(assistantId, { content: e?.message || "Network error", error: true, streaming: false, thinking: null });
+          updateMessage(assistantId, {
+            content: sanitizeUserVisibleError(e?.message, "Network error. Please try again."),
+            error: true,
+            streaming: false,
+            thinking: null,
+          });
         }
       } finally {
         setLoading(false);
@@ -609,6 +649,7 @@ export default function Home() {
           role: "assistant",
           content: m.content,
           result: m.payload?.result,
+          artifacts: m.payload?.artifacts,
           travel_intent: m.payload?.travel_intent,
           travel_offers: m.payload?.travel_offers,
           hotel_offers: m.payload?.hotel_offers,
@@ -674,20 +715,29 @@ export default function Home() {
   }, [currentChatId, refreshChats, abortInFlight]);
 
   const handleToggleSource = useCallback(async (id: string) => {
+    const wasSelected = selectedSourceIds.includes(id);
     setSelectedSourceIds((prev) => (
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     ));
+    if (wasSelected && id === previewSourceId) {
+      setPreviewSourceId(null);
+      setPreviewData(null);
+    }
     if (id !== "mcp") {
       await api.activateSource(id).catch(() => {});
       refreshSources();
     }
-  }, [refreshSources]);
+  }, [previewSourceId, refreshSources, selectedSourceIds]);
 
   const handleDeleteSource = useCallback(async (id: string) => {
     await api.deleteSource(id);
     setSelectedSourceIds((prev) => prev.filter((x) => x !== id));
+    if (id === previewSourceId) {
+      setPreviewSourceId(null);
+      setPreviewData(null);
+    }
     refreshSources();
-  }, [refreshSources]);
+  }, [previewSourceId, refreshSources]);
 
   const handleAttachedFromInput = useCallback((s: Source) => {
     setSelectedSourceIds((ids) => Array.from(new Set([...ids, s.id])));
@@ -714,7 +764,7 @@ export default function Home() {
       addMessage({
         id: `local_${Date.now()}`,
         role: "assistant",
-        content: `Couldn't save that note: ${e?.message || "unknown error"}`,
+        content: `Couldn't save that note: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
         error: true,
       });
     }
@@ -739,7 +789,7 @@ export default function Home() {
       addMessage({
         id: `local_feedback_err_${Date.now()}`,
         role: "assistant",
-        content: `Couldn't save feedback: ${e?.message || "unknown error"}`,
+        content: `Couldn't save feedback: ${sanitizeUserVisibleError(e?.message, "Please try again.")}`,
         error: true,
       });
     }
@@ -770,12 +820,18 @@ export default function Home() {
     connectorClickRef.current();
   }, []);
 
-  const [previewSourceId, setPreviewSourceId] = useState<string | null>(null);
-  const [previewData, setPreviewData] = useState<any>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
+  const handleOpenArtifact = useCallback((artifactId: string) => {
+    setPreviewSourceId(null);
+    setSelectedArtifactId(artifactId);
+    setSourcesOpen(false);
+    setArtifactsOpen(true);
+  }, []);
 
   const handlePreviewSource = useCallback(async (id: string) => {
+    if (!selectedSourceIds.includes(id)) return;
     setPreviewSourceId(id);
+    setArtifactsOpen(false);
+    setSourcesOpen(true);
     setPreviewLoading(true);
     try {
       const data = await api.previewSource(id);
@@ -786,6 +842,11 @@ export default function Home() {
     } finally {
       setPreviewLoading(false);
     }
+  }, [selectedSourceIds]);
+
+  const handleCloseSourcePreview = useCallback(() => {
+    setPreviewSourceId(null);
+    setPreviewData(null);
   }, []);
 
   useKeyboardShortcuts({
@@ -809,14 +870,9 @@ export default function Home() {
         <Sidebar
           chats={chats}
           currentChatId={currentChatId}
-          sources={sources}
-          selectedSourceIds={selectedSourceIds}
           onNewChat={() => { handleNewChat(); }}
           onSelectChat={(id) => { handleSelectChat(id); }}
           onDeleteChat={handleDeleteChat}
-          onToggleSource={handleToggleSource}
-          onDeleteSource={handleDeleteSource}
-          onPreviewSource={handlePreviewSource}
           projects={projects}
           currentProjectId={currentProjectId}
           onSelectProject={(id) => { handleSelectProject(id); }}
@@ -841,6 +897,18 @@ export default function Home() {
           sidebarOpen={sidebarOpen}
           onOpenSettings={() => setSettingsOpen(true)}
           isAdmin={isAdmin}
+          artifactCount={artifacts.length}
+          artifactsOpen={artifactsOpen}
+          onToggleArtifacts={() => {
+            setArtifactsOpen((open) => !open);
+            setSourcesOpen(false);
+          }}
+          sourceCount={sources.length}
+          sourcesOpen={sourcesOpen}
+          onToggleSources={() => {
+            setSourcesOpen((open) => !open);
+            setArtifactsOpen(false);
+          }}
         />
         <MessageList
           messages={messages}
@@ -854,6 +922,7 @@ export default function Home() {
           onAskFollowUp={handleSend}
           onFeedback={handleFeedback}
           onRetryQuestion={handleSend}
+          onOpenArtifact={handleOpenArtifact}
         />
         <InputBar
           onSend={handleSend}
@@ -869,6 +938,26 @@ export default function Home() {
           onModelModeChange={setModelMode}
         />
       </main>
+      <ArtifactsPanel
+        messages={messages}
+        open={artifactsOpen}
+        selectedArtifactId={selectedArtifactId}
+        onSelectArtifact={handleOpenArtifact}
+        onClose={() => setArtifactsOpen(false)}
+      />
+      <SourcesPanel
+        open={sourcesOpen}
+        sources={sources}
+        selectedSourceIds={selectedSourceIds}
+        selectedSourceId={previewSourceId}
+        sourcePreviewData={previewData}
+        sourcePreviewLoading={previewLoading}
+        onOpenSource={handlePreviewSource}
+        onToggleSource={handleToggleSource}
+        onDeleteSource={handleDeleteSource}
+        onCloseSourcePreview={handleCloseSourcePreview}
+        onClose={() => setSourcesOpen(false)}
+      />
       {projectDialogOpen && currentProjectId && (
         <ProjectDialog
           projectId={currentProjectId}
@@ -876,15 +965,6 @@ export default function Home() {
           onUpdate={() => { refreshProjects(); refreshSources(); }}
         />
       )}
-      <SourcePreviewDrawer
-        open={previewSourceId !== null}
-        onClose={() => {
-          setPreviewSourceId(null);
-          setPreviewData(null);
-        }}
-        data={previewData}
-        loading={previewLoading}
-      />
       {settingsOpen && (
         <SettingsPanel
           modelMode={modelMode}
