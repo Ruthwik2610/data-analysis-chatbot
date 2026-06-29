@@ -31,6 +31,8 @@ node_modules/
 dist/
 build/
 .next/
+outputs/
+frontend/itinerary_journey_*.pdf
 *.local
 .agent/
 scratch/
