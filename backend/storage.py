@@ -236,6 +236,10 @@ CREATE TABLE IF NOT EXISTS token_usage (
   project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
   user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
   model TEXT NOT NULL,
+  requested_model_mode TEXT,
+  effective_model_mode TEXT,
+  selection_reason TEXT,
+  estimated_cost_usd REAL,
   purpose TEXT NOT NULL DEFAULT 'chat',
   prompt_tokens INTEGER NOT NULL DEFAULT 0,
   completion_tokens INTEGER NOT NULL DEFAULT 0,
@@ -366,6 +370,10 @@ class Storage:
             self._ensure_column(con, "user_feedback", "category", "TEXT NOT NULL DEFAULT 'feedback'")
             self._ensure_column(con, "user_feedback", "status", "TEXT NOT NULL DEFAULT 'open'")
             self._ensure_column(con, "token_usage", "purpose", "TEXT NOT NULL DEFAULT 'chat'")
+            self._ensure_column(con, "token_usage", "requested_model_mode", "TEXT")
+            self._ensure_column(con, "token_usage", "effective_model_mode", "TEXT")
+            self._ensure_column(con, "token_usage", "selection_reason", "TEXT")
+            self._ensure_column(con, "token_usage", "estimated_cost_usd", "REAL")
             self._ensure_column(con, "travel_journeys", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
             self._ensure_column(con, "travel_journeys", "hotel_offer_json", "TEXT")
             self._ensure_column(con, "travel_journeys", "total_price_usd", "REAL")
@@ -836,12 +844,13 @@ class Storage:
             )
         return {"source_id": source_id, "instructions": instructions, "updated_at": now}
 
-    def delete_source(self, source_id: str, owner_id: str | None = None) -> None:
+    def delete_source(self, source_id: str, owner_id: str | None = None) -> bool:
         with self._conn() as con:
             if owner_id is None:
-                con.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+                cursor = con.execute("DELETE FROM sources WHERE id = ?", (source_id,))
             else:
-                con.execute("DELETE FROM sources WHERE id = ? AND owner_id = ?", (source_id, owner_id))
+                cursor = con.execute("DELETE FROM sources WHERE id = ? AND owner_id = ?", (source_id, owner_id))
+            return cursor.rowcount > 0
 
     def set_active_source(self, source_id: str | None, owner_id: str = "legacy") -> None:
         with self._conn() as con:
@@ -901,10 +910,10 @@ class Storage:
         return redacted
 
     @staticmethod
-    def _mcp_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _mcp_row_to_dict(row: sqlite3.Row, *, redact_args: bool = True) -> dict[str, Any]:
         data = dict(row)
         raw_args = json.loads(data["args_json"]) if data.get("args_json") else []
-        data["args"] = Storage._redact_args(raw_args)
+        data["args"] = Storage._redact_args(raw_args) if redact_args else raw_args
         data["tools"] = json.loads(data["tools_json"]) if data.get("tools_json") else []
         data.pop("args_json", None)
         data.pop("tools_json", None)
@@ -983,6 +992,14 @@ class Storage:
             else:
                 row = con.execute("SELECT * FROM mcp_connectors WHERE id = ? AND owner_id = ?", (connector_id, owner_id)).fetchone()
         return self._mcp_row_to_dict(row) if row else None
+
+    def get_mcp_connector_record(self, connector_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+        with self._conn() as con:
+            if owner_id is None:
+                row = con.execute("SELECT * FROM mcp_connectors WHERE id = ?", (connector_id,)).fetchone()
+            else:
+                row = con.execute("SELECT * FROM mcp_connectors WHERE id = ? AND owner_id = ?", (connector_id, owner_id)).fetchone()
+        return self._mcp_row_to_dict(row, redact_args=False) if row else None
 
     def list_mcp_connectors(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
         with self._conn() as con:
@@ -1797,16 +1814,36 @@ class Storage:
         prompt_tokens: int,
         completion_tokens: int,
         purpose: str = "chat",
+        requested_model_mode: str | None = None,
+        effective_model_mode: str | None = None,
+        selection_reason: str | None = None,
+        estimated_cost_usd: float | None = None,
     ) -> None:
         usage_id = f"tok_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
             con.execute(
                 """
-                INSERT INTO token_usage (id, project_id, user_id, model, purpose, prompt_tokens, completion_tokens, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO token_usage (
+                  id, project_id, user_id, model, requested_model_mode, effective_model_mode,
+                  selection_reason, estimated_cost_usd, purpose, prompt_tokens, completion_tokens, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (usage_id, project_id, user_id, model, purpose, prompt_tokens, completion_tokens, now),
+                (
+                    usage_id,
+                    project_id,
+                    user_id,
+                    model,
+                    requested_model_mode,
+                    effective_model_mode,
+                    selection_reason,
+                    estimated_cost_usd,
+                    purpose,
+                    prompt_tokens,
+                    completion_tokens,
+                    now,
+                ),
             )
 
     def list_token_usage_by_project(self) -> list[dict[str, Any]]:
@@ -1818,7 +1855,8 @@ class Storage:
                   p.id as project_id,
                   SUM(tu.prompt_tokens) as prompt_tokens,
                   SUM(tu.completion_tokens) as completion_tokens,
-                  SUM(tu.prompt_tokens + tu.completion_tokens) as total_tokens
+                  SUM(tu.prompt_tokens + tu.completion_tokens) as total_tokens,
+                  SUM(COALESCE(tu.estimated_cost_usd, 0)) as estimated_cost_usd
                 FROM projects p
                 JOIN token_usage tu ON tu.project_id = p.id
                 GROUP BY p.id
@@ -1836,9 +1874,30 @@ class Storage:
                   SUM(prompt_tokens) as prompt_tokens,
                   SUM(completion_tokens) as completion_tokens,
                   SUM(prompt_tokens + completion_tokens) as total_tokens,
+                  SUM(COALESCE(estimated_cost_usd, 0)) as estimated_cost_usd,
                   COUNT(*) as request_count
                 FROM token_usage
                 GROUP BY purpose
+                ORDER BY total_tokens DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_token_usage_by_model_mode(self) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT
+                  COALESCE(requested_model_mode, 'unspecified') as requested_model_mode,
+                  COALESCE(effective_model_mode, 'unspecified') as effective_model_mode,
+                  model,
+                  SUM(prompt_tokens) as prompt_tokens,
+                  SUM(completion_tokens) as completion_tokens,
+                  SUM(prompt_tokens + completion_tokens) as total_tokens,
+                  SUM(COALESCE(estimated_cost_usd, 0)) as estimated_cost_usd,
+                  COUNT(*) as request_count
+                FROM token_usage
+                GROUP BY requested_model_mode, effective_model_mode, model
                 ORDER BY total_tokens DESC
                 """
             ).fetchall()

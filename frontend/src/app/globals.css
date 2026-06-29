@@ -259,6 +259,31 @@ button { font-family: inherit; cursor: pointer; }
   &::-webkit-scrollbar-track { background: transparent; }
 }
 
+.chat-content-frame {
+  width: min(100%, 920px);
+  max-width: 920px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.landing-composer-shell .composer-shell {
+  transform: translateY(-112px);
+}
+
+.landing-composer-shell .hero-stage {
+  transform: translateY(-36px);
+}
+
+@media (max-width: 640px) {
+  .landing-composer-shell .composer-shell {
+    transform: translateY(-76px);
+  }
+
+  .landing-composer-shell .hero-stage {
+    transform: translateY(-24px);
+  }
+}
+
 .assistant-markdown {
   color: var(--color-text-primary);
   font-size: 13.5px;

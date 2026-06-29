@@ -6,18 +6,41 @@ import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 PII_PATTERNS = [
     (re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"), "[email-redacted]"),
     (re.compile(r"\b(?:\+?\d[\d\s().-]{7,}\d)\b"), "[number-redacted]"),
 ]
+URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.I)
+
+
+def _redact_single_url(raw_url: str) -> str:
+    trailing = ""
+    while raw_url and raw_url[-1] in ".,);]":
+        trailing = raw_url[-1] + trailing
+        raw_url = raw_url[:-1]
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return raw_url + trailing
+    if not parsed.scheme or not parsed.netloc:
+        return raw_url + trailing
+    netloc = parsed.hostname or parsed.netloc.split("@")[-1]
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", "")) + trailing
+
+
+def redact_url(value: str) -> str:
+    return URL_PATTERN.sub(lambda match: _redact_single_url(match.group(0)), value)
 
 
 def redact(value: Any) -> Any:
     if not isinstance(value, str):
         return value
-    cleaned = value
+    cleaned = redact_url(value)
     for pattern, replacement in PII_PATTERNS:
         cleaned = pattern.sub(replacement, cleaned)
     return cleaned

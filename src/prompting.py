@@ -21,7 +21,12 @@ def trim_to_budget(text: str, char_budget: int) -> str:
     if len(text) <= char_budget:
         return text
     marker = "\n<truncation_notice>Prompt context was truncated to stay within budget.</truncation_notice>\n"
-    return text[: max(0, char_budget - len(marker))] + marker
+    available = char_budget - len(marker)
+    if available <= 0:
+        return marker[:char_budget]
+    head_budget = available // 2
+    tail_budget = available - head_budget
+    return text[:head_budget] + marker + text[-tail_budget:]
 
 
 def build_intent_prompt(

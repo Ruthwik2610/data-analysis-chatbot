@@ -12,6 +12,7 @@ from .logging_config import log_event
 
 
 CACHE_VERSION = "2026-04-25-v1"
+CSV_TEXT_ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
 DATE_COLUMNS = {"cust_registration_date", "order_datetime", "expected_delivery", "actual_delivery"}
 BOOLEAN_COLUMNS = {"is_prime_member", "is_cod", "is_returnable"}
 NUMERIC_COLUMNS = {
@@ -41,9 +42,47 @@ def normalize_identifier(name: str, index: int | None = None) -> str:
     return cleaned
 
 
+def _candidate_csv_encodings(data_path: Path) -> tuple[str, ...]:
+    try:
+        prefix = data_path.read_bytes()[:4]
+    except Exception:
+        prefix = b""
+    if prefix.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return ("utf-16",) + CSV_TEXT_ENCODINGS
+    return CSV_TEXT_ENCODINGS
+
+
 def read_header(data_path: Path) -> list[str]:
-    with data_path.open(newline="", encoding="utf-8-sig") as handle:
-        return next(csv.reader(handle))
+    last_error: UnicodeDecodeError | None = None
+    for encoding in _candidate_csv_encodings(data_path):
+        try:
+            with data_path.open(newline="", encoding=encoding) as handle:
+                return next(csv.reader(handle))
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise ValueError(f"CSV file has no header row: {data_path}")
+
+
+def _is_csv_encoding_error(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return "invalid unicode" in detail or "not utf-8 encoded" in detail or "byte sequence mismatch" in detail
+
+
+def _transcode_csv_to_utf8(data_path: Path, destination: Path) -> tuple[Path, str]:
+    last_error: UnicodeDecodeError | None = None
+    for encoding in _candidate_csv_encodings(data_path):
+        try:
+            text = data_path.read_text(encoding=encoding)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+        destination.write_text(text, encoding="utf-8", newline="")
+        return destination, encoding
+    if last_error:
+        raise last_error
+    raise ValueError(f"Could not transcode CSV to UTF-8: {data_path}")
 
 
 def source_fingerprint(data_path: Path) -> dict[str, Any]:
@@ -115,14 +154,29 @@ def ensure_cache(data_path: Path, cache_dir: Path, logger: Any | None = None, fo
     if tmp_db.exists():
         tmp_db.unlink()
     con = duckdb.connect(str(tmp_db))
+    transcoded_path: Path | None = None
     try:
-        con.execute(
-            """
-            CREATE OR REPLACE TABLE raw_orders AS
-            SELECT * FROM read_csv_auto(?, header=true, all_varchar=true, ignore_errors=false)
-            """,
-            [str(data_path)],
-        )
+        try:
+            con.execute(
+                """
+                CREATE OR REPLACE TABLE raw_orders AS
+                SELECT * FROM read_csv_auto(?, header=true, all_varchar=true, ignore_errors=false)
+                """,
+                [str(data_path)],
+            )
+        except Exception as exc:
+            if not _is_csv_encoding_error(exc):
+                raise
+            transcoded_path, encoding = _transcode_csv_to_utf8(data_path, cache_dir / f"{data_path.stem}.utf8.tmp.csv")
+            if logger:
+                log_event(logger, "csv_transcoded_to_utf8", path=str(data_path), encoding=encoding)
+            con.execute(
+                """
+                CREATE OR REPLACE TABLE raw_orders AS
+                SELECT * FROM read_csv_auto(?, header=true, all_varchar=true, ignore_errors=false)
+                """,
+                [str(transcoded_path)],
+            )
         raw_columns = [row[1] for row in con.execute("PRAGMA table_info(raw_orders)").fetchall()]
         header = read_header(data_path)
         clean_pairs: list[tuple[str, str]] = []
@@ -150,7 +204,12 @@ def ensure_cache(data_path: Path, cache_dir: Path, logger: Any | None = None, fo
         con.close()
         if tmp_db.exists():
             tmp_db.unlink()
+        if transcoded_path and transcoded_path.exists():
+            transcoded_path.unlink()
         raise
+    finally:
+        if transcoded_path and transcoded_path.exists():
+            transcoded_path.unlink()
 
 
 def profile_schema(con: Any, row_count: int) -> dict[str, Any]:

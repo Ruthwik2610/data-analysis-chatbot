@@ -42,9 +42,33 @@ export default function CostsPage() {
             <div key={row.purpose} className="rounded-[20px] border border-white/5 bg-white/[0.03] p-5">
               <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/35">{row.purpose}</div>
               <div className="mt-2 text-2xl font-bold text-white">{row.total_tokens?.toLocaleString?.() || row.total_tokens}</div>
-              <div className="mt-1 text-xs text-white/35">{row.request_count} requests</div>
+              <div className="mt-1 text-xs text-white/35">
+                {row.request_count} requests
+                {row.estimated_cost_usd ? ` · $${Number(row.estimated_cost_usd).toFixed(4)}` : ""}
+              </div>
             </div>
           ))}
+        </div>
+        <div className="rounded-[28px] border border-white/5 bg-white/[0.03] p-6">
+          <h2 className="mb-4 text-[10px] font-bold uppercase tracking-[0.2em] text-white/40">Model routing</h2>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {(stats.token_usage_by_model_mode || []).map((row: any) => (
+              <div key={`${row.requested_model_mode}-${row.effective_model_mode}-${row.model}`} className="rounded-[20px] border border-white/5 bg-black/10 p-5">
+                <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/35">
+                  {row.requested_model_mode} → {row.effective_model_mode}
+                </div>
+                <div className="mt-2 truncate text-xs font-mono text-white/50">{row.model}</div>
+                <div className="mt-2 text-2xl font-bold text-white">{row.total_tokens?.toLocaleString?.() || row.total_tokens}</div>
+                <div className="mt-1 text-xs text-white/35">
+                  {row.request_count} requests
+                  {row.estimated_cost_usd ? ` · $${Number(row.estimated_cost_usd).toFixed(4)}` : ""}
+                </div>
+              </div>
+            ))}
+            {!(stats.token_usage_by_model_mode || []).length && (
+              <div className="rounded-[20px] border border-white/5 bg-black/10 p-5 text-xs text-white/35">No model routing data yet.</div>
+            )}
+          </div>
         </div>
       </div>
     </div>

@@ -19,12 +19,12 @@ describe("Login credential hints", () => {
     vi.unstubAllEnvs();
   });
 
-  it("shows the public test user credentials on the chat login screen", () => {
+  it("keeps public test user credentials hidden on the chat login screen", () => {
     render(<AuthScreen onAuthenticated={vi.fn()} />);
 
-    expect(screen.getByText("Test user")).toBeInTheDocument();
-    expect(screen.getByText("sample-test-user@example.com")).toBeInTheDocument();
-    expect(screen.getByText("sample-public-test-password")).toBeInTheDocument();
+    expect(screen.queryByText("Test user")).not.toBeInTheDocument();
+    expect(screen.queryByText("sample-test-user@example.com")).not.toBeInTheDocument();
+    expect(screen.queryByText("sample-public-test-password")).not.toBeInTheDocument();
   });
 
   it("shows the admin passcode on the admin login screen", () => {

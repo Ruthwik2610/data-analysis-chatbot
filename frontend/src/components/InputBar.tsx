@@ -32,7 +32,7 @@ export function InputBar({
   placeholder,
   currentProjectId,
   selectedSources = [],
-  modelMode = "flash",
+  modelMode = "auto",
   onModelModeChange,
 }: InputBarProps) {
   const [value, setValue] = useState("");
@@ -122,9 +122,9 @@ export function InputBar({
   };
 
   return (
-    <div className="px-6 py-4 relative z-30" style={{ background: "transparent" }}>
+    <div className="composer-shell px-6 py-4 relative z-30" style={{ background: "transparent" }}>
       <div
-        className="mx-auto flex max-w-[920px] flex-col gap-2 px-4 py-3 relative glass"
+        className="chat-content-frame flex flex-col gap-2 px-4 py-3 relative glass"
         style={{
           borderRadius: 22,
           boxShadow: "var(--shadow-xl)",
@@ -193,8 +193,9 @@ export function InputBar({
               onChange={(e) => onModelModeChange?.(e.target.value as ModelMode)}
               className="bg-transparent text-[11.5px] outline-none"
               style={{ color: "var(--color-text-primary)" }}
-              title={modelMode === "pro" ? "Deeper reasoning, higher cost" : "Normal reasoning, lower cost"}
+              title={modelMode === "pro" ? "Deeper reasoning, higher cost" : modelMode === "auto" ? "Automatic cost-aware routing" : "Normal reasoning, lower cost"}
             >
+              <option value="auto">Auto</option>
               <option value="flash">Flash</option>
               <option value="pro">Pro</option>
             </select>

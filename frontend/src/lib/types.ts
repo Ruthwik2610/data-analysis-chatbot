@@ -1,5 +1,5 @@
 export type SourceKind = "csv" | "xlsx" | "duckdb" | "api" | "json" | "pdf" | "mcp" | "multi";
-export type ModelMode = "flash" | "pro";
+export type ModelMode = "auto" | "flash" | "pro";
 
 export interface Source {
   id: string;
@@ -8,6 +8,7 @@ export interface Source {
   rows: number;
   active: boolean;
   loaded?: boolean;
+  description?: string;
   clarifications?: SourceClarification[];
 }
 
@@ -76,7 +77,7 @@ export interface InstructionsResponse {
 
 export interface ResultPayload {
   title: string;
-  viz: "bar" | "line" | "pie" | "card" | "table";
+  viz: "bar" | "line" | "pie" | "card" | "table" | "chart";
   elapsed_ms: number;
   sql: string;
   how: string;
@@ -195,6 +196,7 @@ export type Message =
       progress?: number | null;
       source?: { id: string | null; name: string; kind: string; rows: number };
       result?: ResultPayload;
+      artifacts?: ResultPayload[];
       error?: boolean;
       pending?: Pending;
       resolved?: boolean;

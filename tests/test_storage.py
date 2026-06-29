@@ -47,6 +47,33 @@ def test_list_chats_only_legacy_for_legacy_owner(storage):
     assert "User Chat" not in titles
     assert len(chats) == 1
 
+def test_token_usage_accepts_optional_model_routing_metadata(storage):
+    storage.add_token_usage(
+        project_id=None,
+        user_id=None,
+        model="openrouter/deepseek/deepseek-v4-flash",
+        prompt_tokens=1,
+        completion_tokens=1,
+    )
+    storage.add_token_usage(
+        project_id=None,
+        user_id=None,
+        model="openrouter/deepseek/deepseek-v4-pro",
+        prompt_tokens=10,
+        completion_tokens=5,
+        requested_model_mode="auto",
+        effective_model_mode="pro",
+        selection_reason="Auto selected Pro",
+        estimated_cost_usd=0.001,
+    )
+
+    usage_by_mode = storage.list_token_usage_by_model_mode()
+
+    assert usage_by_mode[0]["requested_model_mode"] == "auto"
+    assert usage_by_mode[0]["effective_model_mode"] == "pro"
+    assert usage_by_mode[0]["estimated_cost_usd"] == pytest.approx(0.001)
+    assert usage_by_mode[1]["requested_model_mode"] == "unspecified"
+
 def test_create_and_list_projects(storage):
     storage.create_project(title="Project A", owner_id="user_1")
     storage.create_project(title="Project B", owner_id="user_1")

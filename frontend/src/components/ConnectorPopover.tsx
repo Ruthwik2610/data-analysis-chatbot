@@ -219,7 +219,7 @@ export function ConnectorPopover({ open, onClose, onAttached, onPickFile, anchor
   const reconnectMCP = async (c: MCPConnector) => {
     setBusy(true);
     try {
-      await api.updateMCPConnector(c.id, { url: c.url ?? undefined, name: c.name ?? undefined });
+      await api.updateMCPConnector(c.id, { name: c.name ?? undefined, retry: true });
       await refreshMCP();
       notifySourcesChanged();
     } catch (e: any) {

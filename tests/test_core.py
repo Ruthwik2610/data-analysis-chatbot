@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import unittest
+import math
 import types
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import duckdb
 import pandas as pd
 
-from src.data_sources import prepare_pdf_source
+from src.data_sources import prepare_api_source, prepare_csv_memory_source, prepare_csv_source, prepare_pdf_source
 from src.prompting import build_intent_prompt, xml_escape
 from src.project_intelligence import (
     apply_instruction_rules,
     build_instruction_context,
     default_source_instructions,
 )
-from src.query_engine import build_query_plan, heuristic_intent, is_underspecified
+from src.query_engine import build_ledger_query_plan, build_query_plan, heuristic_intent, is_underspecified, validate_readonly_sql
 from src.visualization import choose_visualization
 
 class RoutingTests(unittest.TestCase):
@@ -23,6 +25,36 @@ class RoutingTests(unittest.TestCase):
         intent = {"intent_type": "aggregate", "aggregation": "sum"}
         question = "infer from the table and produce time table for each individual subject teacher"
         self.assertFalse(is_underspecified(intent, question, {"class", "teacher", "subject", "period_1", "period_2"}))
+
+
+class CsvSourceTests(unittest.TestCase):
+    def test_prepare_csv_source_accepts_cp1252_nbsp(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "orders.csv"
+            csv_path.write_bytes(
+                b"Order ID,Product Name,Sales\n"
+                b"CA-2014-115812,Chromcraft\xa0Rectangular Conference Tables,1706.184\n"
+            )
+
+            source = prepare_csv_source(csv_path, root / "cache", logger=None, force=True)
+
+        self.assertEqual(source.schema["row_count"], 1)
+        self.assertIn("product_name", source.allowed_columns)
+
+    def test_prepare_csv_memory_source_accepts_cp1252_nbsp(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "orders.csv"
+            csv_path.write_bytes(
+                b"Order ID,Product Name,Sales\n"
+                b"CA-2014-115812,Chromcraft\xa0Rectangular Conference Tables,1706.184\n"
+            )
+
+            source = prepare_csv_memory_source(csv_path, logger=None)
+
+        self.assertEqual(source.schema["row_count"], 1)
+        self.assertIn("product_name", source.allowed_columns)
 
 ALLOWED = {
     "order_key",
@@ -34,6 +66,115 @@ ALLOWED = {
     "qty",
     "payment_mode",
 }
+
+
+LEDGER_ROWS = [
+    {
+        "voucherlineno": 1,
+        "voucherno": 75,
+        "date": "2026-04-01",
+        "branch": "Hyderabad",
+        "customer": "Raghu Agri Care",
+        "account": "HDFC Bank",
+        "contraaccount": "Raghu Agri Care",
+        "debit": "1,000.00",
+        "credit": "0",
+    },
+    {
+        "voucherlineno": 2,
+        "voucherno": 75,
+        "date": "2026-04-01",
+        "branch": "Hyderabad",
+        "customer": "Raghu Agri Care",
+        "account": "Sales",
+        "contraaccount": "HDFC Bank",
+        "debit": "0",
+        "credit": "1,000.00",
+    },
+    {
+        "voucherlineno": 3,
+        "voucherno": 75,
+        "date": "2026-04-01",
+        "branch": "Hyderabad",
+        "customer": "Raghu Agri Care",
+        "account": "CGST Output",
+        "contraaccount": "HDFC Bank",
+        "debit": "0",
+        "credit": "₹90.00",
+    },
+    {
+        "voucherlineno": 4,
+        "voucherno": 75,
+        "date": "2026-04-01",
+        "branch": "Hyderabad",
+        "customer": "Raghu Agri Care",
+        "account": "SGST Output",
+        "contraaccount": "HDFC Bank",
+        "debit": "0",
+        "credit": "90.00",
+    },
+    {
+        "voucherlineno": 1,
+        "voucherno": 76,
+        "date": "2026-04-02",
+        "branch": "Bengaluru",
+        "customer": "Sai Seeds",
+        "account": "Round Off",
+        "contraaccount": "Sales",
+        "debit": "0",
+        "credit": "0",
+    },
+    {
+        "voucherlineno": 1,
+        "voucherno": 77,
+        "date": "2026-04-03",
+        "branch": "Bengaluru",
+        "customer": "Sai Seeds",
+        "account": "IGST Output",
+        "contraaccount": "Sales",
+        "debit": "0",
+        "credit": "180.00",
+    },
+    {
+        "voucherlineno": 1,
+        "voucherno": 88,
+        "date": "2026-04-04",
+        "branch": "Hyderabad",
+        "customer": "Duplicate Customer",
+        "account": "Sales",
+        "contraaccount": "Cash",
+        "debit": "0",
+        "credit": "50",
+    },
+    {
+        "voucherlineno": 1,
+        "voucherno": 88,
+        "date": "2026-04-04",
+        "branch": "Hyderabad",
+        "customer": "Duplicate Customer",
+        "account": "Sales",
+        "contraaccount": "Cash",
+        "debit": "0",
+        "credit": "50",
+    },
+]
+
+
+def run_ledger_prompt(question: str) -> tuple[object, pd.DataFrame]:
+    df = pd.DataFrame(LEDGER_ROWS)
+    plan = build_query_plan(
+        {"intent_type": "clarification", "clarifying_question": "Which field?"},
+        question,
+        set(df.columns),
+    )
+    validate_readonly_sql(plan.sql)
+    con = duckdb.connect(":memory:")
+    try:
+        con.register("orders", df)
+        result = con.execute(plan.sql, plan.params).fetchdf()
+    finally:
+        con.close()
+    return plan, result
 
 
 class _PdfPage:
@@ -122,6 +263,22 @@ class PromptTests(unittest.TestCase):
         self.assertIn("&lt;3", prompt)
         self.assertIn("&quot;products&quot;", prompt)
 
+    def test_intent_prompt_preserves_question_when_mcp_summary_is_large(self) -> None:
+        question = "Which customer has the highest order value?"
+        prompt = build_intent_prompt(
+            schema_context={"columns": [{"name": "cust_name"}, {"name": "total_order_val"}]},
+            conversation_summary="",
+            user_question=question,
+            char_budget=1800,
+            mcp_summary="\n".join(f"  - warehouse_tool_{i}: tool metadata" for i in range(400)),
+            local_source_name="Orders.csv",
+        )
+
+        self.assertLessEqual(len(prompt), 1800)
+        self.assertIn("<truncation_notice>", prompt)
+        self.assertIn(f"<user_question>{xml_escape(question)}</user_question>", prompt)
+        self.assertIn("<output_contract>", prompt)
+
 
 class QueryPlanTests(unittest.TestCase):
     def test_top_three_prefers_table(self) -> None:
@@ -130,6 +287,19 @@ class QueryPlanTests(unittest.TestCase):
         self.assertIn("LIMIT 3", plan.sql)
         df = pd.DataFrame({"prod_category": ["A", "B", "C"], "revenue": [3, 2, 1]})
         self.assertEqual(choose_visualization("give me top 3 categories by revenue", intent, df), "table")
+
+    def test_wide_single_row_prefers_table(self) -> None:
+        intent = {"intent_type": "aggregate", "requested_visualization": "bar"}
+        df = pd.DataFrame([{
+            "voucherlineno": 1,
+            "voucherseries": "PR",
+            "voucherno": 10,
+            "date": "2026-06-29",
+            "branch": "Hyderabad",
+            "account": "Cash",
+        }])
+
+        self.assertEqual(choose_visualization("select rows from VoucherSeries = PR", intent, df), "table")
 
     def test_trend_prefers_line(self) -> None:
         intent = heuristic_intent("monthly revenue trend", ALLOWED)
@@ -255,6 +425,170 @@ class QueryPlanTests(unittest.TestCase):
             con.close()
 
         self.assertEqual(result, (49574.0, 21350))
+
+    def test_ledger_report_prompts_compile_and_execute(self) -> None:
+        cases = [
+            ("List all ledger entries for Voucher No 75 including debit, credit, account, contra account, and date.", "Voucher Ledger Entries"),
+            ("Show voucher ledger entries with account, contra account, debit and credit.", "Voucher Ledger Entries"),
+            ("Find all transactions involving HDFC Bank and summarize debit and credit values by account.", "Account Relationship Summary"),
+            ("Calculate total GST using CGST, SGST and IGST accounts.", "GST Account Totals"),
+            ("Are debits and credits balanced at voucher level?", "Voucher Balance Validation"),
+            ("Run voucher balance validation.", "Voucher Balance Validation"),
+            ("Identify duplicate vouchers or ledger entries.", "Duplicate Ledger Entries"),
+            ("Which customer contributes the highest percentage of total business?", "Customer Business Contribution"),
+            ("Provide branch-wise sales, GST and customer count.", "Branch Sales GST And Customers"),
+            ("Identify zero-value transactions.", "Zero-Value Ledger Entries"),
+            ("Generate 5 business insights supported by numbers.", "Ledger Business Insights"),
+        ]
+
+        for question, title in cases:
+            with self.subTest(question=question):
+                plan, result = run_ledger_prompt(question)
+                self.assertEqual(plan.title, title)
+                self.assertFalse(result.empty)
+
+    def test_ledger_prompt_outputs_match_expected_finance_shapes(self) -> None:
+        voucher_plan, voucher_rows = run_ledger_prompt("List all ledger entries for Voucher No 75 including debit, credit, account, contra account, and date.")
+        self.assertNotIn("GROUP BY", voucher_plan.sql)
+        self.assertEqual(voucher_rows["voucherno"].tolist(), [75, 75, 75, 75])
+
+        hdfc_plan, hdfc_rows = run_ledger_prompt("Find all transactions involving HDFC Bank and summarize debit and credit values by account.")
+        self.assertEqual(hdfc_plan.params, ["%hdfc%", "%hdfc%"])
+        self.assertEqual(hdfc_rows["total_credit"].sum(), 1180.0)
+        self.assertEqual(hdfc_rows["total_debit"].sum(), 1000.0)
+
+        gst_plan, gst_rows = run_ledger_prompt("Calculate total GST using CGST, SGST and IGST accounts.")
+        self.assertNotIn("COUNT(*) AS count", gst_plan.sql)
+        self.assertEqual(dict(zip(gst_rows["gst_component"], gst_rows["total_credit"])), {"CGST": 90.0, "IGST": 180.0, "SGST": 90.0})
+
+        duplicate_plan, duplicate_rows = run_ledger_prompt("Identify duplicate vouchers or ledger entries.")
+        self.assertIn("HAVING COUNT(*) > 1", duplicate_plan.sql)
+        self.assertEqual(duplicate_rows["voucherno"].tolist(), [88])
+        self.assertEqual(duplicate_rows["duplicate_count"].tolist(), [2])
+
+        branch_plan, branch_rows = run_ledger_prompt("Provide branch-wise sales, GST and customer count.")
+        self.assertIn("total_sales", branch_rows.columns)
+        hyderabad = branch_rows[branch_rows["branch"] == "Hyderabad"].iloc[0]
+        self.assertEqual(hyderabad["total_sales"], 1100.0)
+        self.assertEqual(hyderabad["total_gst"], 180.0)
+        self.assertEqual(hyderabad["customer_count"], 2)
+
+        insights_plan, insights_rows = run_ledger_prompt("Generate 5 business insights supported by numbers.")
+        self.assertEqual(insights_plan.title, "Ledger Business Insights")
+        self.assertIn("Total vouchers", insights_rows["insight"].tolist())
+        self.assertTrue(insights_rows["value"].notna().all())
+
+    def test_ledger_contact_info_prompt_does_not_trigger_finance_plan(self) -> None:
+        plan = build_ledger_query_plan(
+            "Provide GSTIN, PAN, email, mobile and contact person for Raghu Agri Care.",
+            set(pd.DataFrame(LEDGER_ROWS).columns),
+        )
+
+        self.assertIsNone(plan)
+
+    def test_api_source_coerces_comma_and_currency_numeric_columns(self) -> None:
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> list[dict[str, object]]:
+                return [
+                    {"VoucherNo": 1, "Debit": "1,200.50", "Credit": "₹90.00", "Account": "CGST Output"},
+                    {"VoucherNo": 2, "Debit": "0", "Credit": "180.00", "Account": "Sales"},
+                ]
+
+        with patch("requests.get", return_value=Response()):
+            source = prepare_api_source("https://example.test/table/Ledger_Table", logger=None)
+
+        self.assertIsNotNone(source.dataframe)
+        self.assertTrue(math.isclose(float(source.dataframe["debit"].iloc[0]), 1200.5))
+        self.assertTrue(math.isclose(float(source.dataframe["credit"].iloc[0]), 90.0))
+
+    def test_api_source_redacts_url_in_display_name_and_logs(self) -> None:
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> list[dict[str, object]]:
+                return [{"Order ID": 1, "Sales": "1,200.50"}]
+
+        class Logger:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            def info(self, message: str, *args: object) -> None:
+                self.messages.append(message % args)
+
+        logger = Logger()
+
+        with patch("requests.get", return_value=Response()):
+            source = prepare_api_source(
+                "https://example.test/table/Ledger_Table?api_key=secret-token&tenant=acme",
+                logger=logger,
+            )
+
+        self.assertEqual(source.display_name, "https://example.test/table/Ledger_Table")
+        logged = "\n".join(logger.messages)
+        self.assertNotIn("secret-token", logged)
+        self.assertNotIn("api_key", logged)
+        self.assertIn("https://example.test/table/Ledger_Table", logged)
+
+    def test_api_source_accepts_nested_json_list(self) -> None:
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {
+                    "status": "ok",
+                    "business_data": {
+                        "Ledger_Table": [
+                            {"VoucherNo": 1, "Debit": "1,200.50"},
+                            {"VoucherNo": 2, "Debit": "90.00"},
+                        ]
+                    },
+                }
+
+        with patch("requests.get", return_value=Response()):
+            source = prepare_api_source("https://example.test/business_data", logger=None)
+
+        self.assertIsNotNone(source.dataframe)
+        self.assertEqual(len(source.dataframe), 2)
+        self.assertIn("voucherno", source.dataframe.columns)
+        self.assertTrue(math.isclose(float(source.dataframe["debit"].iloc[0]), 1200.5))
+
+    def test_api_source_accepts_object_map_records(self) -> None:
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {
+                    "row_1": {"Account": "Sales", "Credit": "180.00"},
+                    "row_2": {"Account": "Cash", "Credit": "0"},
+                }
+
+        with patch("requests.get", return_value=Response()):
+            source = prepare_api_source("https://example.test/accounts", logger=None)
+
+        self.assertIsNotNone(source.dataframe)
+        self.assertEqual(len(source.dataframe), 2)
+        self.assertEqual(source.dataframe["account"].tolist(), ["Sales", "Cash"])
+
+    def test_api_source_accepts_single_json_object(self) -> None:
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {"status": "ok", "table_count": 695}
+
+        with patch("requests.get", return_value=Response()):
+            source = prepare_api_source("https://example.test/tables/summary", logger=None)
+
+        self.assertIsNotNone(source.dataframe)
+        self.assertEqual(len(source.dataframe), 1)
+        self.assertEqual(source.dataframe["status"].iloc[0], "ok")
 
 
 class PdfSourceTests(unittest.TestCase):

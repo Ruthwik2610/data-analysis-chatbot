@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Bell, LogOut, Menu, Moon, Settings, Sun, UserRound, Zap } from "lucide-react";
+import { Bell, Database, Layers3, LogOut, Menu, Moon, Settings, Sun, UserRound, Zap } from "lucide-react";
 import type { Source } from "@/lib/types";
 import { getTheme, toggleTheme, type Theme } from "@/lib/theme";
 
@@ -17,9 +17,30 @@ interface TopbarProps {
   sidebarOpen?: boolean;
   onOpenSettings?: () => void;
   isAdmin?: boolean;
+  sourceCount?: number;
+  sourcesOpen?: boolean;
+  onToggleSources?: () => void;
+  artifactCount?: number;
+  artifactsOpen?: boolean;
+  onToggleArtifacts?: () => void;
 }
 
-export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar, sidebarOpen, onOpenSettings, isAdmin = false }: TopbarProps) {
+export function Topbar({
+  title,
+  projectName,
+  userEmail,
+  onLogout,
+  onOpenSidebar,
+  sidebarOpen,
+  onOpenSettings,
+  isAdmin = false,
+  sourceCount = 0,
+  sourcesOpen = false,
+  onToggleSources,
+  artifactCount = 0,
+  artifactsOpen = false,
+  onToggleArtifacts,
+}: TopbarProps) {
   const [theme, setThemeState] = useState<Theme>("light");
 
   useEffect(() => {
@@ -30,6 +51,7 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
     toggleTheme();
     setThemeState((t) => (t === "dark" ? "light" : "dark"));
   };
+  const themeToggleLabel = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
 
   return (
     <div
@@ -41,6 +63,7 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
         WebkitBackdropFilter: "blur(12px)",
       }}
     >
+      <div className="chat-content-frame flex min-w-0 flex-1 items-center justify-between gap-4">
       <div className="flex min-w-0 flex-1 items-center gap-3">
         {!sidebarOpen && (
           <button
@@ -73,8 +96,61 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
 
       <div className="flex items-center gap-2">
       <button
+        type="button"
+        onClick={onToggleSources}
+        aria-label="Toggle sources panel"
+        aria-pressed={sourcesOpen}
+        title="Sources"
+        className="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold transition-colors"
+        style={{
+          background: sourcesOpen ? "var(--color-background-info)" : "transparent",
+          border: `0.5px solid ${sourcesOpen ? "var(--color-border-info)" : "var(--color-border-secondary)"}`,
+          color: sourcesOpen ? "var(--color-text-info)" : "var(--color-text-secondary)",
+          opacity: sourceCount > 0 ? 1 : 0.58,
+        }}
+      >
+        <Database size={14} strokeWidth={1.8} />
+        <span className="hidden sm:inline">Sources</span>
+        <span
+          className="rounded-full px-1.5 py-[1px] text-[10px] tabular-nums"
+          style={{
+            background: "var(--color-background-secondary)",
+            color: "var(--color-text-tertiary)",
+          }}
+        >
+          {sourceCount}
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={onToggleArtifacts}
+        aria-label="Toggle artifacts panel"
+        aria-pressed={artifactsOpen}
+        title="Artifacts"
+        className="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold transition-colors"
+        style={{
+          background: artifactsOpen ? "var(--color-background-info)" : "transparent",
+          border: `0.5px solid ${artifactsOpen ? "var(--color-border-info)" : "var(--color-border-secondary)"}`,
+          color: artifactsOpen ? "var(--color-text-info)" : "var(--color-text-secondary)",
+          opacity: artifactCount > 0 ? 1 : 0.58,
+        }}
+      >
+        <Layers3 size={14} strokeWidth={1.8} />
+        <span className="hidden sm:inline">Artifacts</span>
+        <span
+          className="rounded-full px-1.5 py-[1px] text-[10px] tabular-nums"
+          style={{
+            background: "var(--color-background-secondary)",
+            color: "var(--color-text-tertiary)",
+          }}
+        >
+          {artifactCount}
+        </span>
+      </button>
+      <button
         onClick={handleToggle}
-        title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        title={themeToggleLabel}
+        aria-label={themeToggleLabel}
         className="h-9 w-9 rounded-full transition-colors flex-shrink-0 flex items-center justify-center"
         style={{
           background: "transparent",
@@ -112,6 +188,7 @@ export function Topbar({ title, projectName, userEmail, onLogout, onOpenSidebar,
             <LogOut size={13} /> Logout
           </button>
         </div>
+      </div>
       </div>
       </div>
     </div>

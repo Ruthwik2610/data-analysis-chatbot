@@ -80,11 +80,145 @@ describe("MessageList markdown rendering", () => {
     );
 
     expect(screen.getByText(/Revenue by category/)).toBeInTheDocument();
-    expect(screen.getByTitle("Download CSV")).toBeInTheDocument();
+    expect(screen.getByTitle("Export result")).toBeInTheDocument();
     expect(screen.getByTitle("Show table")).toBeInTheDocument();
   });
 
-  it("uses a responsive layout for empty-state action cards", () => {
+  it("keeps a single structured graph inline even when artifacts are enabled", () => {
+    const onOpenArtifact = vi.fn();
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here is the revenue chart.",
+        result: {
+          title: "Revenue by category",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select category, revenue from sales",
+          how: "Grouped revenue by category.",
+          columns: ["category", "revenue"],
+          rows: [["Classic", 206987], ["Veggie", 176577]],
+          row_count: 2,
+          truncated: false,
+        },
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+        onOpenArtifact={onOpenArtifact}
+      />,
+    );
+
+    expect(screen.getByTitle("Export result")).toBeInTheDocument();
+    expect(screen.queryByText(/open side panel/i)).not.toBeInTheDocument();
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+  });
+
+  it("keeps successful result cards from showing a processing fault", () => {
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "I couldn't answer that from the available data. The issue was logged for review.",
+        error: true,
+        result: {
+          title: "Total order value by payment mode",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select payment_mode, total_order_val from orders",
+          how: "Source: API direct. Model: openrouter/deepseek/deepseek-v4-flash. Metric: sum(total_order_val); grouped by: payment_mode; filters: 0 parameter(s). Display: bar.",
+          columns: ["payment_mode", "total_order_val"],
+          rows: [["COD", 10200000], ["UPI", 8700000]],
+          row_count: 2,
+          truncated: false,
+        },
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Total order value by payment mode/)).toBeInTheDocument();
+    expect(screen.queryByText("Processing Fault")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Source: API direct/)).not.toBeInTheDocument();
+  });
+
+  it("routes multiple structured graphs from one answer to artifacts", () => {
+    const onOpenArtifact = vi.fn();
+    const messages: Message[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here are the revenue charts.",
+        result: {
+          title: "Revenue by category",
+          viz: "bar",
+          elapsed_ms: 12,
+          sql: "select category, revenue from sales",
+          how: "Grouped revenue by category.",
+          columns: ["category", "revenue"],
+          rows: [["Classic", 206987], ["Veggie", 176577]],
+          row_count: 2,
+          truncated: false,
+        },
+        artifacts: [
+          {
+            title: "Revenue by category",
+            viz: "bar",
+            elapsed_ms: 12,
+            sql: "select category, revenue from sales",
+            how: "Grouped revenue by category.",
+            columns: ["category", "revenue"],
+            rows: [["Classic", 206987], ["Veggie", 176577]],
+            row_count: 2,
+            truncated: false,
+          },
+          {
+            title: "Revenue by month",
+            viz: "line",
+            elapsed_ms: 14,
+            sql: "select month, revenue from sales",
+            how: "Grouped revenue by month.",
+            columns: ["month", "revenue"],
+            rows: [["2026-05-01", 817860], ["2026-06-01", 912000]],
+            row_count: 2,
+            truncated: false,
+          },
+        ],
+      },
+    ];
+
+    render(
+      <MessageList
+        messages={messages}
+        loading={false}
+        onPendingChoice={vi.fn()}
+        onPickFile={vi.fn()}
+        onConnectClick={vi.fn()}
+        onOpenArtifact={onOpenArtifact}
+      />,
+    );
+
+    expect(screen.queryByTitle("Export result")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /2 artifacts/i }));
+    expect(onOpenArtifact).toHaveBeenCalledWith("a1:artifact:0");
+  });
+
+  it("keeps the empty-state hero clean so the composer can sit below the heading", () => {
     render(
       <MessageList
         messages={[]}
@@ -95,9 +229,9 @@ describe("MessageList markdown rendering", () => {
       />,
     );
 
-    // The component uses flex-wrap justify-center gap-4 for the action buttons
-    const actionContainer = screen.getByText("Upload Source").closest("div");
-    expect(actionContainer).toHaveClass("flex", "flex-wrap", "justify-center");
+    expect(screen.queryByText("Upload Source")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connect context")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Enterprise Grade/i)).not.toBeInTheDocument();
   });
 
   it("renders the premium Unipro empty-state hero", () => {
@@ -113,7 +247,6 @@ describe("MessageList markdown rendering", () => {
 
     expect(screen.getByRole("heading", { name: /The intelligent layer for your business data/i })).toBeInTheDocument();
     expect(screen.getByText(/Connect your CSVs, Databases, or APIs and start chatting/i)).toBeInTheDocument();
-    expect(screen.getByText(/Enterprise Grade • Secure • 100% Grounded/i)).toBeInTheDocument();
   });
 
   it("shows answer actions for assistant text and project saves", () => {
@@ -132,6 +265,7 @@ describe("MessageList markdown rendering", () => {
     expect(screen.getByRole("button", { name: "Copy answer" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save to project notes" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Ask follow-up" })).toBeInTheDocument();
+    expect(screen.getByText("Revenue increased by 12%.").closest(".chat-content-frame")).not.toBeNull();
   });
 
   it("lets users rerun the previous question without showing debug reporting in chat", () => {

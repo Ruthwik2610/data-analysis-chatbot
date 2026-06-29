@@ -2,6 +2,10 @@ import type { Source, Connector, ChatSummary, SSEEvent, UploadResponse, MCPConne
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 const TOKEN_KEY = "datachat_user_token";
+export const GENERIC_API_ERROR_MESSAGE = "Something went wrong. The error was logged for review.";
+const GENERIC_THINKING_STEP = "Working on your answer";
+const INTERNAL_THINKING_RE =
+  /\b(?:select|with)\b[\s\S]{0,240}\b(?:from|where|join|group\s+by|order\s+by|limit)\b|\b(?:insert|update|delete|create|drop|alter)\b[\s\S]{0,160}\b(?:table|into|from|set|where)\b|\b(?:api[_-]?key|token|secret|password|credential|bearer|traceback|stack trace)\b/i;
 
 export function getAuthToken(): string {
   if (typeof window === "undefined" || typeof localStorage?.getItem !== "function") return "";
@@ -32,25 +36,37 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
   return h;
 }
 
+async function throwApiError(res: Response): Promise<never> {
+  await res.text().catch(() => "");
+  console.error("API request failed", { status: res.status, statusText: res.statusText });
+  throw new Error(GENERIC_API_ERROR_MESSAGE);
+}
+
+function sanitizeStreamEvent(event: { event: string; data: any }): { event: string; data: any } {
+  if (event.event !== "thinking" || typeof event.data?.step !== "string") return event;
+  if (!INTERNAL_THINKING_RE.test(event.data.step)) return event;
+  return { ...event, data: { ...event.data, step: GENERIC_THINKING_STEP } };
+}
+
 async function jpost<T>(path: string, body: any): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error((await res.text()) || `${res.status}`);
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
 async function jget<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
 async function jdelete(path: string): Promise<void> {
   const res = await fetch(`${BASE}${path}`, { method: "DELETE", headers: authHeaders() });
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) await throwApiError(res);
 }
 
 export const api = {
@@ -70,7 +86,7 @@ export const api = {
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ status }),
     }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      if (!r.ok) await throwApiError(r);
       return r.json();
     }),
   getUserAnalytics: () => jget<any>("/admin/user-analytics"),
@@ -99,8 +115,8 @@ export const api = {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve(xhr.response);
         } else {
-          const detail = xhr.response?.detail || xhr.statusText || `${xhr.status}`;
-          reject(new Error(typeof detail === "string" ? detail : JSON.stringify(detail)));
+          console.error("Upload request failed", { status: xhr.status, statusText: xhr.statusText });
+          reject(new Error(GENERIC_API_ERROR_MESSAGE));
         }
       };
       xhr.onerror = () => reject(new Error("Network error during upload"));
@@ -127,7 +143,7 @@ export const api = {
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ instructions }),
     }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      if (!r.ok) await throwApiError(r);
       return r.json() as Promise<InstructionsResponse>;
     }),
   applySourceClarifications: (sourceId: string, answers: Record<string, any>) =>
@@ -150,13 +166,13 @@ export const api = {
   listMCPConnectors: () => jget<MCPConnector[]>("/mcp/connectors"),
   addMCPConnector: (url: string, name?: string, options?: { scope?: "global" | "project"; project_id?: string | null }) =>
     jpost<MCPConnector>("/mcp/connectors", { url, name, ...(options || {}) }),
-  updateMCPConnector: (id: string, body: { url?: string; name?: string }) =>
+  updateMCPConnector: (id: string, body: { url?: string; name?: string; retry?: boolean }) =>
     fetch(`${BASE}/mcp/connectors/${id}`, {
       method: "PUT",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      if (!r.ok) await throwApiError(r);
       return r.json() as Promise<MCPConnector>;
     }),
   removeMCPConnector: (id: string) => jdelete(`/mcp/connectors/${id}`),
@@ -175,7 +191,7 @@ export const api = {
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      if (!r.ok) await throwApiError(r);
       return r.json() as Promise<WorkbookView>;
     }),
   deleteWorkbookView: (id: string, viewName: string) =>
@@ -190,7 +206,7 @@ export const api = {
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      if (!r.ok) await throwApiError(r);
       return r.json() as Promise<Project>;
     }),
   deleteProject: (id: string) => jdelete(`/projects/${id}`),
@@ -202,7 +218,7 @@ export const api = {
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ instructions }),
     }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.text()) || `${r.status}`);
+      if (!r.ok) await throwApiError(r);
       return r.json() as Promise<InstructionsResponse>;
     }),
   rebuildProjectProfile: (projectId: string) =>
@@ -227,7 +243,7 @@ export const api = {
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ project_id: projectId }),
     }).then((r) => {
-      if (!r.ok) throw new Error(`${r.status}`);
+      if (!r.ok) return throwApiError(r);
       return r.json();
     }),
   postFeedback: (body: { chat_id?: string | null; message_id?: string | null; rating: number; comment?: string; category?: string }) =>
@@ -271,8 +287,8 @@ export async function* streamQuery(
     signal,
   });
   if (!res.ok || !res.body) {
-    const err = await res.text().catch(() => "");
-    throw new Error(err || `${res.status}`);
+    if (!res.ok) await throwApiError(res);
+    throw new Error(GENERIC_API_ERROR_MESSAGE);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -289,7 +305,7 @@ export async function* streamQuery(
       const block = buffer.slice(0, m.index);
       buffer = buffer.slice(m.index + m[0].length);
       const ev = parseSSEBlock(block);
-      if (ev) yield ev as SSEEvent;
+      if (ev) yield sanitizeStreamEvent(ev) as SSEEvent;
     }
   }
 }
