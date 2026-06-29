@@ -91,6 +91,13 @@ Codex should review Jules output before anything is merged or deployed:
 4. Push only review fixes or follow-up commits that are backed by passing checks.
 5. Leave production deployment to the normal VPS flow below.
 
+If the user explicitly asks Codex to review Jules edits and carry the update through to production, Codex should:
+
+1. Apply any needed follow-up fixes locally in this repository first.
+2. Verify those fixes with the relevant local checks above before making positive claims.
+3. Sync the validated changes to `datachat-vps` using the normal deploy flow in this file.
+4. Restart the affected service(s) and verify the intended behavior on the VPS.
+
 ## Nightly Automation Intent
 
 Use Jules scheduled tasks for background code review or small maintenance PRs. Use Codex nightly automation to review completed Jules PRs in the early morning, run checks, and push safe follow-up fixes. Do not auto-deploy Jules output to production unless a separate user request explicitly asks for deployment.
