@@ -20,6 +20,7 @@ import sys
 import time
 import uuid
 import zipfile
+from datetime import date
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
@@ -76,6 +77,7 @@ class MCPConnect(BaseModel):
 class MCPUpdate(BaseModel):
     name: str | None = None
     url: str | None = None
+    retry: bool = False
 
 
 class CloudflareWorkbookDeploy(BaseModel):
@@ -206,7 +208,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.agents import DomainAgent, get_agent_for_domain
 from src.config import AppConfig
-from src.travel_orchestrator import TravelOrchestrator
+from src.travel_orchestrator import AIRLINE_CLARIFY_MARKER, TravelOrchestrator
 from src.data_sources import (
     DataSource,
     dataframe_to_duckdb_source,
@@ -219,10 +221,10 @@ from src.data_sources import (
     prepare_local_file_source,
     prepare_pdf_source,
 )
-from src.logging_config import log_event, setup_loggers
+from src.logging_config import log_event, redact_url, setup_loggers
 from src.mcp_pool import extract_text_content, get_pool, parse_tool_result_to_dataframe
 from src.model_router import LLMRouter, LLMUnavailable
-from src.prompting import build_answer_prompt, build_local_agent_system_prompt
+from src.prompting import build_answer_prompt, build_local_agent_system_prompt, estimate_tokens
 from src.project_intelligence import (
     apply_instruction_rules,
     build_instruction_context,
@@ -232,6 +234,7 @@ from src.project_intelligence import (
     normalize_instructions,
 )
 from src.query_engine import (
+    build_ledger_query_plan,
     build_query_plan,
     build_total_plan,
     heuristic_intent,
@@ -259,6 +262,7 @@ DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "2GB")
 DUCKDB_THREADS = max(1, int(os.getenv("DUCKDB_THREADS", "1")))
 TEST_USER_EMAIL = os.getenv("TEST_USER_EMAIL", "").strip().lower()
 TEST_USER_PASSWORD = os.getenv("TEST_USER_PASSWORD", "").strip()
+DEFAULT_TEST_ACCOUNT_EMAIL = "test@unipro.ai"
 
 
 def _cleanup_pending(max_age_seconds: int = PENDING_TTL_SECONDS) -> None:
@@ -330,6 +334,22 @@ MODEL_PRESETS = {
     },
 }
 _ROUTER_CACHE: dict[str, LLMRouter] = {}
+_OPENROUTER_MODEL_METADATA_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_OPENROUTER_MODEL_METADATA_TTL_SECONDS = 24 * 60 * 60
+AUTO_MODEL_COMPLEXITY_TERMS = (
+    "compare",
+    "why",
+    "anomaly",
+    "forecast",
+    "trend",
+    "correlation",
+    "root cause",
+    "across sources",
+    "reconcile",
+    "diagnose",
+    "variance",
+    "cohort",
+)
 
 
 def _model_preset_for_mode(mode: str | None) -> dict[str, str]:
@@ -352,7 +372,226 @@ def _router_for_model_mode(mode: str | None) -> LLMRouter:
     return _ROUTER_CACHE[key]
 
 
+def _strip_openrouter_model_prefix(model: str) -> str:
+    return model[len("openrouter/"):] if model.lower().startswith("openrouter/") else model
+
+
+def _openrouter_model_metadata(model: str) -> dict[str, Any] | None:
+    if not CONFIG.openrouter_api_key:
+        return None
+    model_slug = _strip_openrouter_model_prefix(model)
+    now = time.time()
+    cached = _OPENROUTER_MODEL_METADATA_CACHE.get(model_slug)
+    if cached and now - cached[0] < _OPENROUTER_MODEL_METADATA_TTL_SECONDS:
+        return cached[1]
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"https://openrouter.ai/api/v1/model/{model_slug}",
+            headers={"Authorization": f"Bearer {CONFIG.openrouter_api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read())
+        data = payload.get("data") if isinstance(payload, dict) else None
+        metadata = data if isinstance(data, dict) else None
+    except Exception as exc:
+        log_event(LOGGERS["errors"], "openrouter_model_metadata_error", model=model, error=str(exc))
+        metadata = None
+    _OPENROUTER_MODEL_METADATA_CACHE[model_slug] = (now, metadata)
+    return metadata
+
+
+def _estimate_model_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    metadata = _openrouter_model_metadata(model)
+    pricing = metadata.get("pricing") if metadata else None
+    if not isinstance(pricing, dict):
+        return None
+    try:
+        prompt_price = float(pricing.get("prompt") or 0)
+        completion_price = float(pricing.get("completion") or 0)
+    except (TypeError, ValueError):
+        return None
+    return (prompt_tokens * prompt_price) + (completion_tokens * completion_price)
+
+
+def _schema_column_count(schema: dict[str, Any] | None) -> int:
+    columns = (schema or {}).get("columns") or []
+    return len(columns) if isinstance(columns, list) else 0
+
+
+def _selected_schema_column_count(selected_sources: list[tuple[dict[str, Any], DataSource]]) -> int:
+    if not selected_sources:
+        return 0
+    return max(_schema_column_count(source.schema) for _, source in selected_sources)
+
+
+def _estimate_query_context_tokens(
+    *,
+    question: str,
+    selected_sources: list[tuple[dict[str, Any], DataSource]],
+    history: list[dict[str, Any]],
+) -> int:
+    schema_bits = [
+        {
+            "name": row.get("name"),
+            "kind": row.get("kind"),
+            "schema": source.schema,
+        }
+        for row, source in selected_sources
+    ]
+    context = "\n".join([
+        question,
+        conversation_summary(history),
+        json.dumps(schema_bits, default=str)[:20000],
+    ])
+    return estimate_tokens(context)
+
+
+def _resolve_query_model_mode(
+    *,
+    requested_mode: str | None,
+    question: str,
+    selected_sources: list[tuple[dict[str, Any], DataSource]],
+    selected_mcp_count: int,
+    is_travel_query: bool,
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requested = (requested_mode or "auto").strip().lower()
+    if requested in {"flash", "pro"}:
+        preset = _model_preset_for_mode(requested)
+        return {
+            "requested_model_mode": requested,
+            "effective_model_mode": requested,
+            "model": preset["model"],
+            "selection_reason": f"Manual {requested} mode",
+            "complexity_score": None,
+            "estimated_prompt_tokens": _estimate_query_context_tokens(
+                question=question,
+                selected_sources=selected_sources,
+                history=history,
+            ),
+        }
+
+    requested = "auto"
+    score = 0
+    reasons: list[str] = []
+    if selected_mcp_count > 0:
+        score += 4
+        reasons.append("selected MCP")
+    if len(selected_sources) > 1:
+        score += 4
+        reasons.append("multiple sources")
+    if is_travel_query:
+        score += 4
+        reasons.append("travel orchestration")
+
+    prompt_tokens = _estimate_query_context_tokens(
+        question=question,
+        selected_sources=selected_sources,
+        history=history,
+    )
+    schema_columns = _selected_schema_column_count(selected_sources)
+    if prompt_tokens > 12000 or schema_columns > 80:
+        score += 4
+        reasons.append("large context or schema")
+    if len(question.split()) > 80:
+        score += 2
+        reasons.append("long question")
+    lowered = question.lower()
+    matched_terms = [term for term in AUTO_MODEL_COMPLEXITY_TERMS if term in lowered]
+    if matched_terms:
+        score += min(4, 2 * len(matched_terms))
+        reasons.append("diagnostic or comparative wording")
+
+    effective = "pro" if score >= 4 else "flash"
+    preset = _model_preset_for_mode(effective)
+    reason_text = f"Auto selected {effective.capitalize()} (score {score}"
+    if reasons:
+        reason_text += f": {', '.join(reasons)}"
+    reason_text += ")"
+    return {
+        "requested_model_mode": requested,
+        "effective_model_mode": effective,
+        "model": preset["model"],
+        "selection_reason": reason_text,
+        "complexity_score": score,
+        "estimated_prompt_tokens": prompt_tokens,
+    }
+
+
+def _token_usage_kwargs(
+    model_selection: dict[str, Any],
+    *,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> dict[str, Any]:
+    estimated_cost = _estimate_model_cost_usd(model, prompt_tokens, completion_tokens)
+    model_selection["estimated_cost_usd"] = estimated_cost
+    return {
+        "requested_model_mode": model_selection.get("requested_model_mode"),
+        "effective_model_mode": model_selection.get("effective_model_mode"),
+        "selection_reason": model_selection.get("selection_reason"),
+        "estimated_cost_usd": estimated_cost,
+    }
+
+
+def _payload_model_selection(model_selection: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "requested_model_mode": model_selection.get("requested_model_mode"),
+        "effective_model_mode": model_selection.get("effective_model_mode"),
+        "model": model_selection.get("model"),
+        "selection_reason": model_selection.get("selection_reason"),
+        "estimated_prompt_tokens": model_selection.get("estimated_prompt_tokens"),
+        "estimated_cost_usd": model_selection.get("estimated_cost_usd"),
+    }
+
+
+def _public_error_event(message: str) -> dict[str, str]:
+    return {"event": "error", "data": json.dumps({"message": message})}
+
+
+def _public_query_step(_query: str) -> str:
+    return "Querying workspace"
+
+
+def _public_tool_call_step(_tool_name: str, connector_name: str, _args: dict[str, Any] | None = None) -> str:
+    return f"Fetching data from {connector_name or 'connected source'}"
+
+
 PUBLIC_PATHS = {"/health", "/auth/login", "/auth/register", "/admin/login"}
+
+TRAVEL_KEYWORDS = (
+    "flight", "airline", "airport", "fly ", "depart",
+    "cabin class", "economy class", "business class",
+    "travel to", "itinerary", " pnr ",
+    "hotel", "hotels", "stay", "lodging",
+    "accommodation", "check-in", "check in",
+)
+
+
+def _is_reply_to_airline_clarify(history: list[dict[str, Any]]) -> bool:
+    for msg in reversed(history):
+        role = str(msg.get("role") or "").lower()
+        if role == "user":
+            continue
+        if role == "assistant":
+            return AIRLINE_CLARIFY_MARKER in str(msg.get("content") or "")
+    return False
+
+
+def _is_travel_fast_path(question: str, project_category: str, history: list[dict[str, Any]]) -> bool:
+    lowered = question.lower()
+    return (
+        project_category == "travel"
+        or any(kw in lowered for kw in TRAVEL_KEYWORDS)
+        or _is_reply_to_airline_clarify(history)
+    )
+
+
+def _query_requires_source(question: str, project_category: str, history: list[dict[str, Any]], has_mcp: bool) -> bool:
+    return not has_mcp and not _is_travel_fast_path(question, project_category, history)
 
 
 @contextlib.asynccontextmanager
@@ -400,7 +639,9 @@ app.add_middleware(
 )
 
 from backend.routes.travel_routes import router as travel_router
+from backend.routes.travel_agent_routes import router as travel_agent_router
 app.include_router(travel_router)
+app.include_router(travel_agent_router)
 
 
 @app.middleware("http")
@@ -411,6 +652,7 @@ async def auth_middleware(request: Request, call_next):
     if (
         request.method == "OPTIONS"
         or path in PUBLIC_PATHS
+        or path == "/api/travel/agent/plan"
         or path.startswith("/admin/")
         or path.startswith("/mcp/workbooks/")
     ):
@@ -427,8 +669,6 @@ async def auth_middleware(request: Request, call_next):
     session = DB.get_active_session(str(payload.get("jti") or ""))
     if not session or session["user_id"] != payload.get("sub"):
         return JSONResponse(status_code=401, content={"detail": "Session expired"})
-    if session.get("ip_address") and session["ip_address"] != _client_ip(request):
-        return JSONResponse(status_code=401, content={"detail": "Session changed networks. Please log in again."})
     request.state.user_id = session["user_id"]
     return await call_next(request)
 
@@ -505,14 +745,51 @@ def _current_user_id(request: Request) -> str:
 
 def _is_test_user(request: Request) -> bool:
     user_id = _current_user_id(request)
-    if user_id == "legacy" or not TEST_USER_EMAIL:
+    if user_id == "legacy":
         return False
     user = DB.get_user(user_id)
-    return bool(user and str(user.get("email", "")).strip().lower() == TEST_USER_EMAIL)
+    return bool(user and _is_test_account_email(str(user.get("email", ""))))
+
+
+def _is_test_account_email(email: str) -> bool:
+    clean = email.strip().lower()
+    return bool(clean and clean in {TEST_USER_EMAIL, DEFAULT_TEST_ACCOUNT_EMAIL})
+
+
+def _has_test_account_admin_session(request: Request) -> bool:
+    token = _bearer_token(request)
+    if not token:
+        return False
+    try:
+        payload = _decode_access_token(token)
+    except ValueError:
+        return False
+    session = DB.get_active_session(str(payload.get("jti") or ""))
+    if not session or session["user_id"] != payload.get("sub"):
+        return False
+    user = DB.get_user(session["user_id"])
+    return bool(user and _is_test_account_email(str(user.get("email", ""))))
 
 
 def _make_id(prefix: str = "src") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+MCP_SOURCE_ID_PREFIX = "mcp:"
+
+
+def _mcp_source_id(connector_id: str) -> str:
+    return f"{MCP_SOURCE_ID_PREFIX}{connector_id}"
+
+
+def _mcp_connector_id_from_source_id(source_id: str) -> str | None:
+    if source_id.startswith(MCP_SOURCE_ID_PREFIX):
+        return source_id[len(MCP_SOURCE_ID_PREFIX):] or None
+    return None
+
+
+def _is_mcp_source_id(source_id: str) -> bool:
+    return source_id == "mcp" or source_id.startswith(MCP_SOURCE_ID_PREFIX)
 
 
 def _safe_upload_filename(filename: str) -> str:
@@ -648,7 +925,7 @@ def _persist_source(source_id: str, source: DataSource, kind: str, origin: dict[
     if DB.get_source_instructions(source_id) is None:
         DB.upsert_source_instructions(source_id, default_source_instructions(source.schema, source.display_name))
     DB.set_active_source(source_id, owner_id=owner_id)
-    return _serialize_source(source_id, source, kind, active=True)
+    return _serialize_source(source_id, source, kind, active=True, origin=origin)
 
 
 def _source_allowed_columns_from_row(row: dict[str, Any]) -> set[str]:
@@ -664,6 +941,86 @@ def _source_schema_from_row(row: dict[str, Any]) -> dict[str, Any]:
         return json.loads(row.get("schema_json") or "{}")
     except Exception:
         return {}
+
+
+def _source_origin_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        origin = json.loads(row.get("origin") or "{}")
+    except Exception:
+        return {}
+    return origin if isinstance(origin, dict) else {}
+
+
+def _source_column_names(schema: dict[str, Any], limit: int = 12) -> list[str]:
+    names: list[str] = []
+    for col in (schema or {}).get("columns", [])[:limit]:
+        name = col.get("name") or col.get("column")
+        if name:
+            names.append(str(name))
+    return names
+
+
+def _source_routing_description(row: dict[str, Any], source: DataSource | None = None) -> str:
+    schema = source.schema if source is not None else _source_schema_from_row(row)
+    kind = str(row.get("kind") or (source.source_kind if source else "source")).lower()
+    name = str(row.get("name") or (source.display_name if source else "")).strip()
+    origin = _source_origin_from_row(row)
+    columns = _source_column_names(schema)
+    lower_columns = {c.lower() for c in columns}
+    haystack = " ".join([name, kind, str(origin.get("type") or ""), str(origin.get("url") or "")]).lower()
+
+    if (
+        "amish" in haystack
+        or "ledger_table" in haystack
+        or {"voucherlineno", "voucherno", "account", "contraaccount", "debit", "credit"}.issubset(lower_columns)
+    ):
+        return (
+            "Amish ERP Ledger source. Use for accounting and finance questions about vouchers, ledger entries, "
+            "accounts, contra accounts, branches, dates, debit amounts, credit amounts, balances, and transaction "
+            "lookups from Ledger_Table. Prefer this source when the user mentions ledger, voucher, account, debit, "
+            "credit, branch, or ERP finance transactions. Do not use it for unrelated HR, payroll, user-login, "
+            "inventory, travel, or generic customer questions unless the user explicitly ties them to ledger data."
+        )
+
+    instructions: dict[str, Any] | None = None
+    source_id = row.get("id")
+    if source_id:
+        with contextlib.suppress(Exception):
+            instructions = DB.get_source_instructions(str(source_id))
+    if instructions is None:
+        instructions = default_source_instructions(schema, name)
+
+    parts: list[str] = []
+    if kind == "api" or origin.get("type") == "api":
+        endpoint = urlparse(str(origin.get("url") or "")).path.strip("/") or "REST endpoint"
+        parts.append(f"REST API source from {endpoint}.")
+    elif kind == "mcp":
+        parts.append("Connected live source.")
+    elif kind in {"csv", "xlsx", "json", "pdf", "duckdb"}:
+        parts.append(f"{kind.upper()} source.")
+    else:
+        parts.append("Data source.")
+
+    row_grain = (instructions or {}).get("row_grain")
+    if row_grain:
+        parts.append(f"Row grain: {row_grain}.")
+
+    entities = sorted((instructions or {}).get("entities", {}).keys())
+    if entities:
+        parts.append(f"Entities: {', '.join(entities[:8])}.")
+
+    metrics = sorted((instructions or {}).get("metrics", {}).keys())
+    if metrics:
+        parts.append(f"Good for metrics: {', '.join(metrics[:8])}.")
+
+    notes = str((instructions or {}).get("notes") or "").strip()
+    if notes:
+        parts.append(f"Notes: {notes[:240]}.")
+
+    if columns:
+        parts.append(f"Key columns: {', '.join(columns[:12])}.")
+
+    return " ".join(parts)[:700]
 
 
 def _source_with_clarifications(result: dict[str, Any], source: DataSource) -> dict[str, Any]:
@@ -725,7 +1082,14 @@ async def _rehydrate_source(row: dict[str, Any]) -> DataSource:
     raise HTTPException(status_code=400, detail=f"Cannot rehydrate source of unknown type '{typ}'")
 
 
-def _serialize_source(source_id: str, source: DataSource, kind: str, active: bool) -> dict[str, Any]:
+def _serialize_source(source_id: str, source: DataSource, kind: str, active: bool, origin: dict[str, Any] | None = None) -> dict[str, Any]:
+    row = {
+        "id": source_id,
+        "name": source.display_name,
+        "kind": kind,
+        "schema_json": json.dumps(source.schema, default=str),
+        "origin": json.dumps(origin) if origin else None,
+    }
     return {
         "id": source_id,
         "name": source.display_name,
@@ -733,7 +1097,21 @@ def _serialize_source(source_id: str, source: DataSource, kind: str, active: boo
         "rows": source.row_count,
         "columns": [c["name"] for c in source.schema.get("columns", [])],
         "active": active,
+        "description": _source_routing_description(row, source),
     }
+
+
+def _serialize_saved_connector(record: dict[str, Any]) -> dict[str, Any]:
+    out = dict(record)
+    if str(out.get("kind") or "").lower() == "api":
+        out["label"] = redact_url(str(out.get("label") or ""))
+        config = dict(out.get("config") or {})
+        if config.get("url"):
+            config["url"] = redact_url(str(config["url"]))
+        if config.get("auth"):
+            config["auth"] = "[redacted]"
+        out["config"] = config
+    return out
 
 
 def _get_view_type(chat_id: str) -> str:
@@ -781,6 +1159,21 @@ def _metadata_description(name: str, tools: list[dict[str, Any]]) -> str:
             description_bits.append(f"{tool['name']}: {desc[:140]}")
     suffix = " " + " ".join(description_bits) if description_bits else ""
     return f"{name} exposes {len(visible_tools)} tool{'s' if len(visible_tools) != 1 else ''}: {names}.{suffix}"
+
+
+def _mcp_connector_description(state: Any | None = None, record: dict[str, Any] | None = None) -> str:
+    if record is None and state is not None:
+        with contextlib.suppress(Exception):
+            record = DB.get_mcp_connector(state.id)
+    generated = str((record or {}).get("generated_description") or "").strip()
+    if generated:
+        return generated
+    metadata = str((record or {}).get("description") or "").strip()
+    if metadata:
+        return metadata
+    if state is not None:
+        return _metadata_description(state.name, state.tools if state.status == "connected" else [])
+    return ""
 
 
 def _state_transport(state: Any) -> str:
@@ -1027,8 +1420,9 @@ def _verify_admin(request: Request):
         raise HTTPException(status_code=501, detail="Admin password not configured")
 
     expected = hashlib.sha256(CONFIG.admin_password.encode()).hexdigest()
-    if token != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    if token == expected or _has_test_account_admin_session(request):
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get("/admin/session")
@@ -1145,6 +1539,7 @@ async def admin_stats(request: Request) -> dict[str, Any]:
 
     stats["token_usage_by_project"] = DB.list_token_usage_by_project()
     stats["token_usage_by_purpose"] = DB.list_token_usage_by_purpose()
+    stats["token_usage_by_model_mode"] = DB.list_token_usage_by_model_mode()
     stats["query_loop_summary"] = DB.query_loop_summary()
 
     if CONFIG.openrouter_api_key:
@@ -1806,7 +2201,28 @@ def _allowed_mcp_connector_ids_for_chat(chat_id: str | None) -> set[str]:
     return _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
 
 
-def _serialize_mcp_source(allowed_connector_ids: set[str] | None = None) -> dict[str, Any] | None:
+def _serialize_mcp_connector_as_source(state: Any) -> dict[str, Any]:
+    return {
+        "id": _mcp_source_id(state.id),
+        "name": state.name,
+        "kind": "mcp",
+        "rows": len(state.tools),
+        "columns": [],
+        "active": False,
+        "loaded": state.status == "connected",
+        "description": _mcp_connector_description(state),
+    }
+
+
+def _serialize_mcp_sources(allowed_connector_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    return [
+        _serialize_mcp_connector_as_source(s)
+        for s in get_pool().connectors.values()
+        if s.status == "connected" and (allowed_connector_ids is None or s.id in allowed_connector_ids)
+    ]
+
+
+def _serialize_mcp_aggregate_source(allowed_connector_ids: set[str] | None = None) -> dict[str, Any] | None:
     connected = [
         s for s in get_pool().connectors.values()
         if s.status == "connected" and (allowed_connector_ids is None or s.id in allowed_connector_ids)
@@ -1822,7 +2238,45 @@ def _serialize_mcp_source(allowed_connector_ids: set[str] | None = None) -> dict
         "columns": [],
         "active": False,
         "loaded": True,
+        "description": "All connected live sources. Use only when the question could require more than one live connector or the user did not specify which connected source to use.",
     }
+
+
+def _serialize_mcp_source_by_id(source_id: str, allowed_connector_ids: set[str] | None = None) -> dict[str, Any] | None:
+    if source_id == "mcp":
+        return _serialize_mcp_aggregate_source(allowed_connector_ids)
+    connector_id = _mcp_connector_id_from_source_id(source_id)
+    if not connector_id:
+        return None
+    if allowed_connector_ids is not None and connector_id not in allowed_connector_ids:
+        return None
+    state = get_pool().connectors.get(connector_id)
+    if state:
+        return _serialize_mcp_connector_as_source(state)
+    record = DB.get_mcp_connector(connector_id)
+    if not record:
+        return None
+    return {
+        "id": source_id,
+        "name": record["name"],
+        "kind": "mcp",
+        "rows": len(record.get("tools", [])),
+        "columns": [],
+        "active": False,
+        "loaded": record.get("status") == "connected",
+        "description": _mcp_connector_description(record=record),
+    }
+
+
+def _selected_mcp_connector_ids(source_ids: list[str], allowed_connector_ids: set[str]) -> set[str]:
+    if "mcp" in source_ids:
+        return set(allowed_connector_ids)
+    selected: set[str] = set()
+    for source_id in source_ids:
+        connector_id = _mcp_connector_id_from_source_id(source_id)
+        if connector_id and connector_id in allowed_connector_ids:
+            selected.add(connector_id)
+    return selected
 
 
 # -- health ----------------------------------------------------------------
@@ -1906,6 +2360,7 @@ def list_sources(request: Request, project_id: str | None = None) -> list[dict[s
     rows = DB.list_sources(owner_id=owner_id)
     out = []
     for row in rows:
+        full_row = DB.get_source(row["id"], owner_id=owner_id) or row
         out.append({
             "id": row["id"],
             "name": row["name"],
@@ -1913,10 +2368,9 @@ def list_sources(request: Request, project_id: str | None = None) -> list[dict[s
             "rows": row["rows"],
             "active": bool(row["active"]),
             "loaded": row["id"] in SOURCES,
+            "description": _source_routing_description(full_row),
         })
-    mcp_source = _serialize_mcp_source(_allowed_mcp_connector_ids_for_project(project_id))
-    if mcp_source:
-        out.insert(0, mcp_source)
+    out[0:0] = _serialize_mcp_sources(_allowed_mcp_connector_ids_for_project(project_id))
     return out
 
 @app.get("/sources/{source_id}/preview")
@@ -2007,7 +2461,7 @@ async def attach_api(body: AttachAPI, request: Request) -> dict[str, Any]:
         source_id = _make_id()
         result = _persist_source(source_id, source, "api", origin, owner_id=_current_user_id(request))
         if body.save_connector:
-            DB.add_connector(kind="api", label=body.url, config={"url": body.url, "auth": body.auth})
+            DB.add_connector(kind="api", label=redact_url(body.url), config={"url": body.url, "auth": body.auth}, owner_id=_current_user_id(request))
         return result
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -2341,7 +2795,9 @@ async def resolve_pending(body: ResolvePending, request: Request) -> dict[str, A
 
 @app.delete("/sources/{source_id}")
 def delete_source(source_id: str, request: Request) -> dict[str, Any]:
-    DB.delete_source(source_id, owner_id=_current_user_id(request))
+    deleted = DB.delete_source(source_id, owner_id=_current_user_id(request))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Source not found")
     SOURCES.pop(source_id, None)
     return {"ok": True}
 
@@ -2501,10 +2957,16 @@ async def get_chat(chat_id: str, request: Request) -> dict[str, Any]:
                     seen_ids.append(sid)
     # Resolve source metadata so the frontend can show names without extra fetches
     sources_meta: list[dict[str, Any]] = []
+    allowed_mcp_ids = _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
     for sid in seen_ids:
         row = DB.get_source(sid)
         if row:
             sources_meta.append({"id": row["id"], "name": row["name"], "kind": row["kind"], "rows": row.get("rows", 0)})
+            continue
+        if _is_mcp_source_id(sid):
+            mcp_meta = _serialize_mcp_source_by_id(sid, allowed_mcp_ids)
+            if mcp_meta:
+                sources_meta.append(mcp_meta)
     chat["source_ids"] = seen_ids
     chat["sources"] = sources_meta
     return chat
@@ -2725,13 +3187,13 @@ def unbind_project_mcp(project_id: str, connector_id: str, request: Request) -> 
 
 # -- connectors ------------------------------------------------------------
 @app.get("/connectors")
-def list_connectors() -> list[dict[str, Any]]:
-    return DB.list_connectors()
+def list_connectors(request: Request) -> list[dict[str, Any]]:
+    return [_serialize_saved_connector(record) for record in DB.list_connectors(owner_id=_current_user_id(request))]
 
 
 @app.delete("/connectors/{connector_id}")
-def delete_connector(connector_id: str) -> dict[str, Any]:
-    DB.delete_connector(connector_id)
+def delete_connector(connector_id: str, request: Request) -> dict[str, Any]:
+    DB.delete_connector(connector_id, owner_id=_current_user_id(request))
     return {"ok": True}
 
 
@@ -2762,18 +3224,33 @@ async def add_mcp_connector(body: MCPConnect) -> dict[str, Any]:
 async def update_mcp_connector(connector_id: str, body: MCPUpdate) -> dict[str, Any]:
     pool = get_pool()
     state = pool.connectors.get(connector_id)
-    if not state:
+    record = DB.get_mcp_connector_record(connector_id)
+    if not state and not record:
         raise HTTPException(status_code=404, detail="Connector not found")
-    requested_url = body.url.strip() if body.url and body.url.strip() else state.url
-    requested_name = body.name or state.name
-    if body.url is not None:
-        await _assert_public_url(requested_url)
-        await pool.connect(url=requested_url, name=requested_name, connector_id=connector_id)
+    requested_url = body.url.strip() if body.url and body.url.strip() else None
+    requested_name = body.name or (state.name if state else None) or (record or {}).get("name") or connector_id
+    if body.retry or body.url is not None:
+        url = requested_url or (record or {}).get("url") or (state.url if state else None)
+        command = (record or {}).get("command") or (state.command if state else None)
+        args = (record or {}).get("args") or (state.args if state else [])
+        if body.url is not None:
+            if not url:
+                raise HTTPException(status_code=400, detail="url is required")
+            await _assert_public_url(url)
+        if url:
+            await pool.connect(url=url, name=requested_name, connector_id=connector_id)
+        elif command:
+            await pool.connect(command=command, args=args, name=requested_name, connector_id=connector_id)
+        else:
+            raise HTTPException(status_code=400, detail="Connector does not have reconnect settings")
         state = pool.connectors[connector_id]
         if state.status == "error":
-            raise HTTPException(status_code=400, detail=state.last_error or "Reconnect failed")
-    elif body.name:
+            _persist_mcp_state(state, scope=(record or {}).get("scope", "global"))
+            raise HTTPException(status_code=400, detail="Reconnect failed")
+    elif body.name and state:
         await pool.rename(connector_id, body.name)
+    elif not state:
+        raise HTTPException(status_code=400, detail="Connector is not active")
     state = pool.connectors[connector_id]
     record = DB.get_mcp_connector(connector_id)
     _persist_mcp_state(state, scope=record.get("scope", "global") if record else "global")
@@ -2927,8 +3404,9 @@ async def attach_excel_mcp(body: AttachExcelMCP) -> dict[str, Any]:
 
 
 @app.post("/connectors/{connector_id}/use")
-async def use_connector(connector_id: str) -> dict[str, Any]:
-    record = DB.get_connector(connector_id)
+async def use_connector(connector_id: str, request: Request) -> dict[str, Any]:
+    owner_id = _current_user_id(request)
+    record = DB.get_connector(connector_id, owner_id=owner_id)
     if not record:
         raise HTTPException(status_code=404, detail="Connector not found")
     cfg = record["config"]
@@ -2938,7 +3416,7 @@ async def use_connector(connector_id: str) -> dict[str, Any]:
             source = await asyncio.to_thread(prepare_api_source, cfg["url"], LOGGERS["cache"], auth_header=cfg.get("auth"))
             origin = {"type": "api", "url": cfg["url"], "auth": cfg.get("auth"), "ingest": "direct"}
             source_id = _make_id()
-            return _persist_source(source_id, source, "api", origin)
+            return _persist_source(source_id, source, "api", origin, owner_id=owner_id)
         raise HTTPException(status_code=400, detail=f"Unknown connector kind: {record['kind']}")
     except HTTPException:
         raise
@@ -2992,6 +3470,77 @@ def _df_to_payload(df: pd.DataFrame, limit: int = 200) -> dict[str, Any]:
         "rows": rows,
         "row_count": int(len(df)),
         "truncated": len(df) > limit,
+    }
+
+
+_INJECTION_WRAPPER_RE = re.compile(
+    r"\b(ignore|disregard|forget|override|bypass|instead|pretend)\b.*\b(data|dataset|file|table|previous|above|instruction|instructions|say|answer)\b",
+    re.I,
+)
+_DATA_QUESTION_RE = re.compile(
+    r"\b(what|which|who|how\s+many|how\s+much|show|list|calculate|provide|break\s+down|summari[sz]e|give|run|identify)\b",
+    re.I,
+)
+
+
+def _normalize_answerable_data_question(question: str) -> str:
+    clean = question.strip()
+    if not _INJECTION_WRAPPER_RE.search(clean):
+        return clean
+    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", clean) if part.strip()]
+    for part in reversed(parts):
+        if _DATA_QUESTION_RE.search(part) and not _INJECTION_WRAPPER_RE.search(part):
+            return part
+    match = _DATA_QUESTION_RE.search(clean)
+    if match:
+        return clean[match.start():].strip()
+    return clean
+
+
+def _history_with_analysis_question(history: list[dict[str, Any]], raw_question: str, analysis_question: str) -> list[dict[str, Any]]:
+    if raw_question == analysis_question:
+        return history
+    adjusted = [dict(item) for item in history]
+    for item in reversed(adjusted):
+        if item.get("role") == "user" and str(item.get("content") or "") == raw_question:
+            item["content"] = analysis_question
+            break
+    return adjusted
+
+
+def _is_no_match_aggregate_result(intent: dict[str, Any], df: pd.DataFrame) -> bool:
+    if not intent.get("filters") or intent.get("dimensions") or intent.get("date_grain"):
+        return False
+    if (intent.get("intent_type") or "aggregate") not in {"aggregate", "comparison", "chart_request"}:
+        return False
+    if str(intent.get("aggregation") or "sum").lower() == "count":
+        return False
+    if len(df) != 1 or df.empty:
+        return False
+    values = df.iloc[0].tolist()
+    return bool(values) and all(pd.isna(value) for value in values)
+
+
+def _no_match_message(question: str) -> str:
+    years = re.findall(r"\b(?:19|20)\d{2}\b", question)
+    if years:
+        return f"No matching rows for {years[-1]}."
+    return "No matching rows for the requested filters."
+
+
+def _empty_result_payload(plan: Any, question: str, elapsed_ms: int, source: DataSource, model_used: str, chat_id: str) -> dict[str, Any]:
+    return {
+        "title": "No Matching Rows",
+        "viz": "card",
+        "elapsed_ms": elapsed_ms,
+        "sql": plan.sql,
+        "how": f"Source: {source.source_kind}. Model: {model_used}. No rows matched the requested filters.",
+        "view_type": _get_view_type(chat_id),
+        "columns": [],
+        "rows": [],
+        "row_count": 0,
+        "truncated": False,
+        "message": _no_match_message(question),
     }
 
 
@@ -3226,6 +3775,7 @@ def _prepare_workspace_sync(chat_id: str, selected: list[tuple[dict[str, Any], D
                 "table": table,
                 "rows": source.row_count,
                 "columns": columns,
+                "description": _source_routing_description(row, source),
             })
     finally:
         con.close()
@@ -3262,29 +3812,45 @@ def _materialize_workspace_df_sync(chat_id: str, table_name: str, df: pd.DataFra
     return {"table": table_name, "rows": int(len(df)), "columns": columns}
 
 
+def _format_source_summary_line(src: dict[str, Any], column_limit: int) -> str:
+    cols = ", ".join(f"{c['name']}:{c['type']}" for c in src.get("columns", [])[:column_limit])
+    description = str(src.get("description") or "").strip()
+    desc_text = f" Description: {description}" if description else ""
+    cols_text = f" Columns: {cols}" if cols else ""
+    return f"- {src['name']} as table {src['table']} ({src['rows']} rows).{desc_text}{cols_text}"
+
+
 def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary: str, join_candidates: list[dict[str, Any]], domain_prompt: str = "") -> str:
-    source_lines: list[str] = []
-    for src in source_summaries:
-        cols = ", ".join(f"{c['name']}:{c['type']}" for c in src.get("columns", [])[:40])
-        source_lines.append(f"- {src['name']} as table {src['table']} ({src['rows']} rows): {cols}")
+    source_lines = [_format_source_summary_line(src, 40) for src in source_summaries]
     join_lines = [
         f"- {c['left_table']}.{c['left_column']} = {c['right_table']}.{c['right_column']} (confidence {c['confidence']:.2f})"
         for c in join_candidates[:10]
     ]
+    join_section = (
+        "\n\n## Suggested join keys\n"
+        f"{chr(10).join(join_lines)}"
+        if join_lines
+        else ""
+    )
+    live_section = (
+        "\n\n## Connected live sources\n"
+        f"{connector_summary}"
+        if connector_summary
+        else ""
+    )
+    live_rule = (
+        "\n- For live MCP/API-style data, call the relevant tool first. Tabular tool results are cached into workspace tables and the tool response will name the new table."
+        if connector_summary
+        else ""
+    )
     base_prompt = f"""You are a multi-source data analyst. Use tools to retrieve data and run DuckDB SQL.
 
 ## Local workspace tables
-{chr(10).join(source_lines) if source_lines else "- No local tables loaded yet. Use connected tools to fetch data first."}
-
-## Suggested join keys
-{chr(10).join(join_lines) if join_lines else "- No confident join keys detected. If a join is needed, ask the user which columns relate before guessing."}
-
-## Connected live sources
-{connector_summary or "(no MCP bridges connected)"}
+{chr(10).join(source_lines) if source_lines else "- No local tables loaded yet. Use connected tools to fetch data first."}{join_section}{live_section}
 
 ## Rules
 - For local workspace data, call run_sql with SELECT statements against the table names above.
-- For live MCP/API-style data, call the relevant tool first. Tabular tool results are cached into workspace tables and the tool response will name the new table.
+- Use the source descriptions above to choose the right table or live source when multiple sources are selected.{live_rule}
 - When a question needs a join and the relationship is unclear, ask one short clarification question instead of guessing.
 - Never mention MCP, tool internals, or function calls in the final answer unless the user asks.
 - Keep final answers to one short sentence. The result table/chart appears below your answer.
@@ -3292,6 +3858,32 @@ def _workspace_prompt(source_summaries: list[dict[str, Any]], connector_summary:
     if domain_prompt:
         return f"{domain_prompt}\n\n{base_prompt}"
     return base_prompt
+
+
+def _build_mcp_tool_filter_prompt(
+    *,
+    question: str,
+    tool_specs: list[dict[str, Any]],
+    conversation_text: str,
+    source_summaries: list[dict[str, Any]],
+    connector_summary: str,
+    today_iso: str | None = None,
+) -> str:
+    source_lines = [_format_source_summary_line(src, 20) for src in source_summaries]
+    tool_desc = "\n".join(f"- {s['name']}: {s.get('description', 'No description')}" for s in tool_specs)
+    return (
+        f"Today: {today_iso or date.today().isoformat()}\n\n"
+        f"Question: {question}\n\n"
+        f"Recent conversation:\n{conversation_text[-2000:] or '(none)'}\n\n"
+        "Local workspace tables:\n"
+        f"{chr(10).join(source_lines) if source_lines else '- No local workspace tables loaded.'}\n\n"
+        "Connected live sources:\n"
+        f"{connector_summary or '(no connected live sources)'}\n\n"
+        f"Tools:\n{tool_desc}\n\n"
+        "Select up to 8 relevant tool names from the list above. Include the discovery, schema, and query tools needed "
+        "to answer the question end-to-end, especially for broad database questions or relative date ranges. "
+        "Return ONLY exact tool names separated by commas. Do not explain."
+    )
 
 
 def _build_mcp_summary(pool, allowed_connector_ids: set[str] | None = None) -> str:
@@ -3303,13 +3895,76 @@ def _build_mcp_summary(pool, allowed_connector_ids: set[str] | None = None) -> s
             continue
         if s.status != "connected" or not s.tools:
             continue
-        lines.append(f"### {s.name}")
+        description = _mcp_connector_description(s)
+        lines.append(f"### {s.name} - {description}" if description else f"### {s.name}")
         for t in s.tools:
             desc = (t.get("description") or "").strip().splitlines()[0] if t.get("description") else ""
             if len(desc) > 140:
                 desc = desc[:140] + "…"
             lines.append(f"  - {t['name']}: {desc}" if desc else f"  - {t['name']}")
     return "\n".join(lines)
+
+
+def _compact_source_label(sources: list[dict[str, Any]], max_items: int = 4) -> str:
+    items: list[tuple[int, str]] = []
+    workbook_groups: dict[str, dict[str, Any]] = {}
+    for index, source in enumerate(sources):
+        name = str(source.get("name") or "").strip()
+        if not name:
+            continue
+        base, separator, sheet = name.partition(" - ")
+        if separator and sheet and base.lower().endswith((".xlsx", ".xls", ".xlsm")):
+            group = workbook_groups.setdefault(base, {"index": index, "names": []})
+            group["names"].append(name)
+        else:
+            items.append((index, name))
+
+    for base, group in workbook_groups.items():
+        names = group["names"]
+        label = f"{base} ({len(names)} sheets)" if len(names) > 1 else names[0]
+        items.append((int(group["index"]), label))
+
+    labels = [label for _, label in sorted(items, key=lambda item: item[0])]
+    if len(labels) > max_items:
+        hidden = len(labels) - max_items
+        return f"{', '.join(labels[:max_items])} +{hidden} more"
+    return ", ".join(labels)
+
+
+def _extract_markdown_table_columns(text: str) -> list[str]:
+    lines = [line.strip() for line in text.splitlines()]
+    for idx, line in enumerate(lines[:-1]):
+        if "|" not in line:
+            continue
+        separator = lines[idx + 1]
+        if "|" not in separator:
+            continue
+        sep_cells = [cell.strip() for cell in separator.strip("|").split("|")]
+        if not sep_cells or not all(cell and set(cell) <= {"-", ":", " "} and "-" in cell for cell in sep_cells):
+            continue
+        return [cell.strip() for cell in line.strip("|").split("|") if cell.strip()]
+    return []
+
+
+def _pick_primary_result(answer_text: str, collected: list[tuple[str, pd.DataFrame, int]]) -> tuple[str, pd.DataFrame, int]:
+    if not collected:
+        raise ValueError("No query results were collected")
+    if len(collected) == 1:
+        return collected[0]
+
+    answer_columns = {col.strip().lower() for col in _extract_markdown_table_columns(answer_text)}
+    if not answer_columns:
+        return collected[-1]
+
+    best: tuple[str, pd.DataFrame, int] | None = None
+    best_score = 0
+    for item in collected:
+        df_columns = {str(col).strip().lower() for col in item[1].columns}
+        score = len(answer_columns & df_columns)
+        if score > best_score:
+            best_score = score
+            best = item
+    return best if best_score > 0 and best is not None else collected[-1]
 
 
 async def _run_mcp_agent(
@@ -3320,6 +3975,7 @@ async def _run_mcp_agent(
     allowed_connector_ids: set[str] | None = None,
     llm_router: LLMRouter | None = None,
     user_message_id: str | None = None,
+    model_selection: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     span = TRACER.start_span("mcp_agent")
     span.set_attribute("question", question)
@@ -3342,14 +3998,23 @@ async def _run_mcp_agent(
         connector_summary_lines: list[str] = []
         by_connector: dict[str, list[str]] = {}
         name_lookup: dict[str, str] = {}
+        description_lookup: dict[str, str] = {}
         for s in pool.connectors.values():
             if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
                 continue
             if s.status == "connected":
                 name_lookup[s.id] = s.name
-                by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
+                description_lookup[s.id] = _mcp_connector_description(s)
+                for tool in s.tools:
+                    desc = (tool.get("description") or "").strip().splitlines()[0]
+                    if len(desc) > 140:
+                        desc = desc[:140] + "…"
+                    label = f"{tool['name']}: {desc}" if desc else str(tool["name"])
+                    by_connector.setdefault(s.id, []).append(label)
         for cid, tnames in by_connector.items():
-            connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
+            desc = description_lookup.get(cid)
+            header = f"### {name_lookup[cid]} - {desc}" if desc else f"### {name_lookup[cid]}"
+            connector_summary_lines.append(f"{header} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
         connector_summary = "\n\n".join(connector_summary_lines)
 
         # Track per-tool results so we can pick the largest tabular one for charting.
@@ -3401,8 +4066,7 @@ async def _run_mcp_agent(
                     last_tool_call = ev
                     connector_id = routing.get(ev["name"])
                     cname = name_lookup.get(connector_id, "MCP")
-                    args_str = ", ".join(f"{k}={v!r}" for k, v in (ev.get("args") or {}).items())
-                    step = f"Calling {ev['name']}({args_str}) on {cname}"
+                    step = _public_tool_call_step(ev["name"], cname, ev.get("args") or {})
                     yield {"event": "thinking", "data": json.dumps({"step": step})}
                 elif kind == "tool_result":
                     loop_metrics["thinking_event_count"] += 1
@@ -3420,7 +4084,7 @@ async def _run_mcp_agent(
         except LLMUnavailable as exc:
             err_text = "All language models are unavailable right now. Try again in a moment."
             msg = DB.add_message(chat_id, "assistant", err_text, payload={"kind": "error", "detail": str(exc)})
-            yield {"event": "error", "data": json.dumps({"message": err_text, "detail": str(exc)})}
+            yield _public_error_event(err_text)
             yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
             return
 
@@ -3448,7 +4112,12 @@ async def _run_mcp_agent(
             yield {"event": "result", "data": json.dumps(result_payload, default=str)}
 
         full_text = _finalize_visible_answer(full_text, question, result_payload)
-        assistant_payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "agent"}
+        assistant_payload: dict[str, Any] = {
+            "kind": "result" if result_payload else "text",
+            "model": (model_selection or {}).get("model") or "agent",
+        }
+        if model_selection:
+            assistant_payload["model_selection"] = _payload_model_selection(model_selection)
         if result_payload:
             assistant_payload["result"] = result_payload
         msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
@@ -3473,6 +4142,7 @@ async def _run_local_agent(
     model_used: str,
     llm_router: LLMRouter | None = None,
     user_message_id: str | None = None,
+    model_selection: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     span = TRACER.start_span("local_agent")
     span.set_attribute("question", question)
@@ -3568,9 +4238,7 @@ async def _run_local_agent(
                     loop_metrics["thinking_event_count"] += 1
                     loop_metrics["round_count"] = max(loop_metrics["round_count"], int(ev.get("round") or 0) + 1)
                     sql_arg = (ev.get("args") or {}).get("query", "")
-                    preview = sql_arg.replace("\n", " ").strip()[:120]
-                    step = f"Querying: {preview}{'…' if len(sql_arg) > 120 else ''}"
-                    yield {"event": "thinking", "data": json.dumps({"step": step})}
+                    yield {"event": "thinking", "data": json.dumps({"step": _public_query_step(sql_arg)})}
                 elif kind == "tool_result":
                     loop_metrics["thinking_event_count"] += 1
                     if ev.get("error"):
@@ -3587,7 +4255,7 @@ async def _run_local_agent(
         except LLMUnavailable as exc:
             err_msg = "All language models are rate-limited right now. Wait a minute and retry."
             DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
-            yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+            yield _public_error_event(err_msg)
             yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
             return
 
@@ -3614,6 +4282,8 @@ async def _run_local_agent(
 
         full_text = _finalize_visible_answer(full_text, question, result_payload)
         payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": model_used}
+        if model_selection:
+            payload["model_selection"] = _payload_model_selection(model_selection)
         if result_payload:
             payload["result"] = result_payload
         msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
@@ -3638,6 +4308,7 @@ async def _run_multi_source_agent(
     allowed_connector_ids: set[str] | None = None,
     llm_router: LLMRouter | None = None,
     user_message_id: str | None = None,
+    model_selection: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     span = TRACER.start_span("multi_source_agent")
     span.set_attribute("question", question)
@@ -3645,23 +4316,6 @@ async def _run_multi_source_agent(
         router = llm_router or ROUTER
         pool = get_pool()
         specs, routing = pool.aggregate_tools(allowed_connector_ids=allowed_connector_ids)
-        if len(specs) > 3:
-            yield {"event": "thinking", "data": json.dumps({"step": f"Searching through {len(specs)} available MCP tools..."})}
-            try:
-                tool_desc = "\n".join([f"- {s['name']}: {s.get('description', 'No description')}" for s in specs])
-                filter_prompt = (
-                    f"Question: {question}\n\n"
-                    f"Tools:\n{tool_desc}\n\n"
-                    "Based on the question, identify up to 3 most relevant tool names from the list above. "
-                    "Return ONLY their exact names separated by commas. Do not explain."
-                )
-                relevant_raw, _ = router._generate_text(filter_prompt, request_id)
-                relevant_names = [n.strip() for n in relevant_raw.split(',')]
-                filtered_specs = [s for s in specs if s['name'] in relevant_names]
-                if filtered_specs:
-                    specs = filtered_specs
-            except Exception as e:
-                log_event(LOGGERS["query"], "mcp_tool_search_error", request_id=request_id, error=str(e))
         loop = asyncio.get_running_loop()
         source_summaries = await loop.run_in_executor(None, lambda: _prepare_workspace_sync(chat_id, selected))
         join_candidates = _detect_join_candidates(source_summaries)
@@ -3670,15 +4324,42 @@ async def _run_multi_source_agent(
         connector_summary_lines: list[str] = []
         name_lookup: dict[str, str] = {}
         by_connector: dict[str, list[str]] = {}
+        description_lookup: dict[str, str] = {}
         for s in pool.connectors.values():
             if allowed_connector_ids is not None and s.id not in allowed_connector_ids:
                 continue
             if s.status == "connected":
                 name_lookup[s.id] = s.name
-                by_connector.setdefault(s.id, []).extend(t["name"] for t in s.tools)
+                description_lookup[s.id] = _mcp_connector_description(s)
+                for tool in s.tools:
+                    desc = (tool.get("description") or "").strip().splitlines()[0]
+                    if len(desc) > 140:
+                        desc = desc[:140] + "…"
+                    label = f"{tool['name']}: {desc}" if desc else str(tool["name"])
+                    by_connector.setdefault(s.id, []).append(label)
         for cid, tnames in by_connector.items():
-            connector_summary_lines.append(f"### {name_lookup[cid]} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
+            desc = description_lookup.get(cid)
+            header = f"### {name_lookup[cid]} - {desc}" if desc else f"### {name_lookup[cid]}"
+            connector_summary_lines.append(f"{header} · {len(tnames)} tools\n  - " + "\n  - ".join(tnames))
         connector_summary = "\n\n".join(connector_summary_lines)
+
+        if len(specs) > 3:
+            yield {"event": "thinking", "data": json.dumps({"step": f"Searching through {len(specs)} available MCP tools..."})}
+            try:
+                filter_prompt = _build_mcp_tool_filter_prompt(
+                    question=question,
+                    tool_specs=specs,
+                    conversation_text=conversation_summary(history),
+                    source_summaries=source_summaries,
+                    connector_summary=connector_summary,
+                )
+                relevant_raw, _ = router._generate_text(filter_prompt, request_id)
+                relevant_names = [n.strip() for n in relevant_raw.split(',')]
+                filtered_specs = [s for s in specs if s['name'] in relevant_names]
+                if filtered_specs:
+                    specs = filtered_specs
+            except Exception as e:
+                log_event(LOGGERS["query"], "mcp_tool_search_error", request_id=request_id, error=str(e))
 
         agent = _get_domain_agent(chat_id)
         domain_tools = agent.get_tools() if agent else []
@@ -3737,6 +4418,7 @@ async def _run_multi_source_agent(
                         "id": f"mcp:{tool_name}:{materialized_count}",
                         "name": f"{tool_name} result",
                         "kind": "mcp",
+                        "description": f"Cached tabular result returned by the live source tool {tool_name}. Use for follow-up filtering, joining, or aggregation within this answer.",
                         **info,
                     })
                     cols = ", ".join(f"{c['name']}:{c['type']}" for c in info["columns"][:30])
@@ -3767,8 +4449,7 @@ async def _run_multi_source_agent(
                     loop_metrics["round_count"] = max(loop_metrics["round_count"], int(ev.get("round") or 0) + 1)
                     if ev["name"] == "run_sql":
                         sql_arg = (ev.get("args") or {}).get("query", "")
-                        preview = sql_arg.replace("\n", " ").strip()[:120]
-                        yield {"event": "thinking", "data": json.dumps({"step": f"Querying workspace: {preview}{'…' if len(sql_arg) > 120 else ''}"})}
+                        yield {"event": "thinking", "data": json.dumps({"step": _public_query_step(sql_arg)})}
                     else:
                         connector_id = routing.get(ev["name"])
                         cname = name_lookup.get(connector_id, "connected source")
@@ -3789,7 +4470,7 @@ async def _run_multi_source_agent(
         except LLMUnavailable as exc:
             err_msg = "The language model is unavailable, so I can't run a multi-source agent query right now."
             msg = DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
-            yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+            yield _public_error_event(err_msg)
             yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
             return
         finally:
@@ -3801,14 +4482,15 @@ async def _run_multi_source_agent(
         full_text = "".join(full_text_parts).strip() or "(no answer)"
         result_payload: dict[str, Any] | None = None
         if collected:
-            sql, df, elapsed_ms = collected[-1]
+            sql, df, elapsed_ms = _pick_primary_result(full_text, collected)
             viz = choose_visualization(question, {}, df)
+            source_label = _compact_source_label(source_summaries[:8])
             result_payload = {
                 "title": "Multi-source Result",
                 "viz": viz,
                 "elapsed_ms": elapsed_ms,
                 "sql": sql,
-                "how": f"Sources: {', '.join(s['name'] for s in source_summaries[:8])}. Display: {viz}.",
+                "how": f"Sources: {source_label}. Display: {viz}.",
                 "view_type": _get_view_type(chat_id),
                 **_df_to_payload(df),
             }
@@ -3817,7 +4499,12 @@ async def _run_multi_source_agent(
             full_text = full_text if full_text != "(no answer)" else "I fetched data, but did not get a final table to show."
 
         full_text = _finalize_visible_answer(full_text, question, result_payload)
-        payload: dict[str, Any] = {"kind": "result" if result_payload else "text", "model": "multi-source-agent"}
+        payload: dict[str, Any] = {
+            "kind": "result" if result_payload else "text",
+            "model": (model_selection or {}).get("model") or "multi-source-agent",
+        }
+        if model_selection:
+            payload["model_selection"] = _payload_model_selection(model_selection)
         if result_payload:
             payload["result"] = result_payload
         msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
@@ -3852,7 +4539,7 @@ async def _load_query_sources(
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for source_id in source_ids:
-        if source_id == "mcp" or source_id in seen:
+        if _is_mcp_source_id(source_id) or source_id in seen:
             continue
         row = DB.get_source(source_id, owner_id=owner_id)
         if row:
@@ -3880,8 +4567,6 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
         if body.chat_id and not DB.get_chat(body.chat_id, owner_id=owner_id, include_legacy=include_legacy):
             raise HTTPException(status_code=404, detail="Chat not found")
         chat_id = body.chat_id or DB.create_chat(owner_id=owner_id)["id"]
-        llm_router = _router_for_model_mode(body.model_mode)
-        model_preset = _model_preset_for_mode(body.model_mode)
         if body.project_id:
             if not DB.get_project(body.project_id, owner_id=owner_id):
                 raise HTTPException(status_code=404, detail="Project not found")
@@ -3890,43 +4575,43 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
         if chat and chat.get("project_id"):
             await ensure_project_context(chat["project_id"])
 
-        question = body.question.strip()
-        if not question:
+        raw_question = body.question.strip()
+        if not raw_question:
             raise HTTPException(status_code=400, detail="Question is required")
+        question = _normalize_answerable_data_question(raw_question)
         if body.project_id:
             _learn_project_vocabulary(body.project_id, owner_id, question)
 
         active_row = DB.get_active_source(owner_id=owner_id)
         pool = get_pool()
         allowed_mcp_ids = _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
-        has_mcp = any(s.status == "connected" and s.id in allowed_mcp_ids for s in pool.connectors.values())
         requested_source_ids = body.source_ids or []
-        selected_mcp = "mcp" in requested_source_ids
+        selected_mcp_ids = _selected_mcp_connector_ids(requested_source_ids, allowed_mcp_ids)
+        selected_mcp_states = [
+            s for s in pool.connectors.values()
+            if s.status == "connected" and s.id in selected_mcp_ids
+        ]
+        selected_mcp_ids = {s.id for s in selected_mcp_states}
+        has_selected_mcp = bool(selected_mcp_states)
         selected_sources = await _load_query_sources(
             requested_source_ids,
             active_row,
             use_active_fallback=not body.source_ids,
             owner_id=owner_id,
         )
+        pre_source_history = _load_history(chat_id, owner_id=owner_id, include_legacy=include_legacy)
 
-        if not selected_sources and not has_mcp:
+        if not selected_sources and _query_requires_source(question, "", pre_source_history, has_selected_mcp):
             raise HTTPException(status_code=400, detail="Attach a source first")
 
         active_for_legacy = selected_sources[0] if len(selected_sources) == 1 else None
         active_row = active_for_legacy[0] if active_for_legacy else active_row
         source: DataSource | None = active_for_legacy[1] if active_for_legacy else None
 
-        # Store source_ids in user message payload so we can restore them when loading chat history
-        user_payload: dict[str, Any] = {"source_ids": [row["id"] for row, _ in selected_sources]}
-        user_msg = DB.add_message(chat_id, "user", question, payload=user_payload, trace_id=trace_id)
-        chat = DB.get_chat(chat_id, owner_id=owner_id, include_legacy=include_legacy)
-        if chat and (not chat.get("title") or chat["title"] == "New chat"):
-            DB.update_chat_title(chat_id, question[:60], owner_id=owner_id)
-
-        history = _load_history(chat_id, owner_id=owner_id, include_legacy=include_legacy)
         project_instructions: dict[str, Any] | None = None
         source_instructions: dict[str, Any] | None = None
         memory_snippets: list[dict[str, Any]] = []
+        project_notes: list[dict[str, Any]] = []
         if chat and chat.get("project_id"):
             project_instructions = DB.get_project_instructions(chat["project_id"])
             if project_instructions is None:
@@ -3941,12 +4626,41 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                 DB.upsert_project_instructions(chat["project_id"], project_instructions)
             DB.rebuild_project_memory(chat["project_id"])
             memory_snippets = DB.search_project_memory(chat["project_id"], question, limit=5)
-            notes = DB.list_project_notes(chat["project_id"])[:6]
-            if notes:
-                note_lines = "\n".join(f"- {n['title']}: {n['content'][:300]}" for n in notes)
-                history.append({"role": "project_notes", "content": f"Saved project notes:\n{note_lines}"})
+            project_notes = DB.list_project_notes(chat["project_id"])[:6]
         if active_row:
             source_instructions = _get_or_create_source_instructions(active_row["id"])
+
+        _proj_category = (project_instructions or {}).get("category", "")
+        _is_travel_query = _is_travel_fast_path(question, _proj_category, pre_source_history)
+        model_selection = _resolve_query_model_mode(
+            requested_mode=body.model_mode,
+            question=question,
+            selected_sources=selected_sources,
+            selected_mcp_count=len(selected_mcp_states),
+            is_travel_query=_is_travel_query,
+            history=pre_source_history,
+        )
+        llm_router = _router_for_model_mode(model_selection["effective_model_mode"])
+        model_preset = _model_preset_for_mode(model_selection["effective_model_mode"])
+
+        # Store source_ids in user message payload so we can restore them when loading chat history
+        user_payload: dict[str, Any] = {
+            "source_ids": [
+                *[row["id"] for row, _ in selected_sources],
+                *[_mcp_source_id(s.id) for s in selected_mcp_states],
+            ],
+            "model_selection": _payload_model_selection(model_selection),
+        }
+        user_msg = DB.add_message(chat_id, "user", raw_question, payload=user_payload, trace_id=trace_id)
+        chat = DB.get_chat(chat_id, owner_id=owner_id, include_legacy=include_legacy)
+        if chat and (not chat.get("title") or chat["title"] == "New chat"):
+            DB.update_chat_title(chat_id, raw_question[:60], owner_id=owner_id)
+
+        history = _load_history(chat_id, owner_id=owner_id, include_legacy=include_legacy)
+        if project_notes:
+            note_lines = "\n".join(f"- {n['title']}: {n['content'][:300]}" for n in project_notes)
+            history.append({"role": "project_notes", "content": f"Saved project notes:\n{note_lines}"})
+        analysis_history = _history_with_analysis_question(history, raw_question, question)
         request_id = uuid.uuid4().hex[:12]
 
         # Explicitly capture current context for the background stream
@@ -3956,12 +4670,13 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
 
         async def event_stream() -> AsyncIterator[dict[str, Any]]:
             # Re-attach parent context inside the generator thread/loop
+            nonlocal llm_router, model_preset, model_selection
             token = attach(parent_context)
             try:
                 loop = asyncio.get_running_loop()
 
                 if selected_sources:
-                    if len(selected_sources) == 1:
+                    if len(selected_sources) == 1 and not selected_mcp_states:
                         row, selected_source = selected_sources[0]
                         meta_source = {
                             "id": row["id"],
@@ -3971,19 +4686,20 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         }
                     else:
                         total_rows = sum(int(row.get("rows") or 0) for row, _ in selected_sources)
+                        total_rows += sum(len(s.tools) for s in selected_mcp_states)
+                        names = [row["name"] for row, _ in selected_sources] + [s.name for s in selected_mcp_states]
                         meta_source = {
                             "id": "multi",
-                            "name": ", ".join(row["name"] for row, _ in selected_sources[:3]) + ("…" if len(selected_sources) > 3 else ""),
+                            "name": ", ".join(names[:3]) + ("…" if len(names) > 3 else ""),
                             "kind": "multi",
                             "rows": total_rows,
                         }
-                elif has_mcp:
-                    visible_mcp = [s for s in pool.connectors.values() if s.status == "connected" and s.id in allowed_mcp_ids]
+                elif selected_mcp_states:
                     meta_source = {
-                        "id": None,
-                        "name": ", ".join(s.name for s in visible_mcp) or "MCP",
+                        "id": _mcp_source_id(selected_mcp_states[0].id) if len(selected_mcp_states) == 1 else "mcp",
+                        "name": ", ".join(s.name for s in selected_mcp_states) or "MCP",
                         "kind": "mcp",
-                        "rows": 0,
+                        "rows": sum(len(s.tools) for s in selected_mcp_states),
                     }
                 else:
                     meta_source = {"id": None, "name": "No source", "kind": "none", "rows": 0}
@@ -3992,18 +4708,13 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     "data": json.dumps({"chat_id": chat_id, "source": meta_source}),
                 }
                 yield {"event": "thinking", "data": json.dumps({"step": "Reading your question"})}
+                if model_selection.get("requested_model_mode") == "auto":
+                    selected_label = str(model_selection.get("effective_model_mode") or "flash").capitalize()
+                    yield {"event": "thinking", "data": json.dumps({"step": f"Auto selected {selected_label}"})}
 
                 # ── Travel domain fast-path ─────────────────────────────────────────
                 _proj_category = (project_instructions or {}).get("category", "")
-                _travel_keywords = ("flight", "airline", "airport", "fly ", "depart",
-                                    "cabin class", "economy class", "business class",
-                                    "travel to", "itinerary", " pnr ",
-                                    "hotel", "hotels", "stay", "lodging",
-                                    "accommodation", "check-in", "check in")
-                _is_travel_query = (
-                    _proj_category == "travel"
-                    or any(kw in question.lower() for kw in _travel_keywords)
-                )
+                _is_travel_query = _is_travel_fast_path(question, _proj_category, analysis_history)
                 if _is_travel_query and CONFIG.duffel_api_token:
                     try:
                         orchestrator = TravelOrchestrator()
@@ -4021,7 +4732,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                             db=DB,
                             config=CONFIG,
                             dataframes=_dfs,
-                            chat_history=history,
+                            chat_history=analysis_history,
                         ):
                             if ev.get("kind") == "thinking":
                                 yield {"event": "thinking", "data": json.dumps({"step": ev.get("step", ""), "progress": ev.get("progress")})}
@@ -4037,6 +4748,8 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                                     "travel_offers": ev.get("travel_offers", []),
                                     "hotel_offers": ev.get("hotel_offers", []),
                                     "travel_intent": ev.get("travel_intent", {}),
+                                    "model": model_selection["model"],
+                                    "model_selection": _payload_model_selection(model_selection),
                                 }
                                 DB.add_message(chat_id, "assistant", ev.get("text", ""), payload=_travel_payload)
                                 yield {"event": "travel_result", "data": json.dumps(_travel_payload)}
@@ -4047,21 +4760,21 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         # Fall through to standard SQL path on error
                 # ── End travel domain fast-path ────────────────────────────────────
 
-                if len(selected_sources) > 1 or selected_mcp or (source is None and has_mcp):
+                if len(selected_sources) > 1 or has_selected_mcp:
 
                     try:
-                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router, user_msg["id"]):
+                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, analysis_history, request_id, selected_mcp_ids, llm_router, user_msg["id"], model_selection):
                             yield ev
                     except Exception as exc:
                         log_event(LOGGERS["errors"], "multi_source_agent_error", request_id=request_id, error=str(exc))
                         err_msg = "An unexpected error occurred while working across the selected sources."
                         DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": str(exc)})
-                        yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": str(exc)})}
+                        yield _public_error_event(err_msg)
                         yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
                     return
 
                 try:
-                    mcp_summary_text = _build_mcp_summary(pool, allowed_mcp_ids) if has_mcp else ""
+                    mcp_summary_text = _build_mcp_summary(pool, selected_mcp_ids) if has_selected_mcp else ""
                     instruction_context = build_instruction_context(
                         source_instructions=source_instructions,
                         project_instructions=project_instructions,
@@ -4070,27 +4783,53 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         char_budget=3000,
                     )
                     if llm_router.available:
-                        intent, model_used, usage = await loop.run_in_executor(
-                            None,
-                            lambda: llm_router.classify_intent(
+                        def _classify_with(router: LLMRouter):
+                            return router.classify_intent(
                                 request_id=request_id,
                                 user_question=question,
                                 schema_context=source.schema,
-                                conversation_summary=conversation_summary(history),
+                                conversation_summary=conversation_summary(analysis_history),
                                 mcp_summary=mcp_summary_text,
                                 local_source_name=active_row["name"],
                                 instruction_context=instruction_context,
-                            ),
-                        )
+                            )
+
+                        try:
+                            intent, model_used, usage = await loop.run_in_executor(None, lambda: _classify_with(llm_router))
+                        except LLMUnavailable:
+                            if (
+                                model_selection.get("requested_model_mode") == "auto"
+                                and model_selection.get("effective_model_mode") == "flash"
+                            ):
+                                model_selection = {
+                                    **model_selection,
+                                    "effective_model_mode": "pro",
+                                    "model": _model_preset_for_mode("pro")["model"],
+                                    "selection_reason": f"{model_selection.get('selection_reason')}; escalated to Pro after Flash classification failure",
+                                }
+                                llm_router = _router_for_model_mode("pro")
+                                model_preset = _model_preset_for_mode("pro")
+                                yield {"event": "thinking", "data": json.dumps({"step": "Auto escalated to Pro"})}
+                                intent, model_used, usage = await loop.run_in_executor(None, lambda: _classify_with(llm_router))
+                            else:
+                                raise
                         if usage:
-	                            DB.add_token_usage(
-	                                project_id=chat.get("project_id") if chat else None,
-	                                user_id=owner_id,
-	                                model=model_used,
-	                                prompt_tokens=usage.get("prompt_tokens", 0),
-	                                completion_tokens=usage.get("completion_tokens", 0),
-	                                purpose="chat",
-	                            )
+                            prompt_tokens = usage.get("prompt_tokens", 0)
+                            completion_tokens = usage.get("completion_tokens", 0)
+                            DB.add_token_usage(
+                                project_id=chat.get("project_id") if chat else None,
+                                user_id=None if owner_id == "legacy" else owner_id,
+                                model=model_used,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                purpose="chat",
+                                **_token_usage_kwargs(
+                                    model_selection,
+                                    model=model_used,
+                                    prompt_tokens=prompt_tokens,
+                                    completion_tokens=completion_tokens,
+                                ),
+                            )
                     else:
                         intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
                     if model_used != "offline-heuristic":
@@ -4104,53 +4843,54 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     )
 
                     route = (intent.get("route") or "local").lower()
+                    ledger_plan = build_ledger_query_plan(question, source.allowed_columns) if source is not None else None
 
                     # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
-                    if route == "mcp" and has_mcp:
-                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, history, request_id, allowed_mcp_ids, llm_router, user_msg["id"]):
+                    if route == "mcp" and has_selected_mcp:
+                        async for ev in _run_multi_source_agent(chat_id, question, selected_sources, analysis_history, request_id, selected_mcp_ids, llm_router, user_msg["id"], model_selection):
                             yield ev
                         return
 
                     # Compound question that needs sequential SQL — route to local agent loop.
-                    if intent.get("intent_type") == "multi_step" and source is not None:
-                        async for ev in _run_local_agent(chat_id, question, source, history, request_id, model_used, llm_router, user_msg["id"]):
+                    if intent.get("intent_type") == "multi_step" and source is not None and ledger_plan is None:
+                        async for ev in _run_local_agent(chat_id, question, source, analysis_history, request_id, model_used, llm_router, user_msg["id"], model_selection):
                             yield ev
                         return
 
-                    if intent.get("intent_type") == "clarification":
+                    if intent.get("intent_type") == "clarification" and ledger_plan is None:
                         content = intent.get("clarifying_question") or "Can you clarify the metric or grouping?"
-                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used})
+                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used, "model_selection": _payload_model_selection(model_selection)})
                         yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
                         yield {"event": "done", "data": json.dumps({"message_id": msg["id"]})}
                         return
 
-                    if is_underspecified(intent, question, source.allowed_columns):
+                    if is_underspecified(intent, question, source.allowed_columns) and ledger_plan is None:
                         content = underspecified_clarification(source.allowed_columns, active_row["name"])
-                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used})
+                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used, "model_selection": _payload_model_selection(model_selection)})
                         yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
                         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
                         return
 
-                    if intent.get("intent_type") == "unsupported":
+                    if intent.get("intent_type") == "unsupported" and ledger_plan is None:
                         # Safety net: if the classifier missed the route field but MCP is connected,
                         # let the agent try (e.g. user asked about BigQuery while a CSV is active).
                         # However, if the user explicitly asked about the "table" or "file" or if the
                         # prompt classified it explicitly as 'local' route, don't hallucinate MCP calls.
-                        if has_mcp and route != "local" and "table" not in question.lower() and "file" not in question.lower():
-                            async for ev in _run_mcp_agent(chat_id, question, history, request_id, allowed_mcp_ids, llm_router, user_msg["id"]):
+                        if has_selected_mcp and route != "local" and "table" not in question.lower() and "file" not in question.lower():
+                            async for ev in _run_mcp_agent(chat_id, question, analysis_history, request_id, selected_mcp_ids, llm_router, user_msg["id"], model_selection):
                                 yield ev
                             return
                         content = (
                             intent.get("clarifying_question")
                             or f"I can only answer questions about the loaded source ({active_row['name']}). Try asking about its columns, totals, breakdowns, or trends."
                         )
-                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "unsupported", "model": model_used})
+                        msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "unsupported", "model": model_used, "model_selection": _payload_model_selection(model_selection)})
                         yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
                         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
                         return
 
-                    if intent.get("intent_type") == "multi_step":
-                        yield {"event": "thinking", "data": json.dumps({"step": f"Generating Python Data Analysis Script..."})}
+                    if intent.get("intent_type") == "multi_step" and ledger_plan is None:
+                        yield {"event": "thinking", "data": json.dumps({"step": "Preparing analysis"})}
                         try:
                             from backend.code_execution import CodeSandbox
                             code_prompt = (
@@ -4160,11 +4900,11 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                                 f"Print out the final answer clearly. If a chart is requested, use matplotlib to generate it (`plt.show()`).\n"
                                 f"Do NOT explain the code, just return the raw Python code wrapped in ```python."
                             )
-                            script_raw, _ = router._generate_text(code_prompt, request_id)
+                            script_raw, _ = llm_router._generate_text(code_prompt, request_id)
                             match = re.search(r"```(?:python)?\s+(.*?)\s+```", script_raw, re.DOTALL)
                             script = match.group(1).strip() if match else script_raw.strip()
 
-                            yield {"event": "thinking", "data": json.dumps({"step": f"Executing Python Script in E2B Cloud Sandbox..."})}
+                            yield {"event": "thinking", "data": json.dumps({"step": "Running analysis"})}
                             
                             # Prepare data subset
                             sample_df, _ = await loop.run_in_executor(
@@ -4210,10 +4950,10 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                             
                             summary_prompt = f"The python script produced this output:\n{output_text}\n\nSummarize the answer to the user's question: '{question}'. Keep it brief."
                             yield {"event": "thinking", "data": json.dumps({"step": "Putting an answer together"})}
-                            full_text, _ = router._generate_text(summary_prompt, request_id)
+                            full_text, _ = llm_router._generate_text(summary_prompt, request_id)
                             
                             full_text = _finalize_visible_answer(full_text, question, result_payload)
-                            payload = {"kind": "result", "model": model_used, "result": result_payload}
+                            payload = {"kind": "result", "model": model_used, "result": result_payload, "model_selection": _payload_model_selection(model_selection)}
                             msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
                             yield {"event": "text", "data": json.dumps({"delta": full_text})}
                             yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
@@ -4221,9 +4961,9 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         except Exception as e:
                             log_event(LOGGERS["query"], "sandbox_error", request_id=request_id, error=str(e))
                             # Fallback to standard SQL execution on failure
-                            yield {"event": "thinking", "data": json.dumps({"step": f"Python Sandbox failed, falling back to SQL..."})}
+                            yield {"event": "thinking", "data": json.dumps({"step": "Trying another analysis path"})}
 
-                    plan = build_query_plan(intent, question, source.allowed_columns)
+                    plan = ledger_plan or build_query_plan(intent, question, source.allowed_columns)
                     validate_readonly_sql(plan.sql)
 
                     filter_count = len(intent.get("filters") or [])
@@ -4245,14 +4985,14 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         except Exception as e:
                             last_error = str(e)
                             if attempt < max_retries - 1:
-                                yield {"event": "thinking", "data": json.dumps({"step": f"Correcting SQL syntax (Attempt {attempt+1}/{max_retries - 1})..."})}
+                                yield {"event": "thinking", "data": json.dumps({"step": "Adjusting query"})}
                                 correction_prompt = (
                                     f"The following DuckDB SQL query failed:\n\nSQL:\n{current_sql}\n\nError:\n{last_error}\n\n"
                                     f"Context: The available columns are {source.allowed_columns}. "
                                     f"Please output ONLY a corrected valid read-only DuckDB SQL query string wrapped in ```sql. Do not explain."
                                 )
                                 try:
-                                    corrected_sql_raw, _ = router._generate_text(correction_prompt, request_id)
+                                    corrected_sql_raw, _ = llm_router._generate_text(correction_prompt, request_id)
                                     match = re.search(r"```(?:sql)?\s+(.*?)\s+```", corrected_sql_raw, re.DOTALL)
                                     if match:
                                         current_sql = match.group(1).strip()
@@ -4269,6 +5009,16 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         raise ValueError(f"Failed to execute query after {max_retries} attempts. Last error: {last_error}")
 
                     log_event(LOGGERS["query"], "query_executed", request_id=request_id, source=source.source_kind, sql_hash=plan.cache_key, rows=len(df), elapsed_ms=elapsed_ms)
+                    if _is_no_match_aggregate_result(intent, df):
+                        full_text = _no_match_message(question)
+                        result_payload = _empty_result_payload(plan, question, elapsed_ms, source, model_used, chat_id)
+                        yield {"event": "result", "data": json.dumps(result_payload, default=str)}
+                        payload = {"kind": "result", "model": model_used, "result": result_payload, "model_selection": _payload_model_selection(model_selection)}
+                        msg = DB.add_message(chat_id, "assistant", full_text, payload=payload)
+                        yield {"event": "text", "data": json.dumps({"delta": full_text})}
+                        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+                        return
+
                     viz = choose_visualization(question, intent, df)
 
                     result_payload = {
@@ -4363,17 +5113,24 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         )
                         DB.add_token_usage(
                             project_id=chat.get("project_id") if chat else None,
-                            user_id=owner_id,
-	                            model=model_used,
-	                            prompt_tokens=estimate_tokens(prompt_for_answer),
-	                            completion_tokens=estimate_tokens(full_text),
-	                            purpose="chat",
-	                        )
+                            user_id=None if owner_id == "legacy" else owner_id,
+                            model=model_used,
+                            prompt_tokens=estimate_tokens(prompt_for_answer),
+                            completion_tokens=estimate_tokens(full_text),
+                            purpose="chat",
+                            **_token_usage_kwargs(
+                                model_selection,
+                                model=model_used,
+                                prompt_tokens=estimate_tokens(prompt_for_answer),
+                                completion_tokens=estimate_tokens(full_text),
+                            ),
+                        )
 
                     assistant_payload = {
                         "kind": "result",
                         "model": model_used,
                         "result": result_payload,
+                        "model_selection": _payload_model_selection(model_selection),
                     }
                     msg = DB.add_message(chat_id, "assistant", full_text, payload=assistant_payload)
 
@@ -4399,9 +5156,9 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     elif "LLMUnavailable" in type(exc).__name__ or "RESOURCE_EXHAUSTED" in detail or "429" in detail:
                         err_msg = "All language models are rate-limited right now. Wait a minute and retry."
                     else:
-                        err_msg = "I couldn't answer that from the available data. (Internal error logged — check /opt/datachat/logs/errors.log)"
+                        err_msg = "I couldn't answer that from the available data. The issue was logged for review."
                     DB.add_message(chat_id, "assistant", err_msg, payload={"kind": "error", "detail": detail})
-                    yield {"event": "error", "data": json.dumps({"message": err_msg, "detail": detail})}
+                    yield _public_error_event(err_msg)
                     yield {"event": "done", "data": json.dumps({"chat_id": chat_id})}
             finally:
                 detach(token)

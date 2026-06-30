@@ -19,6 +19,21 @@ type SortOption = "price" | "score" | "duration";
 type HotelSortOption = "score" | "price" | "rating";
 type Step = "outbound_flight" | "return_flight" | "hotel" | "itinerary";
 
+const RATES_PER_USD: Record<string, number> = {
+  USD: 1,
+  AED: 3.6725,
+  AUD: 1.52,
+  CAD: 1.36,
+  EUR: 0.92,
+  GBP: 0.79,
+  INR: 83,
+  JPY: 156,
+  SAR: 3.75,
+  ZAR: 18.5,
+};
+
+const DOWNLOAD_CURRENCIES = ["USD", "INR", "AED", "EUR", "GBP", "ZAR"];
+
 const formatCurrency = (amount: number, currency: string) => {
   try {
     return new Intl.NumberFormat(undefined, {
@@ -31,6 +46,16 @@ const formatCurrency = (amount: number, currency: string) => {
   }
 };
 
+const convertFromUsd = (amount: number, currency: string) => amount * (RATES_PER_USD[currency] ?? 1);
+
+const getHotelUsdTotal = (hotel: HotelOffer | null) => {
+  if (!hotel) return 0;
+  if (typeof hotel.total_price_usd === "number" && Number.isFinite(hotel.total_price_usd)) return hotel.total_price_usd;
+  if ((hotel.currency || "USD").toUpperCase() === "USD") return hotel.total_price;
+  const rate = RATES_PER_USD[(hotel.currency || "").toUpperCase()];
+  return rate ? hotel.total_price / rate : 0;
+};
+
 const getOutboundKey = (o: TravelOffer) => `${o.airline}-${o.departure_at}-${o.arrival_at}`;
 
 export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }: TravelResultPanelProps) {
@@ -39,14 +64,17 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   const [step, setStep] = useState<Step>(offers.length > 0 ? "outbound_flight" : "hotel");
   
   const [selectedOutboundKey, setSelectedOutboundKey] = useState<string | null>(null);
+  const [selectedOutboundOfferId, setSelectedOutboundOfferId] = useState<string | null>(null);
   const [selectedOfferId, setSelectedOfferId] = useState<string | null>(null);
   const [selectedHotelId, setSelectedHotelId] = useState<string | null>(null);
   const [hotelSkipped, setHotelSkipped] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [downloadCurrency, setDownloadCurrency] = useState("USD");
 
   const hasFlights = offers.length > 0;
   const hasHotels = hotels.length > 0;
+  const shouldShowHotelStep = intent.wants_hotels || hasHotels;
 
   // Process Outbound Offers
   const sortedOutboundOffers = useMemo(() => {
@@ -73,7 +101,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   // Process Return Offers based on selected outbound flight
   const sortedReturnOffers = useMemo(() => {
     if (!selectedOutboundKey) return [];
-    const matchingReturnOffers = offers.filter(o => getOutboundKey(o) === selectedOutboundKey);
+    const matchingReturnOffers = offers.filter(o => getOutboundKey(o) === selectedOutboundKey && !!o.return_slice);
     return [...matchingReturnOffers].sort((a, b) => {
       if (sortBy === "price") return a.price_usd - b.price_usd;
       if (sortBy === "duration") return (a.return_slice?.duration_minutes ?? 0) - (b.return_slice?.duration_minutes ?? 0);
@@ -93,16 +121,31 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   if (!hasFlights && !hasHotels) return null;
 
   const selectedFlight = offers.find((offer) => offer.offer_id === selectedOfferId) || null;
+  const selectedOutboundFlight = offers.find((offer) => offer.offer_id === selectedOutboundOfferId) || null;
   const selectedHotel = hotels.find((hotel) => hotel.hotel_id === selectedHotelId) || null;
-  const hasMixedCurrencies = !!selectedFlight && !!selectedHotel && selectedFlight.currency !== selectedHotel.currency;
-  const totalLabel = hasMixedCurrencies ? "Mixed currencies" : "Total";
-  const totalValue = hasMixedCurrencies
-    ? `${formatCurrency(selectedFlight.price_usd, selectedFlight.currency)} + ${formatCurrency(selectedHotel.total_price, selectedHotel.currency)}`
-    : formatCurrency(
-        (selectedFlight?.price_usd || 0) + (selectedHotel?.total_price || 0),
-        selectedFlight?.currency || selectedHotel?.currency || "USD",
-      );
-  const canPersist = !!selectedFlight || !!selectedHotel;
+  const hasSelectedReturn = !!selectedFlight?.return_slice;
+  const selectedFlightPriceUsd = selectedFlight
+    ? selectedFlight.price_usd + (hasSelectedReturn ? (selectedOutboundFlight?.price_usd || 0) : 0)
+    : selectedOutboundFlight?.price_usd || 0;
+  const selectedHotelTotalUsd = getHotelUsdTotal(selectedHotel);
+  const totalUsd = selectedFlightPriceUsd + selectedHotelTotalUsd;
+  const totalValue = formatCurrency(totalUsd, "USD");
+  const downloadTotalValue = formatCurrency(convertFromUsd(totalUsd, downloadCurrency), downloadCurrency);
+  const downloadCurrencyOptions = Array.from(new Set([
+    ...DOWNLOAD_CURRENCIES,
+    selectedHotel?.currency?.toUpperCase(),
+    selectedFlight?.original_currency?.toUpperCase(),
+  ].filter(Boolean) as string[])).filter((currency) => RATES_PER_USD[currency]);
+  const canPersist = !!selectedFlight;
+  const persistedFlight = selectedFlight && selectedOutboundFlight && hasSelectedReturn
+    ? {
+        ...selectedFlight,
+        outbound_offer_id: selectedOutboundFlight.offer_id,
+        return_offer_id: selectedFlight.offer_id,
+        price_usd: selectedFlightPriceUsd,
+        currency: "USD",
+      }
+    : selectedFlight;
 
   const goNextFromOutbound = () => {
     const options = offers.filter(o => getOutboundKey(o) === selectedOutboundKey);
@@ -114,7 +157,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
       // It's a one-way trip
       const cheapest = [...options].sort((a, b) => a.price_usd - b.price_usd)[0];
       if (cheapest) setSelectedOfferId(cheapest.offer_id);
-      setStep(hasHotels ? "hotel" : "itinerary");
+      setStep(shouldShowHotelStep ? "hotel" : "itinerary");
     }
   };
 
@@ -124,7 +167,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   };
 
   const goNextFromReturn = () => {
-    setStep(hasHotels ? "hotel" : "itinerary");
+    setStep(shouldShowHotelStep ? "hotel" : "itinerary");
   };
 
   const goBackFromHotel = () => {
@@ -140,7 +183,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
   };
 
   const goNextFromHotel = () => setStep("itinerary");
-  const goBackFromItinerary = () => setStep(hasHotels ? "hotel" : (hasFlights ? (selectedFlight?.return_slice ? "return_flight" : "outbound_flight") : "outbound_flight"));
+  const goBackFromItinerary = () => setStep(shouldShowHotelStep ? "hotel" : (hasFlights ? (selectedFlight?.return_slice ? "return_flight" : "outbound_flight") : "outbound_flight"));
 
   const downloadItinerary = async () => {
     if (!canPersist || !selectedFlight) return;
@@ -150,7 +193,7 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
       const saved = await api.saveTravelJourney({
         chat_id: chatId ?? null,
         intent,
-        offer: selectedFlight,
+        offer: persistedFlight || selectedFlight,
         hotel_offer: selectedHotel,
         status: "downloaded",
       });
@@ -237,13 +280,13 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
         startY: currentY,
         head: [["Item", "Price"]],
         body: [
-          ...(selectedFlight ? [["Flight Total", formatCurrency(selectedFlight.price_usd, selectedFlight.currency)]] : []),
-          ...(selectedHotel ? [["Hotel Total", formatCurrency(selectedHotel.total_price, selectedHotel.currency)]] : []),
-          ["Grand Total", totalValue]
+          ...(selectedFlight ? [["Flight Total", formatCurrency(convertFromUsd(selectedFlightPriceUsd, downloadCurrency), downloadCurrency)]] : []),
+          ...(selectedHotel ? [["Hotel Total", formatCurrency(convertFromUsd(selectedHotelTotalUsd, downloadCurrency), downloadCurrency)]] : []),
+          ["Grand Total", downloadTotalValue]
         ],
-        theme: 'plain',
-        styles: { fontStyle: 'bold' },
-        margin: { top: 10 }
+          theme: 'plain',
+          styles: { fontStyle: 'bold' },
+          margin: { top: 10 }
       });
 
       doc.save(`itinerary_${saved.id}.pdf`);
@@ -300,7 +343,13 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
                   mode="outbound_only"
                   selected={selectedOutboundKey === getOutboundKey(offer)}
                   selectLabel={`Select outbound flight to ${offer.destination}`}
-                  onSelect={() => setSelectedOutboundKey(getOutboundKey(offer))}
+                  onSelect={() => {
+                    setSelectedOutboundKey(getOutboundKey(offer));
+                    setSelectedOutboundOfferId(offer.offer_id);
+                    setSelectedOfferId(null);
+                    setSelectedHotelId(null);
+                    setHotelSkipped(false);
+                  }}
                 />
               </div>
             ))}
@@ -330,7 +379,11 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
                   mode="return_only"
                   selected={selectedOfferId === offer.offer_id}
                   selectLabel={`Select return flight to ${offer.origin}`}
-                  onSelect={() => setSelectedOfferId(offer.offer_id)}
+                  onSelect={() => {
+                    setSelectedOfferId(offer.offer_id);
+                    setSelectedHotelId(null);
+                    setHotelSkipped(false);
+                  }}
                 />
               </div>
             ))}
@@ -371,6 +424,13 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
               </div>
             ))}
           </div>
+          {!hasHotels && (
+            <div className="rounded-[12px] p-4" style={{ background: "var(--color-background-elevated)", border: "1px solid var(--color-border-secondary)" }}>
+              <p className="text-[13px] font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                No hotel options returned for this trip.
+              </p>
+            </div>
+          )}
           <WorkflowFooter>
             {hasFlights && (
               <button type="button" onClick={goBackFromHotel} className={actionButtonClass} style={secondaryButtonStyle}>
@@ -378,22 +438,40 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
                 Back
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedHotelId(null);
-                setHotelSkipped(true);
-                setStep("itinerary");
-              }}
-              className={actionButtonClass}
-              style={secondaryButtonStyle}
-            >
-              Skip hotel
-            </button>
-            <button type="button" onClick={goNextFromHotel} disabled={!selectedHotel && !hotelSkipped} className={actionButtonClass} style={primaryButtonStyle(!selectedHotel && !hotelSkipped)}>
-              Next
-              <ArrowRight size={14} />
-            </button>
+            {hasHotels ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedHotelId(null);
+                    setHotelSkipped(true);
+                    setStep("itinerary");
+                  }}
+                  className={actionButtonClass}
+                  style={secondaryButtonStyle}
+                >
+                  Skip hotel
+                </button>
+                <button type="button" onClick={goNextFromHotel} disabled={!selectedHotel && !hotelSkipped} className={actionButtonClass} style={primaryButtonStyle(!selectedHotel && !hotelSkipped)}>
+                  Next
+                  <ArrowRight size={14} />
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedHotelId(null);
+                  setHotelSkipped(true);
+                  setStep("itinerary");
+                }}
+                className={actionButtonClass}
+                style={primaryButtonStyle(false)}
+              >
+                Continue without hotel
+                <ArrowRight size={14} />
+              </button>
+            )}
           </WorkflowFooter>
         </>
       )}
@@ -407,9 +485,29 @@ export function TravelResultPanel({ offers, hotels, intent, chatId, onRefresh }:
             </p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <SummaryTile label="Flight" value={selectedFlight ? formatCurrency(selectedFlight.price_usd, selectedFlight.currency) : "Not selected"} />
+            <SummaryTile label="Flight" value={selectedFlight ? formatCurrency(selectedFlightPriceUsd, "USD") : "Not selected"} />
             <SummaryTile label="Hotel" value={selectedHotel ? formatCurrency(selectedHotel.total_price, selectedHotel.currency) : "Hotel skipped"} />
-            <SummaryTile label={totalLabel} value={totalValue} />
+            <SummaryTile label="Total" value={totalValue} />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-[minmax(180px,240px)_1fr] gap-3 items-end">
+            <label className="flex flex-col gap-1 text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--color-text-tertiary)" }}>
+              Download currency
+              <select
+                value={downloadCurrency}
+                onChange={(event) => setDownloadCurrency(event.target.value)}
+                className="rounded-[10px] px-3 py-2 text-[13px] font-bold outline-none"
+                style={{
+                  color: "var(--color-text-primary)",
+                  background: "var(--color-background-elevated)",
+                  border: "1px solid var(--color-border-secondary)",
+                }}
+              >
+                {downloadCurrencyOptions.map((currency) => (
+                  <option key={currency} value={currency}>{currency}</option>
+                ))}
+              </select>
+            </label>
+            <SummaryTile label="Download total" value={downloadTotalValue} />
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={goBackFromItinerary} className={actionButtonClass} style={secondaryButtonStyle}>

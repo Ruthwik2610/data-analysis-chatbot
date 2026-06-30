@@ -7,8 +7,11 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+from src.currency import convert_money
 
 
 SCHEMA = """
@@ -233,6 +236,10 @@ CREATE TABLE IF NOT EXISTS token_usage (
   project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
   user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
   model TEXT NOT NULL,
+  requested_model_mode TEXT,
+  effective_model_mode TEXT,
+  selection_reason TEXT,
+  estimated_cost_usd REAL,
   purpose TEXT NOT NULL DEFAULT 'chat',
   prompt_tokens INTEGER NOT NULL DEFAULT 0,
   completion_tokens INTEGER NOT NULL DEFAULT 0,
@@ -287,7 +294,54 @@ CREATE TABLE IF NOT EXISTS travel_journeys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_travel_journeys_owner ON travel_journeys(owner_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS travel_agent_trips (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
+  status TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_travel_agent_trips_owner ON travel_agent_trips(owner_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS travel_agent_audit_events (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT 'legacy',
+  trip_id TEXT,
+  event_type TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_travel_agent_audit_owner ON travel_agent_audit_events(owner_id, created_at DESC);
 """
+
+
+def _parse_iso_timestamp(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return time.time()
+    return time.time()
+
+
+def _format_unix_timestamp(value: Any) -> str:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        timestamp = time.time()
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+def _redact_travel_agent_text(text: str) -> str:
+    from src.travel_agent_security import redact_sensitive_text
+
+    return redact_sensitive_text(text)
 
 
 class Storage:
@@ -316,6 +370,10 @@ class Storage:
             self._ensure_column(con, "user_feedback", "category", "TEXT NOT NULL DEFAULT 'feedback'")
             self._ensure_column(con, "user_feedback", "status", "TEXT NOT NULL DEFAULT 'open'")
             self._ensure_column(con, "token_usage", "purpose", "TEXT NOT NULL DEFAULT 'chat'")
+            self._ensure_column(con, "token_usage", "requested_model_mode", "TEXT")
+            self._ensure_column(con, "token_usage", "effective_model_mode", "TEXT")
+            self._ensure_column(con, "token_usage", "selection_reason", "TEXT")
+            self._ensure_column(con, "token_usage", "estimated_cost_usd", "REAL")
             self._ensure_column(con, "travel_journeys", "owner_id", "TEXT NOT NULL DEFAULT 'legacy'")
             self._ensure_column(con, "travel_journeys", "hotel_offer_json", "TEXT")
             self._ensure_column(con, "travel_journeys", "total_price_usd", "REAL")
@@ -462,6 +520,94 @@ class Storage:
             rows = con.execute("SELECT * FROM travel_journeys WHERE owner_id = ? ORDER BY created_at DESC", (owner_id,)).fetchall()
         return [dict(r) for r in rows]
 
+    # -- travel agent product -----------------------------------------------
+    def save_travel_agent_trip(self, owner_id: str, trip: dict[str, Any], events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        trip_id = str(trip["id"])
+        created_at = _parse_iso_timestamp(trip.get("created_at"))
+        payload_json = json.dumps(trip)
+        with self._conn() as con:
+            con.execute(
+                """
+                INSERT OR REPLACE INTO travel_agent_trips (id, owner_id, status, risk, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (trip_id, owner_id, trip.get("status", "draft"), trip.get("risk", "low"), payload_json, created_at),
+            )
+            for event in events or []:
+                self.save_travel_agent_audit_event(owner_id=owner_id, event=event, conn=con)
+            row = con.execute(
+                "SELECT payload_json FROM travel_agent_trips WHERE id = ? AND owner_id = ?",
+                (trip_id, owner_id),
+            ).fetchone()
+        return json.loads(row["payload_json"])
+
+    def list_travel_agent_trips(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT payload_json FROM travel_agent_trips WHERE owner_id = ? ORDER BY created_at DESC",
+                (owner_id,),
+            ).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    def save_travel_agent_audit_event(
+        self,
+        owner_id: str,
+        event: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        params = (
+            event["id"],
+            owner_id,
+            event.get("trip_id"),
+            event["event_type"],
+            _redact_travel_agent_text(str(event.get("message") or "")),
+            _parse_iso_timestamp(event.get("created_at")),
+        )
+        sql = """
+            INSERT OR REPLACE INTO travel_agent_audit_events
+              (id, owner_id, trip_id, event_type, message, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """
+        if conn is not None:
+            conn.execute(sql, params)
+            return event
+        with self._conn() as local_conn:
+            local_conn.execute(sql, params)
+        return event
+
+    def list_travel_agent_audit_events(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT id, trip_id, event_type, message, created_at
+                FROM travel_agent_audit_events
+                WHERE owner_id = ?
+                ORDER BY created_at DESC
+                """,
+                (owner_id,),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "trip_id": row["trip_id"],
+                "event_type": row["event_type"],
+                "message": row["message"],
+                "created_at": _format_unix_timestamp(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def travel_agent_admin_summary(self, owner_id: str = "legacy") -> dict[str, int]:
+        trips = self.list_travel_agent_trips(owner_id=owner_id)
+        audit_count = len(self.list_travel_agent_audit_events(owner_id=owner_id))
+        return {
+            "total_trips": len(trips),
+            "draft_trips": sum(1 for trip in trips if trip.get("status") == "draft"),
+            "booked_trips": sum(1 for trip in trips if trip.get("status") == "booked"),
+            "high_risk_trips": sum(1 for trip in trips if trip.get("risk") == "high"),
+            "audit_events": audit_count,
+        }
+
     @staticmethod
     def _offer_price_usd(offer: dict[str, Any] | None, key: str) -> float:
         if not offer:
@@ -475,10 +621,15 @@ class Storage:
     def _hotel_price_usd(hotel_offer: dict[str, Any] | None) -> float:
         if not hotel_offer:
             return 0.0
+        explicit = Storage._offer_price_usd(hotel_offer, "total_price_usd")
+        if explicit:
+            return explicit
         currency = str(hotel_offer.get("currency") or "USD").upper()
-        if currency != "USD":
-            return 0.0
-        return Storage._offer_price_usd(hotel_offer, "total_price")
+        total = Storage._offer_price_usd(hotel_offer, "total_price")
+        if currency == "USD":
+            return total
+        converted = convert_money(total, currency, "USD")
+        return converted.amount if converted else 0.0
 
     @staticmethod
     def _travel_journey_record(row: sqlite3.Row) -> dict[str, Any]:
@@ -693,12 +844,13 @@ class Storage:
             )
         return {"source_id": source_id, "instructions": instructions, "updated_at": now}
 
-    def delete_source(self, source_id: str, owner_id: str | None = None) -> None:
+    def delete_source(self, source_id: str, owner_id: str | None = None) -> bool:
         with self._conn() as con:
             if owner_id is None:
-                con.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+                cursor = con.execute("DELETE FROM sources WHERE id = ?", (source_id,))
             else:
-                con.execute("DELETE FROM sources WHERE id = ? AND owner_id = ?", (source_id, owner_id))
+                cursor = con.execute("DELETE FROM sources WHERE id = ? AND owner_id = ?", (source_id, owner_id))
+            return cursor.rowcount > 0
 
     def set_active_source(self, source_id: str | None, owner_id: str = "legacy") -> None:
         with self._conn() as con:
@@ -758,10 +910,10 @@ class Storage:
         return redacted
 
     @staticmethod
-    def _mcp_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _mcp_row_to_dict(row: sqlite3.Row, *, redact_args: bool = True) -> dict[str, Any]:
         data = dict(row)
         raw_args = json.loads(data["args_json"]) if data.get("args_json") else []
-        data["args"] = Storage._redact_args(raw_args)
+        data["args"] = Storage._redact_args(raw_args) if redact_args else raw_args
         data["tools"] = json.loads(data["tools_json"]) if data.get("tools_json") else []
         data.pop("args_json", None)
         data.pop("tools_json", None)
@@ -840,6 +992,14 @@ class Storage:
             else:
                 row = con.execute("SELECT * FROM mcp_connectors WHERE id = ? AND owner_id = ?", (connector_id, owner_id)).fetchone()
         return self._mcp_row_to_dict(row) if row else None
+
+    def get_mcp_connector_record(self, connector_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+        with self._conn() as con:
+            if owner_id is None:
+                row = con.execute("SELECT * FROM mcp_connectors WHERE id = ?", (connector_id,)).fetchone()
+            else:
+                row = con.execute("SELECT * FROM mcp_connectors WHERE id = ? AND owner_id = ?", (connector_id, owner_id)).fetchone()
+        return self._mcp_row_to_dict(row, redact_args=False) if row else None
 
     def list_mcp_connectors(self, owner_id: str = "legacy") -> list[dict[str, Any]]:
         with self._conn() as con:
@@ -1654,16 +1814,36 @@ class Storage:
         prompt_tokens: int,
         completion_tokens: int,
         purpose: str = "chat",
+        requested_model_mode: str | None = None,
+        effective_model_mode: str | None = None,
+        selection_reason: str | None = None,
+        estimated_cost_usd: float | None = None,
     ) -> None:
         usage_id = f"tok_{uuid.uuid4().hex[:10]}"
         now = time.time()
         with self._conn() as con:
             con.execute(
                 """
-                INSERT INTO token_usage (id, project_id, user_id, model, purpose, prompt_tokens, completion_tokens, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO token_usage (
+                  id, project_id, user_id, model, requested_model_mode, effective_model_mode,
+                  selection_reason, estimated_cost_usd, purpose, prompt_tokens, completion_tokens, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (usage_id, project_id, user_id, model, purpose, prompt_tokens, completion_tokens, now),
+                (
+                    usage_id,
+                    project_id,
+                    user_id,
+                    model,
+                    requested_model_mode,
+                    effective_model_mode,
+                    selection_reason,
+                    estimated_cost_usd,
+                    purpose,
+                    prompt_tokens,
+                    completion_tokens,
+                    now,
+                ),
             )
 
     def list_token_usage_by_project(self) -> list[dict[str, Any]]:
@@ -1675,7 +1855,8 @@ class Storage:
                   p.id as project_id,
                   SUM(tu.prompt_tokens) as prompt_tokens,
                   SUM(tu.completion_tokens) as completion_tokens,
-                  SUM(tu.prompt_tokens + tu.completion_tokens) as total_tokens
+                  SUM(tu.prompt_tokens + tu.completion_tokens) as total_tokens,
+                  SUM(COALESCE(tu.estimated_cost_usd, 0)) as estimated_cost_usd
                 FROM projects p
                 JOIN token_usage tu ON tu.project_id = p.id
                 GROUP BY p.id
@@ -1693,9 +1874,30 @@ class Storage:
                   SUM(prompt_tokens) as prompt_tokens,
                   SUM(completion_tokens) as completion_tokens,
                   SUM(prompt_tokens + completion_tokens) as total_tokens,
+                  SUM(COALESCE(estimated_cost_usd, 0)) as estimated_cost_usd,
                   COUNT(*) as request_count
                 FROM token_usage
                 GROUP BY purpose
+                ORDER BY total_tokens DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_token_usage_by_model_mode(self) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT
+                  COALESCE(requested_model_mode, 'unspecified') as requested_model_mode,
+                  COALESCE(effective_model_mode, 'unspecified') as effective_model_mode,
+                  model,
+                  SUM(prompt_tokens) as prompt_tokens,
+                  SUM(completion_tokens) as completion_tokens,
+                  SUM(prompt_tokens + completion_tokens) as total_tokens,
+                  SUM(COALESCE(estimated_cost_usd, 0)) as estimated_cost_usd,
+                  COUNT(*) as request_count
+                FROM token_usage
+                GROUP BY requested_model_mode, effective_model_mode, model
                 ORDER BY total_tokens DESC
                 """
             ).fetchall()

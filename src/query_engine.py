@@ -284,6 +284,269 @@ def underspecified_clarification(allowed_columns: set[str], source_name: str = "
     )
 
 
+LEDGER_ROLE_ALIASES = {
+    "voucher": ("voucherno", "voucher_no", "voucher_number", "vno", "voucher"),
+    "line": ("voucherlineno", "voucher_line_no", "voucher_line_number", "line_no", "lineno"),
+    "date": ("date", "voucherdate", "voucher_date", "transaction_date", "posting_date"),
+    "account": ("account", "accountname", "account_name", "ledgeraccount", "ledger_account"),
+    "contra": ("contraaccount", "contra_account", "contra", "contraaccountname", "contra_account_name"),
+    "debit": ("debit", "debitamount", "debit_amount", "dr", "dramount", "dr_amount"),
+    "credit": ("credit", "creditamount", "credit_amount", "cr", "cramount", "cr_amount"),
+    "branch": ("branch", "branchname", "branch_name"),
+    "customer": ("customer", "customername", "customer_name", "party", "partyname", "party_name"),
+}
+
+
+def _ledger_roles(allowed_columns: set[str]) -> dict[str, str]:
+    canonical_lookup = {canonical_column(col): col for col in allowed_columns}
+    roles: dict[str, str] = {}
+    for role, aliases in LEDGER_ROLE_ALIASES.items():
+        for alias in aliases:
+            col = canonical_lookup.get(alias)
+            if col:
+                roles[role] = col
+                break
+    return roles
+
+
+def is_ledger_schema(allowed_columns: set[str]) -> bool:
+    roles = _ledger_roles(allowed_columns)
+    return all(role in roles for role in ("voucher", "account", "debit", "credit"))
+
+
+def _ledger_amount_expr(column: str | None) -> str:
+    if not column:
+        return "0.0"
+    ident = quote_ident(column)
+    cleaned = f"regexp_replace(CAST({ident} AS VARCHAR), '[^0-9.\\-]', '', 'g')"
+    return f"COALESCE(TRY_CAST({ident} AS DOUBLE), TRY_CAST({cleaned} AS DOUBLE), 0.0)"
+
+
+def _ledger_contains_expr(columns: list[str], terms: list[str]) -> str:
+    clauses = []
+    for column in columns:
+        ident = quote_ident(column)
+        for term in terms:
+            safe = term.lower().replace("'", "''")
+            clauses.append(f"LOWER(CAST({ident} AS VARCHAR)) LIKE '%{safe}%'")
+    return "(" + " OR ".join(clauses) + ")" if clauses else "(FALSE)"
+
+
+def _ledger_contains_filter(columns: list[str], value: str) -> tuple[str, list[Any]]:
+    clauses = [f"LOWER(CAST({quote_ident(column)} AS VARCHAR)) LIKE ?" for column in columns]
+    return "(" + " OR ".join(clauses) + ")", [f"%{value.lower()}%"] * len(clauses)
+
+
+def _ledger_select_columns(roles: dict[str, str], include_branch: bool = True) -> list[str]:
+    ordered_roles = ["date", "voucher", "line", "branch", "account", "contra", "debit", "credit"]
+    if not include_branch:
+        ordered_roles.remove("branch")
+    return [roles[role] for role in ordered_roles if role in roles]
+
+
+def _extract_voucher_value(question: str) -> str | None:
+    patterns = [
+        r"\bvoucher\s*(?:no|number|#)\.?\s*[:#-]?\s*([a-z0-9/_-]+)\b",
+        r"\bvoucher\s+([0-9][a-z0-9/_-]*)\b",
+        r"\bvoucherno\.?\s*[:#-]?\s*([a-z0-9/_-]+)\b",
+        r"\bvno\.?\s*[:#-]?\s*([a-z0-9/_-]+)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, question, re.I)
+        if match:
+            value = match.group(1).strip()
+            if value and value.lower() not in {"level", "wise", "report"}:
+                return value
+    return None
+
+
+def _extract_account_search_term(question: str) -> str | None:
+    q = question.lower()
+    known_terms = ("hdfc", "cgst", "sgst", "igst", "gst")
+    for term in known_terms:
+        if term in q:
+            return term
+    match = re.search(r"\binvolving\s+(.+?)(?:\s+and\s+|\s+by\s+|$)", question, re.I)
+    if match:
+        value = re.sub(r"\b(transactions?|entries|account|accounts?)\b", "", match.group(1), flags=re.I).strip()
+        if value:
+            return value
+    return None
+
+
+def build_ledger_query_plan(question: str, allowed_columns: set[str]) -> QueryPlan | None:
+    roles = _ledger_roles(allowed_columns)
+    if not all(role in roles for role in ("voucher", "account", "debit", "credit")):
+        return None
+
+    q = question.lower()
+    asks_ledger_entries = "ledger" in q and any(term in q for term in ("entry", "entries", "transaction", "transactions"))
+    asks_balance_validation = "voucher" in q and (
+        "balanced" in q
+        or "unbalanced" in q
+        or "balance validation" in q
+        or "validate" in q and "balance" in q
+        or ("debit" in q and "credit" in q and "balance" in q)
+    )
+    account_cols = [roles["account"]] + ([roles["contra"]] if "contra" in roles else [])
+    debit_expr = _ledger_amount_expr(roles.get("debit"))
+    credit_expr = _ledger_amount_expr(roles.get("credit"))
+    voucher = roles["voucher"]
+
+    voucher_value = _extract_voucher_value(question)
+    if voucher_value and any(term in q for term in ("list", "show", "entries", "details", "voucher")):
+        selected = _ledger_select_columns(roles)
+        sql = f"SELECT {', '.join(quote_ident(col) for col in selected)} FROM orders WHERE CAST({quote_ident(voucher)} AS VARCHAR) = ?"
+        order_cols = [roles.get("date"), roles.get("line"), voucher]
+        order_by = [quote_ident(col) for col in order_cols if col]
+        if order_by:
+            sql += " ORDER BY " + ", ".join(order_by)
+        sql += " LIMIT ?"
+        return QueryPlan(
+            sql=sql,
+            params=[voucher_value, 25000],
+            display_type="table",
+            title="Voucher Ledger Entries",
+            how="Returned raw ledger rows for the requested voucher without aggregating away line-level details.",
+        )
+
+    if asks_balance_validation:
+        sql = (
+            "WITH voucher_totals AS ("
+            f"SELECT {quote_ident(voucher)} AS voucher_no, "
+            f"SUM({debit_expr}) AS total_debit, "
+            f"SUM({credit_expr}) AS total_credit "
+            "FROM orders GROUP BY 1"
+            ") "
+            "SELECT voucher_no, total_debit, total_credit, "
+            "ROUND(total_debit - total_credit, 2) AS balance_difference, "
+            "CASE WHEN ABS(total_debit - total_credit) <= 0.01 THEN 'balanced' ELSE 'unbalanced' END AS status "
+            "FROM voucher_totals ORDER BY ABS(total_debit - total_credit) DESC, voucher_no LIMIT 500"
+        )
+        return QueryPlan(sql=sql, params=[], display_type="table", title="Voucher Balance Validation", how="Compared total debit and total credit at voucher grain.")
+
+    if any(term in q for term in ("duplicate", "duplicates")):
+        selected = _ledger_select_columns(roles)
+        group_cols = [quote_ident(col) for col in selected]
+        sql = (
+            f"SELECT {', '.join(group_cols)}, COUNT(*) AS duplicate_count "
+            "FROM orders "
+            f"GROUP BY {', '.join(group_cols)} "
+            "HAVING COUNT(*) > 1 "
+            f"ORDER BY duplicate_count DESC, {quote_ident(voucher)} LIMIT 500"
+        )
+        return QueryPlan(sql=sql, params=[], display_type="table", title="Duplicate Ledger Entries", how="Grouped complete ledger-entry signatures and returned only repeated rows.")
+
+    if any(term in q for term in ("zero-value", "zero value", "zero-value transactions", "zero value transactions")):
+        selected = _ledger_select_columns(roles)
+        sql = (
+            f"SELECT {', '.join(quote_ident(col) for col in selected)} FROM orders "
+            f"WHERE ABS({debit_expr}) <= 0.01 AND ABS({credit_expr}) <= 0.01 "
+            f"ORDER BY {quote_ident(voucher)} LIMIT 500"
+        )
+        return QueryPlan(sql=sql, params=[], display_type="table", title="Zero-Value Ledger Entries", how="Returned ledger entries where both debit and credit are zero.")
+
+    if asks_ledger_entries:
+        selected = _ledger_select_columns(roles)
+        sql = f"SELECT {', '.join(quote_ident(col) for col in selected)} FROM orders"
+        order_cols = [roles.get("date"), roles.get("line"), voucher]
+        order_by = [quote_ident(col) for col in order_cols if col]
+        if order_by:
+            sql += " ORDER BY " + ", ".join(order_by)
+        sql += " LIMIT ?"
+        return QueryPlan(
+            sql=sql,
+            params=[25000],
+            display_type="table",
+            title="Voucher Ledger Entries",
+            how="Returned raw ledger rows without aggregating away line-level details.",
+        )
+
+    if "branch" in q and any(term in q for term in ("sales", "gst", "customer", "customers")) and "branch" in roles:
+        sales_condition = _ledger_contains_expr(account_cols, ["sales", "revenue"])
+        gst_condition = _ledger_contains_expr(account_cols, ["cgst", "sgst", "igst", "gst"])
+        customer_col = roles.get("customer") or roles["account"]
+        sql = (
+            f"SELECT {quote_ident(roles['branch'])} AS branch, "
+            f"SUM(CASE WHEN {sales_condition} THEN {credit_expr} - {debit_expr} ELSE 0 END) AS total_sales, "
+            f"SUM(CASE WHEN {gst_condition} THEN {credit_expr} - {debit_expr} ELSE 0 END) AS total_gst, "
+            f"COUNT(DISTINCT NULLIF(TRIM(CAST({quote_ident(customer_col)} AS VARCHAR)), '')) AS customer_count, "
+            "COUNT(*) AS entry_count "
+            "FROM orders GROUP BY 1 ORDER BY total_sales DESC NULLS LAST, branch LIMIT 500"
+        )
+        return QueryPlan(sql=sql, params=[], display_type="table", title="Branch Sales GST And Customers", how="Grouped ledger activity by branch and computed sales, GST, and distinct customer/account counts.")
+
+    if "gstin" not in q and any(term in q for term in ("cgst", "sgst", "igst", "gst")) and any(term in q for term in ("calculate", "total", "gst")):
+        cgst = _ledger_contains_expr(account_cols, ["cgst"])
+        sgst = _ledger_contains_expr(account_cols, ["sgst"])
+        igst = _ledger_contains_expr(account_cols, ["igst"])
+        gst_any = _ledger_contains_expr(account_cols, ["cgst", "sgst", "igst"])
+        sql = (
+            "WITH gst_entries AS ("
+            f"SELECT CASE WHEN {cgst} THEN 'CGST' WHEN {sgst} THEN 'SGST' WHEN {igst} THEN 'IGST' ELSE 'GST' END AS gst_component, "
+            f"{debit_expr} AS debit_amount, {credit_expr} AS credit_amount "
+            f"FROM orders WHERE {gst_any}"
+            ") "
+            "SELECT gst_component, SUM(debit_amount) AS total_debit, SUM(credit_amount) AS total_credit, "
+            "SUM(credit_amount - debit_amount) AS net_credit, COUNT(*) AS entry_count "
+            "FROM gst_entries GROUP BY gst_component ORDER BY gst_component"
+        )
+        return QueryPlan(sql=sql, params=[], display_type="table", title="GST Account Totals", how="Summed debit and credit for CGST, SGST, and IGST ledger accounts.")
+
+    account_term = _extract_account_search_term(question)
+    if account_term and any(term in q for term in ("involving", "relationship", "summarize", "summary", "transactions")):
+        where_sql, params = _ledger_contains_filter(account_cols, account_term)
+        group_cols = [roles["account"]] + ([roles["contra"]] if "contra" in roles else [])
+        quoted_groups = [quote_ident(col) for col in group_cols]
+        activity = f"(SUM({debit_expr}) + SUM({credit_expr}))"
+        sql = (
+            f"SELECT {', '.join(f'{quote_ident(col)} AS {quote_ident(col)}' for col in group_cols)}, "
+            f"SUM({debit_expr}) AS total_debit, SUM({credit_expr}) AS total_credit, COUNT(*) AS entry_count "
+            f"FROM orders WHERE {where_sql} GROUP BY {', '.join(quoted_groups)} "
+            f"ORDER BY {activity} DESC NULLS LAST LIMIT 500"
+        )
+        return QueryPlan(sql=sql, params=params, display_type="table", title="Account Relationship Summary", how="Matched the requested account in account and contra-account fields, then summarized debit and credit by relationship.")
+
+    if any(term in q for term in ("contributes", "contribution", "highest percentage", "total business")):
+        customer_col = roles.get("customer") or roles["account"]
+        activity = f"({debit_expr} + {credit_expr})"
+        sql = (
+            "WITH customer_totals AS ("
+            f"SELECT {quote_ident(customer_col)} AS customer, SUM({activity}) AS business_value "
+            "FROM orders GROUP BY 1"
+            "), grand_total AS (SELECT SUM(business_value) AS total_business FROM customer_totals) "
+            "SELECT customer, business_value, "
+            "ROUND(100 * business_value / NULLIF(total_business, 0), 2) AS business_percentage "
+            "FROM customer_totals CROSS JOIN grand_total "
+            "ORDER BY business_value DESC NULLS LAST LIMIT 10"
+        )
+        return QueryPlan(sql=sql, params=[], display_type="table", title="Customer Business Contribution", how="Computed each customer/account share of total ledger activity.")
+
+    if "insight" in q or "insights" in q:
+        account = roles["account"]
+        zero_count = f"SUM(CASE WHEN ABS(debit_amount) <= 0.01 AND ABS(credit_amount) <= 0.01 THEN 1 ELSE 0 END)"
+        sql = (
+            "WITH amounts AS ("
+            f"SELECT {quote_ident(voucher)} AS voucher_no, {quote_ident(account)} AS account, "
+            f"{debit_expr} AS debit_amount, {credit_expr} AS credit_amount FROM orders"
+            "), voucher_totals AS ("
+            "SELECT voucher_no, SUM(debit_amount) AS total_debit, SUM(credit_amount) AS total_credit FROM amounts GROUP BY voucher_no"
+            "), account_totals AS ("
+            "SELECT account, SUM(debit_amount + credit_amount) AS activity_value FROM amounts GROUP BY account"
+            ") "
+            "SELECT 'Total vouchers' AS insight, CAST(COUNT(DISTINCT voucher_no) AS DOUBLE) AS value, '' AS detail FROM amounts "
+            "UNION ALL SELECT 'Total debit', SUM(debit_amount), '' FROM amounts "
+            "UNION ALL SELECT 'Total credit', SUM(credit_amount), '' FROM amounts "
+            "UNION ALL SELECT 'Unbalanced vouchers', CAST(COUNT(*) AS DOUBLE), '' FROM voucher_totals WHERE ABS(total_debit - total_credit) > 0.01 "
+            f"UNION ALL SELECT 'Zero-value entries', CAST({zero_count} AS DOUBLE), '' FROM amounts "
+            "UNION ALL SELECT 'Most active account', activity_value, account "
+            "FROM (SELECT account, activity_value FROM account_totals ORDER BY activity_value DESC NULLS LAST LIMIT 1)"
+        )
+        return QueryPlan(sql=sql, params=[], display_type="table", title="Ledger Business Insights", how="Generated a deterministic insight table from verified ledger aggregates.")
+
+    return None
+
+
 def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set[str]) -> QueryPlan:
     from opentelemetry import trace
     tracer = trace.get_tracer(__name__)
@@ -292,6 +555,10 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
         intent_type = intent.get("intent_type") or "aggregate"
         span.set_attribute("intent_type", intent_type)
         q = question.lower()
+
+    ledger_plan = build_ledger_query_plan(question, allowed_columns)
+    if ledger_plan is not None:
+        return ledger_plan
     
     if intent_type == "clarification":
         raise ValueError(intent.get("clarifying_question") or "I need one more detail to answer that.")
@@ -407,7 +674,8 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
         else:
             sql += f" ORDER BY {quote_ident(order_alias)} {direction} NULLS LAST"
         sql += f" LIMIT {limit}"
-    title = make_title(metric_column, aggregation, dimensions, date_grain, limit)
+    ranked_title = bool(re.search(r"\b(top|highest|best|most|largest|lowest|worst|bottom|least|smallest)\b", question.lower()))
+    title = make_title(metric_column, aggregation, dimensions, date_grain, limit, ranked=ranked_title)
     how = (
         f"Metric: {aggregation}({metric_column or '*'}); "
         f"grouped by: {', '.join(groups) if groups else 'none'}; "
@@ -549,6 +817,8 @@ def make_title(
     dimensions: list[str],
     date_grain: str | None,
     limit: int,
+    *,
+    ranked: bool = False,
 ) -> str:
     agg_label = _AGG_LABELS.get((aggregation or "sum").lower(), "Total")
     if metric_column:
@@ -562,6 +832,8 @@ def make_title(
     if date_grain:
         return f"{metric_name} Trend"
     if dimensions:
+        if not ranked:
+            return f"{metric_name} By {dimensions[0].replace('_', ' ').title()}"
         return f"Top {limit} {dimensions[0].replace('_', ' ').title()} By {metric_name}"
     return metric_name
 

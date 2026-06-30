@@ -1,16 +1,16 @@
 "use client";
 
 import React, { useEffect, useRef } from "react";
-import { AlertTriangle, ArrowRight, Paperclip, Plug, Sparkles } from "lucide-react";
-import type { Message, ModelFallbackNotice } from "@/lib/types";
+import { AlertTriangle, ArrowRight, Sparkles } from "lucide-react";
+import type { Message, ModelFallbackNotice, ResultPayload } from "@/lib/types";
 import { ResultBlock } from "./ResultBlock";
 import { InlineQuestion } from "./InlineQuestion";
 import { ThinkingIndicator } from "./ThinkingIndicator";
-import { FilePickButton } from "./FilePickButton";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { AnswerActions } from "./AnswerActions";
 import { TravelResultPanel } from "./TravelResultPanel";
 import { FollowUpChips } from "./FollowUpChips";
+import { artifactItems } from "@/lib/artifacts";
 
 interface MessageListProps {
   messages: Message[];
@@ -24,6 +24,7 @@ interface MessageListProps {
   onAskFollowUp?: (content: string) => void;
   onRetryQuestion?: (content: string) => void;
   onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
+  onOpenArtifact?: (artifactId: string) => void;
 }
 
 function formatRelative(ts?: number): string {
@@ -35,7 +36,7 @@ function formatRelative(ts?: number): string {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
-export function MessageList({ messages, loading, onPendingChoice, onPickFile, onConnectClick, currentChatId, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback }: MessageListProps) {
+export function MessageList({ messages, loading, onPendingChoice, currentChatId, currentProjectId, onSaveProjectNote, onAskFollowUp, onRetryQuestion, onFeedback, onOpenArtifact }: MessageListProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isStreaming = messages.some((m) => m.role === "assistant" && m.streaming);
 
@@ -56,12 +57,12 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
   }, [messages, loading, isStreaming]);
 
   if (messages.length === 0 && !loading) {
-    return <Greeting onPickFile={onPickFile} onConnectClick={onConnectClick} />;
+    return <Greeting />;
   }
 
   return (
     <div ref={ref} className="flex-1 overflow-y-auto scrollbar-thin px-6 py-10 flex flex-col min-h-0">
-      <div className="flex flex-col gap-6 mt-auto justify-end">
+      <div className="chat-content-frame flex flex-col gap-6 mt-auto justify-end">
         {messages.map((msg, idx) => {
             const isConsecutive = idx > 0 && messages[idx - 1].role === msg.role;
             const previousUserMessage = msg.role === "assistant"
@@ -78,6 +79,7 @@ export function MessageList({ messages, loading, onPendingChoice, onPickFile, on
                 onAskFollowUp={onAskFollowUp}
                 onRetryQuestion={previousUserMessage && onRetryQuestion ? () => onRetryQuestion(previousUserMessage.content) : undefined}
                 onFeedback={onFeedback}
+                onOpenArtifact={onOpenArtifact}
                 />
                 {idx === lastResultIdx && onAskFollowUp && (
                 <div className="mt-4">
@@ -101,6 +103,7 @@ const Bubble = React.memo(function Bubble({
   onAskFollowUp,
   onRetryQuestion,
   onFeedback,
+  onOpenArtifact,
 }: {
   message: Message;
   onChoose: (messageId: string, value: string | string[]) => void;
@@ -110,6 +113,7 @@ const Bubble = React.memo(function Bubble({
   onAskFollowUp?: (content: string) => void;
   onRetryQuestion?: () => void;
   onFeedback?: (message: Extract<Message, { role: "assistant" }>, rating: number, category: string) => void;
+  onOpenArtifact?: (artifactId: string) => void;
 }) {
   if (message.role === "user") {
     return (
@@ -145,6 +149,7 @@ const Bubble = React.memo(function Bubble({
     (message.travel_offers?.length ?? 0) > 0 ||
     (message.hotel_offers?.length ?? 0) > 0
   );
+  const hasResultPayload = !!message.result || (message.artifacts?.length ?? 0) > 0;
 
   return (
     <div className="self-start max-w-[720px] w-full animate-in slide-in-from-left-2 duration-500">
@@ -177,7 +182,20 @@ const Bubble = React.memo(function Bubble({
             onFeedback={(rating, category) => onFeedback?.(message, rating, category)}
           />
         )}
-        {message.result && <ResultBlock result={message.result} />}
+        {message.result && (() => {
+          const messageArtifacts = artifactItems([message]);
+          if (!message.streaming && onOpenArtifact && messageArtifacts.length > 1) {
+            const primaryArtifact = messageArtifacts[0];
+            return (
+              <ArtifactReference
+                result={primaryArtifact.result}
+                artifactCount={messageArtifacts.length}
+                onOpen={() => onOpenArtifact(primaryArtifact.id)}
+              />
+            );
+          }
+          return <ResultBlock result={message.result} narrative={message.content} />;
+        })()}
         {hasTravelData && message.travel_intent && (
           <TravelResultPanel
             offers={message.travel_offers || []}
@@ -203,7 +221,7 @@ const Bubble = React.memo(function Bubble({
             />
           </div>
         )}
-        {message.error && (
+        {message.error && !hasResultPayload && (
           <div
             className="mt-2 text-[12px] px-4 py-3 rounded-xl glass border-red-500/20 bg-red-500/[0.02] flex items-start gap-3"
             style={{
@@ -222,6 +240,42 @@ const Bubble = React.memo(function Bubble({
     </div>
   );
 });
+
+function ArtifactReference({
+  result,
+  artifactCount,
+  onOpen,
+}: {
+  result: ResultPayload;
+  artifactCount: number;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="mt-3 flex w-full items-center justify-between gap-3 rounded-[14px] px-4 py-3 text-left transition-all hover:-translate-y-[1px]"
+      style={{
+        background: "var(--color-background-secondary)",
+        border: "1px solid var(--color-border-secondary)",
+        boxShadow: "var(--shadow-sm)",
+      }}
+    >
+      <div className="min-w-0">
+        <div className="text-[10px] font-bold uppercase tracking-[0.18em]" style={{ color: "var(--color-text-tertiary)" }}>
+          {artifactCount} artifacts · {result.viz}
+        </div>
+        <div className="mt-1 truncate text-[13px] font-semibold" style={{ color: "var(--color-text-primary)" }}>
+          {result.title}
+        </div>
+        <div className="mt-1 text-[11px]" style={{ color: "var(--color-text-secondary)" }}>
+          Multiple graph results · open side panel
+        </div>
+      </div>
+      <ArrowRight size={16} strokeWidth={1.8} style={{ color: "var(--color-text-tertiary)" }} />
+    </button>
+  );
+}
 
 function FallbackNotice({ notice }: { notice: ModelFallbackNotice }) {
   const reasonText =
@@ -244,10 +298,10 @@ function FallbackNotice({ notice }: { notice: ModelFallbackNotice }) {
   );
 }
 
-function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => void; onConnectClick: () => void }) {
+function Greeting() {
   return (
     <div className="hero-stage flex-1 flex flex-col items-center justify-center px-4 py-8 fade-in sm:px-8">
-      <div className="w-full max-w-[880px] text-center mb-12">
+      <div className="w-full max-w-[880px] text-center">
         <div
           className="mx-auto mb-7 inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] font-bold uppercase tracking-widest glass"
           style={{
@@ -263,29 +317,6 @@ function Greeting({ onPickFile, onConnectClick }: { onPickFile: (f: File) => voi
         <p className="mx-auto mt-6 max-w-[680px] text-[16px] leading-[1.7] sm:text-[20px] opacity-60" style={{ color: "var(--color-text-secondary)" }}>
           Connect your CSVs, Databases, or APIs and start chatting with your information in seconds.
         </p>
-      </div>
-
-      <div className="flex flex-wrap justify-center gap-4">
-            <FilePickButton
-              onPick={onPickFile}
-              variant="card"
-              title="Attach a file"
-              className="inline-flex items-center gap-2 rounded-[16px] px-6 py-3 text-[14px] font-bold transition-all glass hover:scale-105 active:scale-95 shadow-xl"
-            >
-              <Paperclip size={18} strokeWidth={2} className="text-blue-500" />
-              Upload Source
-            </FilePickButton>
-            <button
-              onClick={onConnectClick}
-              className="inline-flex items-center gap-2 rounded-[16px] px-6 py-3 text-[14px] font-bold transition-all glass hover:scale-105 active:scale-95 shadow-xl"
-            >
-              <Plug size={18} strokeWidth={2} className="text-indigo-500" />
-              Connect context
-            </button>
-      </div>
-
-      <div className="mt-12 text-[11px] font-bold uppercase tracking-[0.2em] opacity-30" style={{ color: "var(--color-text-tertiary)" }}>
-        Enterprise Grade • Secure • 100% Grounded
       </div>
     </div>
   );

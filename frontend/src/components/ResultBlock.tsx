@@ -1,7 +1,9 @@
 "use client";
 
-import { Download, Table as TableIcon, BarChart3, FileSpreadsheet } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ChevronDown, Download, Table as TableIcon, BarChart3 } from "lucide-react";
+import { useMemo, useRef, useState, type RefObject } from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
 import {
   Bar,
@@ -22,7 +24,10 @@ import type { ResultPayload } from "@/lib/types";
 
 interface ResultBlockProps {
   result: ResultPayload;
+  narrative?: string | null;
 }
+
+type DisplayViz = Exclude<ResultPayload["viz"], "chart">;
 
 const PALETTE = [
   "#6366f1", "#10b981", "#f59e0b", "#ef4444", "#0ea5e9",
@@ -31,16 +36,47 @@ const PALETTE = [
 
 const AXIS_COLOR = "var(--color-text-tertiary)";
 const GRID_COLOR = "var(--color-border-tertiary)";
+const JPEG_EXPORT_TYPE = "image/jpeg";
+const JPEG_EXPORT_EXTENSION = "jpg";
+const JPEG_EXPORT_QUALITY = 0.95;
+const JPEG_EXPORT_SCALE = 3;
+const IMAGE_EXPORT_PADDING = 32;
+const IMAGE_EXPORT_HEADER_HEIGHT = 76;
+const IMAGE_EXPORT_MIN_CHART_WIDTH = 960;
+const IMAGE_EXPORT_MIN_CHART_HEIGHT = 320;
+const DEFAULT_IMAGE_EXPORT_BACKGROUND = "#ffffff";
+const DEFAULT_IMAGE_EXPORT_TEXT = "#0f172a";
+const DEFAULT_IMAGE_EXPORT_MUTED_TEXT = "#64748b";
+const DEFAULT_IMAGE_EXPORT_GRID = "#e2e8f0";
+const DEFAULT_IMAGE_EXPORT_AXIS = "#cbd5e1";
+const PDF_MARGIN = 40;
+const PDF_BODY_FONT_SIZE = 10.5;
+const PDF_SECTION_GAP = 18;
+const PDF_LINE_HEIGHT = 15;
+const PDF_MUTED_TEXT = [100, 116, 139] as const;
+const PDF_PRIMARY_TEXT = [15, 23, 42] as const;
+const PDF_BLUE = [37, 99, 235] as const;
+const PDF_INTERNAL_DETAIL_RE = /^(source|sources|model|metric|grouped by|filters|display|sql|query|provider|elapsed|tool|trace|request id)\s*:/i;
 
-export function ResultBlock({ result }: ResultBlockProps) {
-  const [chartType, setChartType] = useState<ResultPayload["viz"]>(result.viz);
+function normalizeViz(viz: ResultPayload["viz"]): DisplayViz {
+  return viz === "chart" ? "bar" : viz;
+}
+
+export function ResultBlock({ result, narrative }: ResultBlockProps) {
+  const chartRef = useRef<HTMLDivElement>(null);
+  const [chartType, setChartType] = useState<DisplayViz>(normalizeViz(result.viz));
   const refinedResult = useMemo(() => ({ ...result, viz: chartType }), [result, chartType]);
   const shape = useMemo(() => analyze(refinedResult), [refinedResult]);
   // BI default: a time × category breakdown is most readable as a crosstab — long-format tables of 50+ rows are unreadable.
   const defaultToTable = shape.kind === "bar" && !!shape.crosstab && shape.crosstab.colsArePeriod;
   const [showTable, setShowTable] = useState(defaultToTable);
   const hasChart = shape.kind !== "table" && shape.kind !== "card";
-  const hasChartControls = result.viz !== "card" && result.rows.length > 0;
+  const hasChartControls = result.viz !== "card" && result.rows.length > 0 && shape.kind !== "table";
+  const canExportChartImage = !showTable && chartType !== "table" && hasChart && result.view_type !== "timetable";
+
+  if (shape.kind === "card" && result.view_type !== "timetable") {
+    return <ScalarMetric shape={shape} />;
+  }
 
   return (
     <div
@@ -56,13 +92,6 @@ export function ResultBlock({ result }: ResultBlockProps) {
           <div className="text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: "var(--color-text-tertiary)" }}>
             {result.title} · {result.row_count.toLocaleString()} rows
           </div>
-          {result.how && (
-            <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-              <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 border border-blue-500/20 font-medium">
-                {result.how}
-              </span>
-            </div>
-          )}
         </div>
         <div className="flex items-center gap-2 mt-1">
           {hasChartControls && result.view_type !== "timetable" && (
@@ -73,7 +102,7 @@ export function ResultBlock({ result }: ResultBlockProps) {
                 value={chartType}
                 onChange={(e) => {
                   setShowTable(false);
-                  setChartType(e.target.value as ResultPayload["viz"]);
+                  setChartType(e.target.value as DisplayViz);
                 }}
                 className="bg-transparent text-[10px] font-bold text-primary outline-none cursor-pointer pr-1"
               >
@@ -85,8 +114,13 @@ export function ResultBlock({ result }: ResultBlockProps) {
             </div>
           )}
           <div className="h-4 w-[1px] bg-tertiary mx-1" />
-          <IconBtn onClick={() => downloadCsv(result)} title="Download CSV" icon={<Download size={12} strokeWidth={2} />} label="CSV" />
-          <IconBtn onClick={() => downloadXlsx(result)} title="Download Excel" icon={<FileSpreadsheet size={12} strokeWidth={2} />} label="XLSX" />
+          <ExportMenu
+            canExportImage={canExportChartImage}
+            onCsv={() => downloadCsv(result)}
+            onXlsx={() => downloadXlsx(result)}
+            onPdf={() => downloadPdf(refinedResult, { chartRef, narrative, includeChart: canExportChartImage })}
+            onJpeg={() => downloadVisibleImage(refinedResult, chartRef)}
+          />
           {hasChartControls && result.view_type !== "timetable" && (
             <IconBtn
               onClick={() => setShowTable((s) => !s)}
@@ -102,8 +136,7 @@ export function ResultBlock({ result }: ResultBlockProps) {
       {result.view_type === "timetable" ? (
         <TimetableGrid result={result} />
       ) : (
-        <>
-          {!showTable && chartType !== "table" && shape.kind === "card" && <CardViz shape={shape} />}
+        <div ref={chartRef}>
           {!showTable && chartType !== "table" && shape.kind === "bar" && <BarViz shape={shape} />}
           {!showTable && chartType !== "table" && shape.kind === "pie" && <PieViz shape={shape} />}
           {!showTable && chartType !== "table" && shape.kind === "line" && <LineViz shape={shape} />}
@@ -112,7 +145,7 @@ export function ResultBlock({ result }: ResultBlockProps) {
               ? <CrosstabTable data={shape.crosstab} />
               : <DataTable result={result} />
           )}
-        </>
+        </div>
       )}
 
     </div>
@@ -122,11 +155,81 @@ export function ResultBlock({ result }: ResultBlockProps) {
 function IconBtn({ onClick, title, icon, label, active }: { onClick: () => void; title: string; icon: React.ReactNode; label: string; active?: boolean }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       title={title}
       className={`flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg transition-all border ${active ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-500/20' : 'bg-secondary text-secondary border-tertiary hover:bg-tertiary hover:text-primary'}`}
     >
       {icon}
+      {label}
+    </button>
+  );
+}
+
+function ExportMenu({
+  canExportImage,
+  onCsv,
+  onXlsx,
+  onPdf,
+  onJpeg,
+}: {
+  canExportImage: boolean;
+  onCsv: () => void;
+  onXlsx: () => void;
+  onPdf: () => void;
+  onJpeg: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const run = (handler: () => void) => {
+    setOpen(false);
+    handler();
+  };
+
+  return (
+    <div
+      className="relative"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        title="Export result"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg transition-all border bg-secondary text-secondary border-tertiary hover:bg-tertiary hover:text-primary"
+      >
+        <Download size={12} strokeWidth={2} />
+        Export
+        <ChevronDown size={12} strokeWidth={2} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-[calc(100%+6px)] z-30 min-w-[132px] overflow-hidden rounded-lg border border-tertiary bg-primary py-1 shadow-xl"
+        >
+          <ExportMenuItem label="CSV" onClick={() => run(onCsv)} />
+          <ExportMenuItem label="XLSX" onClick={() => run(onXlsx)} />
+          <ExportMenuItem label="PDF" onClick={() => run(onPdf)} />
+          {canExportImage && <ExportMenuItem label="JPEG" onClick={() => run(onJpeg)} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExportMenuItem({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={onClick}
+      className="block w-full px-3 py-2 text-left text-[11px] font-bold uppercase tracking-widest text-secondary transition-colors hover:bg-secondary hover:text-primary"
+    >
       {label}
     </button>
   );
@@ -173,28 +276,7 @@ function analyze(result: ResultPayload): Shape {
     return { kind: "card", label: valueCol, value: rows[0][valueIdx], sublabel: columns.slice(0, -1).map((c, i) => `${c}: ${rows[0][i]}`).join(" · ") };
   }
 
-  // Pure time series: exactly one time-like dim + numeric series, no other string dims.
-  // We deliberately ignore the backend's viz="line" hint here — if there are extra string
-  // dims, we want the crosstab path (months × category) to handle it instead.
-  const periodLikeIdx = columns.findIndex((c, i) => isPeriodColumn(c, rows.map((r) => r[i])));
-  const otherStringDims = columns.filter((c, i) => i !== periodLikeIdx && !rows.every((r) => r[i] === null || r[i] === undefined || isNumeric(r[i])));
-  const isPureTimeSeries = periodLikeIdx >= 0 && otherStringDims.length === 0;
-  if (isPureTimeSeries) {
-    const xKey = periodLikeIdx >= 0 ? columns[periodLikeIdx] : columns[0];
-    const xIdx = columns.indexOf(xKey);
-    const numericIdx: number[] = [];
-    for (let i = 0; i < columns.length; i++) {
-      if (i === xIdx) continue;
-      if (rows.some((r) => isNumeric(r[i]))) numericIdx.push(i);
-    }
-    const series = numericIdx.map((i) => columns[i]);
-    const data = rows.map((r) => {
-      const o: Record<string, any> = { [xKey]: r[xIdx] };
-      for (const i of numericIdx) o[columns[i]] = Number(r[i]);
-      return o;
-    });
-    return { kind: "line", data, xKey, xIsPeriod: isPeriodColumn(xKey, rows.map((r) => r[xIdx])), series: series.slice(0, 5) };
-  }
+  if (rows.length === 1 && columns.length > 3) return { kind: "table" };
 
   // Identify columns by dtype heuristic
   const numericIdx: number[] = [];
@@ -210,6 +292,29 @@ function analyze(result: ResultPayload): Shape {
     const labelIdx = dimIdx[0];
     const data = rows.slice(0, 12).map((r) => ({ name: String(r[labelIdx] ?? "—"), value: Number(r[valueIdx]) || 0 }));
     return { kind: "pie", data, valueKey };
+  }
+
+  // Pure time series: exactly one time-like dim + numeric series, no other string dims.
+  // Only render this as a line when line was requested; explicit bar and pie requests
+  // should stay visually faithful to the selected chart type.
+  const periodLikeIdx = columns.findIndex((c, i) => isPeriodColumn(c, rows.map((r) => r[i])));
+  const otherStringDims = columns.filter((c, i) => i !== periodLikeIdx && !rows.every((r) => r[i] === null || r[i] === undefined || isNumeric(r[i])));
+  const isPureTimeSeries = periodLikeIdx >= 0 && otherStringDims.length === 0;
+  if (viz === "line" && isPureTimeSeries) {
+    const xKey = periodLikeIdx >= 0 ? columns[periodLikeIdx] : columns[0];
+    const xIdx = columns.indexOf(xKey);
+    const numericIdx: number[] = [];
+    for (let i = 0; i < columns.length; i++) {
+      if (i === xIdx) continue;
+      if (rows.some((r) => isNumeric(r[i]))) numericIdx.push(i);
+    }
+    const series = numericIdx.map((i) => columns[i]);
+    const data = rows.map((r) => {
+      const o: Record<string, any> = { [xKey]: r[xIdx] };
+      for (const i of numericIdx) o[columns[i]] = Number(r[i]);
+      return o;
+    });
+    return { kind: "line", data, xKey, xIsPeriod: isPeriodColumn(xKey, rows.map((r) => r[xIdx])), series: series.slice(0, 5) };
   }
 
   // 2-dim stacked bar: pivot col0 (x) × col1 (series) → numeric
@@ -269,17 +374,17 @@ function analyze(result: ResultPayload): Shape {
   return { kind: "bar", data, xKey, xIsPeriod: isPeriodColumn(xKey, rows.map((r) => r[xIdx])), series: [valueKey], stacked: false };
 }
 
-function CardViz({ shape }: { shape: Extract<Shape, { kind: "card" }> }) {
+function ScalarMetric({ shape }: { shape: Extract<Shape, { kind: "card" }> }) {
   return (
-    <div className="flex flex-col items-start gap-1 py-3">
-      <div className="text-[11px] uppercase tracking-wider" style={{ color: "var(--color-text-tertiary)" }}>
+    <div className="mt-2 flex flex-col items-start gap-0.5 py-1.5">
+      <div className="text-[12px] font-medium" style={{ color: "var(--color-text-secondary)" }}>
         {prettyLabel(shape.label)}
       </div>
-      <div className="text-[28px] font-medium tabular-nums" style={{ color: "var(--color-text-primary)" }}>
+      <div className="text-[20px] font-semibold tabular-nums leading-tight" style={{ color: "var(--color-text-primary)" }}>
         {formatCell(shape.value)}
       </div>
       {shape.sublabel && (
-        <div className="text-[12px]" style={{ color: "var(--color-text-secondary)" }}>
+        <div className="text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
           {shape.sublabel}
         </div>
       )}
@@ -291,7 +396,7 @@ function BarViz({ shape }: { shape: Extract<Shape, { kind: "bar" }> }) {
   const height = Math.min(360, 60 + shape.data.length * 22);
   const yTickFormatter = shape.xIsPeriod ? formatPeriod : undefined;
   return (
-    <div style={{ width: "100%", height }}>
+    <div aria-label="Bar chart" style={{ width: "100%", height }}>
       <ResponsiveContainer>
         <BarChart data={shape.data} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={GRID_COLOR} horizontal={false} />
@@ -320,7 +425,7 @@ function BarViz({ shape }: { shape: Extract<Shape, { kind: "bar" }> }) {
 function PieViz({ shape }: { shape: Extract<Shape, { kind: "pie" }> }) {
   const total = shape.data.reduce((s, d) => s + (d.value || 0), 0) || 1;
   return (
-    <div style={{ width: "100%", height: 280 }}>
+    <div aria-label="Pie chart" style={{ width: "100%", height: 280 }}>
       <ResponsiveContainer>
         <PieChart margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
           <Pie
@@ -358,7 +463,7 @@ function PieViz({ shape }: { shape: Extract<Shape, { kind: "pie" }> }) {
 function LineViz({ shape }: { shape: Extract<Shape, { kind: "line" }> }) {
   const xTickFormatter = shape.xIsPeriod ? formatPeriod : undefined;
   return (
-    <div style={{ width: "100%", height: 240 }}>
+    <div aria-label="Line chart" style={{ width: "100%", height: 240 }}>
       <ResponsiveContainer>
         <LineChart data={shape.data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={GRID_COLOR} />
@@ -723,4 +828,336 @@ function downloadXlsx(result: ResultPayload) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Result");
   XLSX.writeFile(wb, `${result.title.replace(/\s+/g, "_").toLowerCase()}.xlsx`);
+}
+
+function safeFilename(title: string, extension: string): string {
+  const base = title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80) || "result";
+  return `${base}.${extension}`;
+}
+
+function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function downloadPdf(
+  result: ResultPayload,
+  options: {
+    chartRef?: RefObject<HTMLDivElement | null>;
+    includeChart?: boolean;
+    narrative?: string | null;
+  } = {},
+) {
+  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const contentWidth = pageWidth - PDF_MARGIN * 2;
+  let y = PDF_MARGIN;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(19);
+  doc.setTextColor(...PDF_PRIMARY_TEXT);
+  y = addPdfLines(doc, result.title || "Result", PDF_MARGIN, y, contentWidth, 24);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(...PDF_MUTED_TEXT);
+  doc.text(`${result.row_count.toLocaleString()} rows · ${new Date().toLocaleDateString()}`, PDF_MARGIN, y + 3);
+  y += 26;
+
+  const narrative = cleanNarrative(options.narrative);
+  if (narrative) {
+    y = addPdfSection(doc, "Analysis", y, pageHeight);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(PDF_BODY_FONT_SIZE);
+    doc.setTextColor(...PDF_PRIMARY_TEXT);
+    y = addPdfParagraphs(doc, narrative, PDF_MARGIN, y, contentWidth, pageHeight);
+  }
+
+  const chartImage = options.includeChart ? await chartImageDataUrl(options.chartRef) : null;
+  if (chartImage) {
+    y = addPdfSection(doc, "Graph", y + 4, pageHeight);
+    const imageProps = doc.getImageProperties(chartImage);
+    const imageRatio = imageProps.height / imageProps.width;
+    const imageWidth = contentWidth;
+    const imageHeight = Math.min(imageWidth * imageRatio, pageHeight - PDF_MARGIN * 2);
+    if (y + imageHeight > pageHeight - PDF_MARGIN) {
+      doc.addPage();
+      y = PDF_MARGIN;
+    }
+    doc.addImage(chartImage, "JPEG", PDF_MARGIN, y, imageWidth, imageHeight);
+  } else if (result.columns.length > 0) {
+    y = addPdfSection(doc, "Data", y + 4, pageHeight);
+    autoTable(doc, {
+      startY: y,
+      head: [result.columns.map(prettyLabel)],
+      body: result.rows.slice(0, 500).map((row) => result.columns.map((_, i) => formatCell(row[i]))),
+      theme: "grid",
+      headStyles: { fillColor: [...PDF_BLUE], textColor: 255 },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      styles: { fontSize: 8, cellPadding: 4, textColor: [...PDF_PRIMARY_TEXT] },
+      margin: { left: PDF_MARGIN, right: PDF_MARGIN },
+    });
+  }
+
+  doc.save(safeFilename(result.title, "pdf"));
+}
+
+function addPdfSection(doc: jsPDF, label: string, y: number, pageHeight: number) {
+  if (y + PDF_SECTION_GAP > pageHeight - PDF_MARGIN) {
+    doc.addPage();
+    y = PDF_MARGIN;
+  }
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.setTextColor(...PDF_BLUE);
+  doc.text(label.toUpperCase(), PDF_MARGIN, y + 12);
+  return y + 26;
+}
+
+function addPdfLines(doc: jsPDF, text: string, x: number, y: number, width: number, lineHeight: number) {
+  const lines = doc.splitTextToSize(text, width);
+  doc.text(lines, x, y);
+  return y + lines.length * lineHeight;
+}
+
+function addPdfParagraphs(doc: jsPDF, text: string, x: number, y: number, width: number, pageHeight: number) {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+
+  for (const paragraph of paragraphs) {
+    const lines = doc.splitTextToSize(paragraph, width);
+    for (const line of lines) {
+      if (y > pageHeight - PDF_MARGIN) {
+        doc.addPage();
+        y = PDF_MARGIN;
+      }
+      doc.text(line, x, y);
+      y += PDF_LINE_HEIGHT;
+    }
+    y += 8;
+  }
+  return y + 2;
+}
+
+function cleanNarrative(text?: string | null) {
+  if (!text) return "";
+  return text
+    .replace(/```[\s\S]*?```/g, "")
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return true;
+      if (PDF_INTERNAL_DETAIL_RE.test(trimmed)) return false;
+      if (/^\|.*\|$/.test(trimmed)) return false;
+      if (/^[-:| ]+$/.test(trimmed)) return false;
+      return true;
+    })
+    .map((line) => line
+      .replace(/^#{1,6}\s+/g, "")
+      .replace(/^[-*]\s+/g, "• ")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+async function chartImageDataUrl(chartRef?: RefObject<HTMLDivElement | null>) {
+  const svg = chartRef?.current?.querySelector("svg");
+  if (!svg) return null;
+  const { source, width, height } = serializeVisibleSvg(svg);
+  const svgBlob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(svgBlob);
+  try {
+    const image = await loadImage(url);
+    const canvas = renderChartCanvas(image, width, height);
+    return canvas?.toDataURL(JPEG_EXPORT_TYPE, JPEG_EXPORT_QUALITY) || null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Unable to render chart image."));
+    img.src = src;
+  });
+}
+
+function renderChartCanvas(image: CanvasImageSource, sourceWidth: number, sourceHeight: number) {
+  const width = Math.max(Math.ceil(sourceWidth), IMAGE_EXPORT_MIN_CHART_WIDTH);
+  const height = Math.max(Math.ceil(sourceHeight * (width / sourceWidth)), IMAGE_EXPORT_MIN_CHART_HEIGHT);
+  const canvas = document.createElement("canvas");
+  canvas.width = width * JPEG_EXPORT_SCALE;
+  canvas.height = height * JPEG_EXPORT_SCALE;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.scale(JPEG_EXPORT_SCALE, JPEG_EXPORT_SCALE);
+  ctx.fillStyle = imageExportBackground();
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(image, 0, 0, width, height);
+  return canvas;
+}
+
+function downloadVisibleImage(result: ResultPayload, chartRef: RefObject<HTMLDivElement | null>) {
+  const svg = chartRef.current?.querySelector("svg");
+  if (!svg) return;
+  const { source, width, height } = serializeVisibleSvg(svg);
+  const svgBlob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(svgBlob);
+  const image = new Image();
+
+  image.onload = () => {
+    drawImageExport(result, image, width, height, () => URL.revokeObjectURL(url));
+  };
+  image.onerror = () => URL.revokeObjectURL(url);
+  image.src = url;
+}
+
+function serializeVisibleSvg(svg: SVGSVGElement) {
+  const box = svg.getBoundingClientRect();
+  const width = Math.max(Math.ceil(box.width || svg.clientWidth || IMAGE_EXPORT_MIN_CHART_WIDTH), IMAGE_EXPORT_MIN_CHART_WIDTH);
+  const height = Math.max(Math.ceil(box.height || svg.clientHeight || IMAGE_EXPORT_MIN_CHART_HEIGHT), IMAGE_EXPORT_MIN_CHART_HEIGHT);
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("width", String(width));
+  clone.setAttribute("height", String(height));
+  if (!clone.getAttribute("viewBox")) {
+    clone.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  }
+  inlineSvgPaint(svg, clone);
+  normalizeExportSvgColors(clone);
+  return {
+    source: new XMLSerializer().serializeToString(clone),
+    width,
+    height,
+  };
+}
+
+function inlineSvgPaint(source: Element, target: Element) {
+  const sourceNodes = [source, ...Array.from(source.querySelectorAll("*"))];
+  const targetNodes = [target, ...Array.from(target.querySelectorAll("*"))];
+  sourceNodes.forEach((sourceNode, index) => {
+    const targetNode = targetNodes[index];
+    if (!(sourceNode instanceof SVGElement) || !(targetNode instanceof SVGElement)) return;
+    const computed = window.getComputedStyle(sourceNode);
+    copyResolvedSvgAttribute(sourceNode, targetNode, computed, "fill");
+    copyResolvedSvgAttribute(sourceNode, targetNode, computed, "stroke");
+    copyResolvedSvgAttribute(sourceNode, targetNode, computed, "color");
+    ["font-size", "font-family", "font-weight", "opacity", "stroke-width"].forEach((prop) => {
+      const value = computed.getPropertyValue(prop);
+      if (value) targetNode.style.setProperty(prop, value);
+    });
+  });
+}
+
+function normalizeExportSvgColors(svg: SVGSVGElement) {
+  svg.style.background = DEFAULT_IMAGE_EXPORT_BACKGROUND;
+  svg.querySelectorAll("text, tspan").forEach((node) => {
+    if (!(node instanceof SVGElement)) return;
+    node.setAttribute("fill", DEFAULT_IMAGE_EXPORT_MUTED_TEXT);
+    node.style.fill = DEFAULT_IMAGE_EXPORT_MUTED_TEXT;
+    node.style.color = DEFAULT_IMAGE_EXPORT_MUTED_TEXT;
+  });
+  svg.querySelectorAll(".recharts-cartesian-grid line").forEach((node) => {
+    if (!(node instanceof SVGElement)) return;
+    node.setAttribute("stroke", DEFAULT_IMAGE_EXPORT_GRID);
+    node.style.stroke = DEFAULT_IMAGE_EXPORT_GRID;
+  });
+  svg.querySelectorAll(".recharts-cartesian-axis-line, .recharts-cartesian-axis-tick-line").forEach((node) => {
+    if (!(node instanceof SVGElement)) return;
+    node.setAttribute("stroke", DEFAULT_IMAGE_EXPORT_AXIS);
+    node.style.stroke = DEFAULT_IMAGE_EXPORT_AXIS;
+  });
+  svg.querySelectorAll(".recharts-pie-sector path").forEach((node) => {
+    if (!(node instanceof SVGElement)) return;
+    node.setAttribute("stroke", DEFAULT_IMAGE_EXPORT_BACKGROUND);
+    node.style.stroke = DEFAULT_IMAGE_EXPORT_BACKGROUND;
+  });
+}
+
+function copyResolvedSvgAttribute(sourceNode: SVGElement, targetNode: SVGElement, computed: CSSStyleDeclaration, attr: "fill" | "stroke" | "color") {
+  const raw = sourceNode.getAttribute(attr);
+  if (!raw) return;
+  if (raw === "none" || raw.startsWith("url(")) {
+    targetNode.setAttribute(attr, raw);
+    return;
+  }
+  const value = computed.getPropertyValue(attr).trim();
+  if (value) targetNode.setAttribute(attr, value);
+}
+
+function drawImageExport(result: ResultPayload, image: CanvasImageSource, sourceWidth: number, sourceHeight: number, cleanup?: () => void) {
+  const chartWidth = Math.max(Math.ceil(sourceWidth), IMAGE_EXPORT_MIN_CHART_WIDTH);
+  const chartHeight = Math.max(Math.ceil(sourceHeight * (chartWidth / sourceWidth)), IMAGE_EXPORT_MIN_CHART_HEIGHT);
+  const logicalWidth = chartWidth + IMAGE_EXPORT_PADDING * 2;
+  const logicalHeight = chartHeight + IMAGE_EXPORT_HEADER_HEIGHT + IMAGE_EXPORT_PADDING * 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = logicalWidth * JPEG_EXPORT_SCALE;
+  canvas.height = logicalHeight * JPEG_EXPORT_SCALE;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    cleanup?.();
+    return;
+  }
+
+  ctx.scale(JPEG_EXPORT_SCALE, JPEG_EXPORT_SCALE);
+  ctx.fillStyle = imageExportBackground();
+  ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+  drawExportHeader(ctx, result, logicalWidth);
+  ctx.drawImage(image, IMAGE_EXPORT_PADDING, IMAGE_EXPORT_PADDING + IMAGE_EXPORT_HEADER_HEIGHT, chartWidth, chartHeight);
+  canvas.toBlob((blob) => {
+    cleanup?.();
+    if (blob) downloadBlob(safeFilename(result.title, JPEG_EXPORT_EXTENSION), blob);
+  }, JPEG_EXPORT_TYPE, JPEG_EXPORT_QUALITY);
+}
+
+function drawExportHeader(ctx: CanvasRenderingContext2D, result: ResultPayload, width: number) {
+  const maxTextWidth = width - IMAGE_EXPORT_PADDING * 2;
+  ctx.fillStyle = imageExportTextColor();
+  ctx.font = "700 24px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+  ctx.fillText(fitCanvasText(ctx, result.title || "Result", maxTextWidth), IMAGE_EXPORT_PADDING, IMAGE_EXPORT_PADDING + 24);
+  ctx.fillStyle = imageExportMutedTextColor();
+  ctx.font = "500 13px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+  ctx.fillText(`${result.row_count.toLocaleString()} rows`, IMAGE_EXPORT_PADDING, IMAGE_EXPORT_PADDING + 48);
+}
+
+function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let clipped = text;
+  while (clipped.length > 1 && ctx.measureText(`${clipped}...`).width > maxWidth) {
+    clipped = clipped.slice(0, -1);
+  }
+  return `${clipped}...`;
+}
+
+function imageExportBackground() {
+  return DEFAULT_IMAGE_EXPORT_BACKGROUND;
+}
+
+function imageExportTextColor() {
+  return DEFAULT_IMAGE_EXPORT_TEXT;
+}
+
+function imageExportMutedTextColor() {
+  return DEFAULT_IMAGE_EXPORT_MUTED_TEXT;
 }

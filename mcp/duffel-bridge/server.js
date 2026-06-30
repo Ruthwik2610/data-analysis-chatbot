@@ -5,11 +5,16 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Duffel } from '@duffel/api';
+import { buildTestHotelOffers, isStaysAccessDisabledMessage } from './hotel-fixtures.js';
+import { lookupIataCoordinates } from './iata-coordinates.js';
+import { searchBookingHotels } from './booking-hotels.js';
+import { searchMakcorpsHotels } from './makcorps-hotels.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '8083', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const DUFFEL_TOKEN = process.env.DUFFEL_API_TOKEN || '';
+const HOTEL_PROVIDER = (process.env.HOTEL_PROVIDER || 'duffel').toLowerCase();
 // The installed @duffel/api SDK defaults to apiVersion 'v1', which Duffel
 // has deprecated ("Unsupported version" 400). Pin to v2 explicitly. Override
 // with DUFFEL_API_VERSION if needed.
@@ -17,6 +22,12 @@ const DUFFEL_API_VERSION = process.env.DUFFEL_API_VERSION || 'v2';
 
 if (!DUFFEL_TOKEN) {
   console.warn('[Duffel Bridge] WARNING: DUFFEL_API_TOKEN is not set. API calls will fail.');
+}
+if (HOTEL_PROVIDER === 'booking' && !process.env.RAPIDAPI_BOOKING_KEY) {
+  console.warn('[Duffel Bridge] WARNING: HOTEL_PROVIDER=booking but RAPIDAPI_BOOKING_KEY is not set.');
+}
+if ((HOTEL_PROVIDER === 'makcorps' || HOTEL_PROVIDER === 'booking') && !process.env.MAKCORPS_API_KEY && !process.env.MAKCORPS_JWT) {
+  console.warn('[Duffel Bridge] WARNING: Makcorps fallback has no credential set.');
 }
 
 // ── Duffel Client ────────────────────────────────────────────────────────────
@@ -359,7 +370,7 @@ async function resolveCoordinates(iata) {
       }
     }
   }
-  return null;
+  return lookupIataCoordinates(iata);
 }
 
 // ── Helper: format Duffel Stays address object into a single line ─────────────
@@ -380,6 +391,35 @@ async function handleSearchHotels(args) {
     max_price_usd,
     radius_km = 10,
   } = args;
+
+  if (HOTEL_PROVIDER === 'booking') {
+    try {
+      const bookingResult = await searchBookingHotels(args);
+      if (Array.isArray(bookingResult) && bookingResult.length > 0) {
+        return JSON.stringify(bookingResult, null, 2);
+      }
+      console.warn('[Duffel Bridge] search_hotels Booking.com returned no offers; trying Makcorps fallback:', bookingResult?.error || 'empty result');
+      const makcorpsResult = await searchMakcorpsHotels(args);
+      return JSON.stringify(makcorpsResult, null, 2);
+    } catch (err) {
+      console.error('[Duffel Bridge] search_hotels Booking.com failed; trying Makcorps fallback:', err.message);
+      try {
+        return JSON.stringify(await searchMakcorpsHotels(args), null, 2);
+      } catch (fallbackErr) {
+        console.error('[Duffel Bridge] search_hotels Makcorps fallback failed:', fallbackErr.message);
+        return JSON.stringify({ error: `Hotel search request failed: ${err.message}` });
+      }
+    }
+  }
+
+  if (HOTEL_PROVIDER === 'makcorps') {
+    try {
+      return JSON.stringify(await searchMakcorpsHotels(args), null, 2);
+    } catch (err) {
+      console.error('[Duffel Bridge] search_hotels Makcorps failed:', err.message);
+      return JSON.stringify({ error: `Makcorps hotel search request failed: ${err.message}` });
+    }
+  }
 
   // Step 1: resolve destination to coordinates
   let coords;
@@ -429,9 +469,14 @@ async function handleSearchHotels(args) {
   }
 
   let payload;
+  let bodyText = '';
   try {
-    payload = await rawResponse.json();
+    bodyText = await rawResponse.text();
+    payload = JSON.parse(bodyText);
   } catch (err) {
+    if (isStaysAccessDisabledMessage(bodyText)) {
+      return JSON.stringify(buildTestHotelOffers(args), null, 2);
+    }
     return JSON.stringify({ error: 'Hotel search returned non-JSON response', code: rawResponse.status });
   }
 
@@ -602,6 +647,7 @@ app.get('/health', (_req, res) => {
     tools: TOOLS.length,
     tool_names: TOOLS.map(t => t.name),
     duffel_connected: !!DUFFEL_TOKEN,
+    hotel_provider: HOTEL_PROVIDER,
     port: PORT,
   });
 });
@@ -615,5 +661,6 @@ app.listen(PORT, HOST, () => {
   console.log(`  Health check : http://${HOST}:${PORT}/health`);
   console.log(`  Tools        : ${TOOLS.map(t => t.name).join(', ')}`);
   console.log(`  Duffel token : ${DUFFEL_TOKEN ? DUFFEL_TOKEN.slice(0, 20) + '...' : 'NOT SET ⚠️'}`);
+  console.log(`  Hotel provider: ${HOTEL_PROVIDER}`);
   console.log('─'.repeat(60));
 });

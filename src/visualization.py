@@ -25,16 +25,21 @@ def choose_visualization(question: str, intent: dict[str, Any], df: pd.DataFrame
     explicit = explicit_visualization(question)
     if explicit:
         return explicit
-    requested = str(intent.get("requested_visualization") or "auto").lower()
-    if requested in {"table", "bar", "line", "pie", "card"}:
-        return requested
     if df.empty:
-        return "table"
-    if intent.get("intent_type") == "lookup":
         return "table"
 
     cols = list(df.columns)
     n_rows = len(df)
+
+    if n_rows == 1 and len(cols) > 3:
+        return "table"
+
+    requested = str(intent.get("requested_visualization") or "auto").lower()
+    if requested in {"table", "bar", "line", "pie", "card"}:
+        return requested
+    if intent.get("intent_type") == "lookup":
+        return "table"
+
     q = question.lower()
 
     numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]

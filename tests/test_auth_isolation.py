@@ -112,6 +112,23 @@ def test_configured_test_user_can_see_legacy_chats(isolated_server, monkeypatch)
     assert client.get(f"/chats/{legacy_chat['id']}", headers=_headers(token)).status_code == 200
 
 
+def test_default_test_account_can_see_legacy_chats(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
+    monkeypatch.setattr(server, "API_KEY", "shared-api-key")
+    monkeypatch.setattr(server, "JWT_SECRET", "test-secret")
+    monkeypatch.setattr(server, "TEST_USER_EMAIL", "")
+    client = TestClient(server.app)
+    token = _register(client, "test@unipro.ai")
+    legacy_chat = storage.create_chat("Legacy chat", owner_id="legacy")
+
+    response = client.get("/chats?project_id=none", headers=_headers(token))
+
+    assert response.status_code == 200
+    assert [chat["id"] for chat in response.json()] == [legacy_chat["id"]]
+    assert client.get(f"/chats/{legacy_chat['id']}", headers=_headers(token)).status_code == 200
+
+
 def test_displayed_test_user_credentials_can_login_and_see_legacy_chats(isolated_server, monkeypatch):
     server, storage, _pool = isolated_server
     monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
@@ -149,6 +166,75 @@ def test_regular_user_token_does_not_open_admin_session(isolated_server, monkeyp
         "ok": True,
         "role": "admin",
     }
+
+
+def test_configured_test_user_token_opens_admin_session(isolated_server, monkeypatch):
+    server, _storage, _pool = isolated_server
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
+    monkeypatch.setattr(server, "API_KEY", "shared-api-key")
+    monkeypatch.setattr(server, "JWT_SECRET", "test-secret")
+    monkeypatch.setattr(server, "TEST_USER_EMAIL", "sample-test-user@example.com")
+    monkeypatch.setattr(server, "TEST_USER_PASSWORD", "sample-public-test-password")
+    monkeypatch.setattr(server, "CONFIG", replace(server.CONFIG, admin_password="admin-secret"))
+    client = TestClient(server.app)
+
+    login = client.post(
+        "/auth/login",
+        json={"email": "sample-test-user@example.com", "password": "sample-public-test-password"},
+    )
+
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+    assert client.get("/admin/session", headers=_headers(token)).json() == {
+        "ok": True,
+        "role": "admin",
+    }
+
+
+def test_default_test_account_token_opens_admin_session(isolated_server, monkeypatch):
+    server, _storage, _pool = isolated_server
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
+    monkeypatch.setattr(server, "API_KEY", "shared-api-key")
+    monkeypatch.setattr(server, "JWT_SECRET", "test-secret")
+    monkeypatch.setattr(server, "TEST_USER_EMAIL", "")
+    monkeypatch.setattr(server, "CONFIG", replace(server.CONFIG, admin_password="admin-secret"))
+    client = TestClient(server.app)
+    token = _register(client, "test@unipro.ai")
+
+    assert client.get("/admin/session", headers=_headers(token)).json() == {
+        "ok": True,
+        "role": "admin",
+    }
+
+
+def test_default_test_account_session_survives_forwarded_ip_change(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    monkeypatch.setattr(server, "USER_AUTH_REQUIRED", True)
+    monkeypatch.setattr(server, "API_KEY", "shared-api-key")
+    monkeypatch.setattr(server, "JWT_SECRET", "test-secret")
+    monkeypatch.setattr(server, "TEST_USER_EMAIL", "")
+    monkeypatch.setattr(server, "CONFIG", replace(server.CONFIG, admin_password="admin-secret"))
+    client = TestClient(server.app)
+    register = client.post(
+        "/auth/register",
+        json={"email": "test@unipro.ai", "password": "correct horse battery staple"},
+        headers={"x-forwarded-for": "198.51.100.1"},
+    )
+    assert register.status_code == 200
+    token = register.json()["access_token"]
+    legacy_chat = storage.create_chat("Legacy chat", owner_id="legacy")
+    changed_network_headers = {
+        "Authorization": f"Bearer {token}",
+        "x-forwarded-for": "203.0.113.2",
+    }
+
+    assert client.get("/admin/session", headers=changed_network_headers).json() == {
+        "ok": True,
+        "role": "admin",
+    }
+    chats = client.get("/chats?project_id=none", headers=changed_network_headers)
+    assert chats.status_code == 200
+    assert [chat["id"] for chat in chats.json()] == [legacy_chat["id"]]
 
 
 def test_project_titles_are_unique_per_user(isolated_server, monkeypatch):

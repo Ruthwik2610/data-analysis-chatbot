@@ -5,12 +5,21 @@ import re
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import pandas as pd
 
-from .ingest import cache_paths, ensure_cache, normalize_identifier, schema_from_dataframe, schema_from_duckdb
-from .logging_config import log_event
+from .ingest import (
+    _is_csv_encoding_error,
+    _transcode_csv_to_utf8,
+    cache_paths,
+    ensure_cache,
+    normalize_identifier,
+    schema_from_dataframe,
+    schema_from_duckdb,
+)
+from .logging_config import log_event, redact_url
 
 
 @dataclass
@@ -83,13 +92,80 @@ def coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
         non_null = df[col].dropna().astype(str).str.strip()
         if non_null.empty:
             continue
-        cleaned = non_null.str.replace(r"[$,\s]", "", regex=True)
+        cleaned = non_null.str.replace(r"[$₹€£,\s]", "", regex=True)
         parsed = pd.to_numeric(cleaned, errors="coerce")
         if int(parsed.notna().sum()) < max(1, len(non_null) // 2):
             continue
-        full_cleaned = df[col].astype(str).str.strip().str.replace(r"[$,\s]", "", regex=True)
+        full_cleaned = df[col].astype(str).str.strip().str.replace(r"[$₹€£,\s]", "", regex=True)
         df[col] = pd.to_numeric(full_cleaned, errors="coerce")
     return df
+
+
+_JSON_RECORD_KEYS = ("data", "records", "rows", "results", "items", "values")
+
+
+def _records_from_json_list(values: list[Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for value in values:
+        if isinstance(value, dict):
+            records.append(value)
+        elif isinstance(value, list):
+            records.append({f"value_{index + 1}": item for index, item in enumerate(value)})
+        else:
+            records.append({"value": value})
+    return records
+
+
+def _nested_json_records(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return _records_from_json_list(payload)
+    if not isinstance(payload, dict):
+        return []
+    for key in _JSON_RECORD_KEYS:
+        if key in payload:
+            records = _json_payload_to_records(payload[key])
+            if records:
+                return records
+    for value in payload.values():
+        if isinstance(value, (dict, list)):
+            records = _nested_json_records(value)
+            if records:
+                return records
+    return []
+
+
+def _json_payload_to_records(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return _records_from_json_list(payload)
+    if isinstance(payload, dict):
+        if not payload:
+            return []
+        for key in _JSON_RECORD_KEYS:
+            if key in payload:
+                records = _json_payload_to_records(payload[key])
+                if records:
+                    return records
+        records = _nested_json_records(payload)
+        if records:
+            return records
+        if all(isinstance(value, dict) for value in payload.values()):
+            return [
+                {**value, **({"record_key": key} if "record_key" not in value else {"_record_key": key})}
+                for key, value in payload.items()
+            ]
+        return [payload]
+    return [{"value": payload}]
+
+
+def _records_dataframe(records: list[dict[str, Any]]) -> pd.DataFrame:
+    return normalize_dataframe_columns(pd.json_normalize(records, sep="_"))
+
+
+def _records_from_payload(payload: Any, error_message: str) -> list[dict[str, Any]]:
+    records = _json_payload_to_records(payload)
+    if not records:
+        raise ValueError(error_message)
+    return records
 
 
 def _table_to_dataframe(table: list[list[Any]]) -> pd.DataFrame | None:
@@ -411,12 +487,28 @@ def prepare_csv_memory_source(csv_path: Path, logger: Any) -> DataSource:
     import duckdb
 
     # DuckDB's CSV reader is ~5-10x faster than pandas on large files and infers types better.
-    df = duckdb.read_csv(str(csv_path)).to_df()
+    transcoded_path: Path | None = None
+    try:
+        try:
+            df = duckdb.read_csv(str(csv_path)).to_df()
+        except Exception as exc:
+            if not _is_csv_encoding_error(exc):
+                raise
+            with NamedTemporaryFile(prefix="datachat-csv-", suffix=".utf8.csv", delete=False) as handle:
+                transcoded_path = Path(handle.name)
+            transcoded_path, encoding = _transcode_csv_to_utf8(csv_path, transcoded_path)
+            if logger:
+                log_event(logger, "csv_memory_transcoded_to_utf8", path=str(csv_path), encoding=encoding)
+            df = duckdb.read_csv(str(transcoded_path)).to_df()
+    finally:
+        if transcoded_path and transcoded_path.exists():
+            transcoded_path.unlink()
     df = normalize_dataframe_columns(df)
     df = coerce_date_columns(df)
     memory_key = f"csv-memory::{csv_path.resolve()}::{csv_path.stat().st_mtime_ns}"
     schema = schema_from_dataframe(df, source_name="Uploaded CSV")
-    log_event(logger, "csv_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(csv_path))
+    if logger:
+        log_event(logger, "csv_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(csv_path))
     return DataSource(source_kind="Uploaded CSV", schema=schema, display_name=csv_path.name, memory_key=memory_key, dataframe=df)
 
 
@@ -590,15 +682,16 @@ def prepare_api_source(api_url: str, logger: Any, auth_header: str | None = None
     response = requests.get(api_url, timeout=30, headers=headers)
     response.raise_for_status()
     payload = response.json()
-    records = payload if isinstance(payload, list) else payload.get("data", payload.get("records", []))
-    if not isinstance(records, list) or not records:
-        raise ValueError("API response must be a non-empty JSON list or contain data/records.")
-    df = normalize_dataframe_columns(pd.DataFrame(records))
+    records = _records_from_payload(payload, "API response did not contain any JSON records.")
+    df = _records_dataframe(records)
+    df = coerce_numeric_columns(df)
     df = coerce_date_columns(df)
+    display_name = redact_url(api_url)
     memory_key = f"api::{api_url}::{hash(json.dumps(records[:25], default=str))}"
     schema = schema_from_dataframe(df, source_name="API JSON response")
-    log_event(logger, "api_loaded_in_memory", rows=len(df), columns=len(df.columns), url=api_url)
-    return DataSource(source_kind="API direct", schema=schema, display_name=api_url, memory_key=memory_key, dataframe=df)
+    if logger:
+        log_event(logger, "api_loaded_in_memory", rows=len(df), columns=len(df.columns), url=api_url)
+    return DataSource(source_kind="API direct", schema=schema, display_name=display_name, memory_key=memory_key, dataframe=df)
 
 
 def dataframe_to_duckdb_source(df: pd.DataFrame, cache_dir: Path, logger: Any, display_name: str, source_kind: str) -> DataSource:
@@ -729,12 +822,8 @@ def prepare_uploaded_source(
     if suffix in {".duckdb", ".db"}:
         return prepare_duckdb_source(destination, table_name, logger)
     if suffix == ".json":
-        records = json.loads(destination.read_text(encoding="utf-8"))
-        if isinstance(records, dict):
-            records = records.get("data", records.get("records", []))
-        if not isinstance(records, list) or not records:
-            raise ValueError("Uploaded JSON must be a non-empty list or contain data/records.")
-        df = coerce_date_columns(normalize_dataframe_columns(pd.DataFrame(records)))
+        records = _records_from_payload(json.loads(destination.read_text(encoding="utf-8")), "Uploaded JSON did not contain any records.")
+        df = coerce_date_columns(_records_dataframe(records))
         schema = schema_from_dataframe(df, source_name="Uploaded JSON")
         log_event(logger, "json_loaded_in_memory", rows=len(df), columns=len(df.columns), path=str(destination))
         if ingest_method == "sql":
@@ -762,12 +851,8 @@ def prepare_local_file_source(path: Path, cache_dir: Path, logger: Any, table_na
     if suffix in {".duckdb", ".db"}:
         return prepare_duckdb_source(path, table_name, logger=logger)
     if suffix == ".json":
-        records = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(records, dict):
-            records = records.get("data", records.get("records", []))
-        if not isinstance(records, list) or not records:
-            raise ValueError("JSON file must be a non-empty list or contain data/records.")
-        df = coerce_date_columns(normalize_dataframe_columns(pd.DataFrame(records)))
+        records = _records_from_payload(json.loads(path.read_text(encoding="utf-8")), "JSON file did not contain any records.")
+        df = coerce_date_columns(_records_dataframe(records))
         schema = schema_from_dataframe(df, source_name="Local JSON file")
         if ingest_method == "sql":
             return dataframe_to_duckdb_source(df, cache_dir, logger, path.name, "JSON SQL cache")
@@ -776,11 +861,8 @@ def prepare_local_file_source(path: Path, cache_dir: Path, logger: Any, table_na
 
 
 def parse_records_to_source(records: Any, cache_dir: Path, logger: Any, display_name: str, source_kind: str, ingest_method: str) -> DataSource:
-    if isinstance(records, dict):
-        records = records.get("data", records.get("records", []))
-    if not isinstance(records, list) or not records:
-        raise ValueError("Connector output must be a non-empty JSON list or contain data/records.")
-    df = coerce_date_columns(normalize_dataframe_columns(pd.DataFrame(records)))
+    records = _records_from_payload(records, "Connector output did not contain any records.")
+    df = coerce_date_columns(_records_dataframe(records))
     if ingest_method == "sql":
         return dataframe_to_duckdb_source(df, cache_dir, logger, display_name, f"{source_kind} SQL cache")
     schema = schema_from_dataframe(df, source_name=source_kind)

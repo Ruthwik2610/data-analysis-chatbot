@@ -43,6 +43,18 @@ describe("AssistantMarkdown", () => {
     expect(screen.getByTestId("assistant-callout")).toHaveTextContent("Classic wins");
   });
 
+  it("renders asterisk and underscore emphasis as italic text", () => {
+    const { container } = render(
+      <AssistantMarkdown
+        content={"*All four categories are close.*\n\n_Classic is slightly ahead._"}
+        streaming={false}
+      />,
+    );
+
+    const emphasized = Array.from(container.querySelectorAll("em")).map((node) => node.textContent);
+    expect(emphasized).toEqual(["All four categories are close.", "Classic is slightly ahead."]);
+  });
+
   it("uses lightweight rendering while streaming", () => {
     const { container } = render(<AssistantMarkdown content={insightAnswer} streaming />);
 

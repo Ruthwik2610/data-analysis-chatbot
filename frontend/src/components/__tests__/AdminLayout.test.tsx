@@ -6,6 +6,7 @@ let pathname = "/admin";
 const replace = vi.fn();
 const push = vi.fn();
 const router = { replace, push };
+const storage: Record<string, string> = {};
 
 vi.mock("next/navigation", () => ({
   usePathname: () => pathname,
@@ -16,9 +17,8 @@ vi.mock("@/lib/api", () => ({
   api: {
     getAdminSession: vi.fn(),
   },
+  getAuthToken: vi.fn(() => storage.datachat_user_token ?? ""),
 }));
-
-const storage: Record<string, string> = {};
 
 describe("AdminLayout", () => {
   beforeEach(() => {
@@ -45,6 +45,7 @@ describe("AdminLayout", () => {
     localStorage.removeItem("datachat_admin_token");
     localStorage.removeItem("theme");
     document.documentElement.removeAttribute("data-theme");
+    (api.getAdminSession as any).mockClear();
     (api.getAdminSession as any).mockResolvedValue({ ok: true, role: "admin" });
   });
 
@@ -69,5 +70,15 @@ describe("AdminLayout", () => {
     expect(localStorage.getItem("theme")).toBe("dark");
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     expect(screen.getByRole("button", { name: "Switch to light mode" })).toBeInTheDocument();
+  });
+
+  it("allows the admin shell when a test user session is authorized", async () => {
+    localStorage.setItem("datachat_user_token", "test-user-token");
+
+    render(<AdminLayout><div>Admin content</div></AdminLayout>);
+
+    await waitFor(() => expect(screen.getByText("Admin content")).toBeInTheDocument());
+    expect(api.getAdminSession).toHaveBeenCalledTimes(1);
+    expect(replace).not.toHaveBeenCalledWith("/admin/login");
   });
 });

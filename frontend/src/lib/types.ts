@@ -1,5 +1,5 @@
 export type SourceKind = "csv" | "xlsx" | "duckdb" | "api" | "json" | "pdf" | "mcp" | "multi";
-export type ModelMode = "flash" | "pro";
+export type ModelMode = "auto" | "flash" | "pro";
 
 export interface Source {
   id: string;
@@ -8,6 +8,7 @@ export interface Source {
   rows: number;
   active: boolean;
   loaded?: boolean;
+  description?: string;
   clarifications?: SourceClarification[];
 }
 
@@ -76,7 +77,7 @@ export interface InstructionsResponse {
 
 export interface ResultPayload {
   title: string;
-  viz: "bar" | "line" | "pie" | "card" | "table";
+  viz: "bar" | "line" | "pie" | "card" | "table" | "chart";
   elapsed_ms: number;
   sql: string;
   how: string;
@@ -138,6 +139,8 @@ export interface HotelOffer {
   photo_url: string;
   price_per_night: number;
   total_price: number;
+  price_per_night_usd?: number | null;
+  total_price_usd?: number | null;
   currency: string;
   check_in_date: string;
   check_out_date: string;
@@ -162,6 +165,8 @@ export interface TravelOffer {
   cabin_class: string;
   price_usd: number;
   currency: string;
+  original_price?: number | null;
+  original_currency?: string | null;
   policy_compliant: boolean;
   policy_violation_reason: string | null;
   booking_redirect_url: string;
@@ -191,6 +196,7 @@ export type Message =
       progress?: number | null;
       source?: { id: string | null; name: string; kind: string; rows: number };
       result?: ResultPayload;
+      artifacts?: ResultPayload[];
       error?: boolean;
       pending?: Pending;
       resolved?: boolean;

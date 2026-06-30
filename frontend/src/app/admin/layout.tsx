@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { ChevronLeft, Moon, Sun } from "lucide-react";
 import Link from "next/link";
-import { api } from "@/lib/api";
+import { api, getAuthToken } from "@/lib/api";
 import { getTheme, setTheme, type Theme } from "@/lib/theme";
 
 export default function AdminLayout({
@@ -29,7 +29,9 @@ export default function AdminLayout({
     }
 
     setAuthorized(false);
-    if (!localStorage.getItem("datachat_admin_token")) {
+    const adminToken = localStorage.getItem("datachat_admin_token");
+    const userToken = getAuthToken();
+    if (!adminToken && !userToken) {
       router.replace("/admin/login");
       return;
     }
@@ -37,7 +39,7 @@ export default function AdminLayout({
     api.getAdminSession()
       .then(() => setAuthorized(true))
       .catch(() => {
-        localStorage.removeItem("datachat_admin_token");
+        if (adminToken) localStorage.removeItem("datachat_admin_token");
         router.replace("/admin/login");
       });
   }, [router, pathname]);

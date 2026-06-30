@@ -53,6 +53,8 @@ describe("Topbar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("link", { name: "Feedback inbox" })).not.toBeInTheDocument();
+    expect(screen.getByTitle("Switch to dark mode")).toHaveAttribute("aria-label", "Switch to dark mode");
+    expect(screen.getByText("Pizza analysis").closest(".chat-content-frame")).not.toBeNull();
   });
 
   it("shows admin feedback navigation only when admin access is verified", () => {
@@ -67,5 +69,36 @@ describe("Topbar", () => {
     );
 
     expect(screen.getByRole("link", { name: "Feedback inbox" })).toHaveAttribute("href", "/admin/feedback");
+  });
+
+  it("shows and toggles the artifacts panel control", () => {
+    const onToggleArtifacts = vi.fn();
+    const onToggleSources = vi.fn();
+    render(
+      <Topbar
+        title="Pizza analysis"
+        activeSource={sources[0]}
+        selectedSources={sources}
+        sourceCount={3}
+        sourcesOpen
+        onToggleSources={onToggleSources}
+        artifactCount={2}
+        onToggleArtifacts={onToggleArtifacts}
+      />,
+    );
+
+    const sourcesToggle = screen.getByRole("button", { name: "Toggle sources panel" });
+    expect(sourcesToggle).toHaveAttribute("aria-pressed", "true");
+    expect(sourcesToggle).toHaveTextContent("3");
+
+    fireEvent.click(sourcesToggle);
+    expect(onToggleSources).toHaveBeenCalledTimes(1);
+
+    const artifactsToggle = screen.getByRole("button", { name: "Toggle artifacts panel" });
+    expect(artifactsToggle).toHaveAttribute("aria-pressed", "false");
+    expect(artifactsToggle).toHaveTextContent("2");
+
+    fireEvent.click(artifactsToggle);
+    expect(onToggleArtifacts).toHaveBeenCalledTimes(1);
   });
 });

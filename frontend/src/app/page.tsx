@@ -1,27 +1,31 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
-import { flushSync } from "react-dom";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { Topbar } from "@/components/Topbar";
 import { AuthScreen } from "@/components/AuthScreen";
 import { ProjectDialog } from "@/components/ProjectDialog";
 import { MessageList } from "@/components/MessageList";
+import { ArtifactsPanel } from "@/components/ArtifactsPanel";
+import { SourcesPanel } from "@/components/SourcesPanel";
 import { InputBar } from "@/components/InputBar";
 import { StreamingBar } from "@/components/StreamingBar";
-import { SourcePreviewDrawer } from "@/components/SourcePreviewDrawer";
 import { useKeyboardShortcuts } from "@/lib/useKeyboardShortcuts";
 import { api, clearAuthToken, getAuthToken, streamQuery } from "@/lib/api";
 import { displaySourceName } from "@/lib/displayNames";
+import { artifactItems } from "@/lib/artifacts";
 import { formatArchiveSkippedNote, formatWorkbookMCPConnectedMessage } from "@/lib/uploadMessages";
 import { buildCustomSheetQuestion, buildSheetModeQuestion } from "@/lib/uploadPending";
-import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode } from "@/lib/types";
+import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode, MCPConnector, Connector } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
+const isMcpSourceId = (id: string) => id === "mcp" || id.startsWith("mcp:");
 
 export default function Home() {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
+  const [mcpConnectors, setMcpConnectors] = useState<MCPConnector[]>([]);
+  const [apiConnectors, setApiConnectors] = useState<Connector[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const messagesRef = useRef<Message[]>([]);
@@ -31,13 +35,18 @@ export default function Home() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
-  const [modelMode, setModelMode] = useState<ModelMode>("flash");
+  const [modelMode, setModelMode] = useState<ModelMode>("auto");
   const [chatsReady, setChatsReady] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [usingConnectorId, setUsingConnectorId] = useState<string | null>(null);
+  const [retryingMcpConnectorId, setRetryingMcpConnectorId] = useState<string | null>(null);
 
   const connectorClickRef = useRef<() => void>(() => {});
   const queryAbortRef = useRef<AbortController | null>(null);
@@ -47,6 +56,14 @@ export default function Home() {
     if (!user) return;
     try { setSources(await api.listSources(currentProjectId)); } catch {}
   }, [currentProjectId, user]);
+  const refreshMCPConnectors = useCallback(async () => {
+    if (!user) return;
+    try { setMcpConnectors(await api.listMCPConnectors()); } catch {}
+  }, [user]);
+  const refreshApiConnectors = useCallback(async () => {
+    if (!user) return;
+    try { setApiConnectors((await api.listConnectors()).filter((connector) => connector.kind === "api")); } catch {}
+  }, [user]);
   const refreshChats = useCallback(async () => {
     if (!user) return;
     try { setChats(await api.listChats(currentProjectId)); } catch {}
@@ -72,19 +89,20 @@ export default function Home() {
   useEffect(() => {
     if (!authReady || !user) return;
     const adminToken = localStorage.getItem("datachat_admin_token");
-    if (!adminToken) {
+    const userToken = getAuthToken();
+    if (!adminToken && !userToken) {
       setIsAdmin(false);
       return;
     }
     api.getAdminSession()
       .then(() => setIsAdmin(true))
       .catch(() => {
-        localStorage.removeItem("datachat_admin_token");
+        if (adminToken) localStorage.removeItem("datachat_admin_token");
         setIsAdmin(false);
       });
   }, [authReady, user]);
 
-  useEffect(() => { refreshSources(); refreshChats(); refreshProjects(); }, [refreshSources, refreshChats, refreshProjects]);
+  useEffect(() => { refreshSources(); refreshMCPConnectors(); refreshApiConnectors(); refreshChats(); refreshProjects(); }, [refreshSources, refreshMCPConnectors, refreshApiConnectors, refreshChats, refreshProjects]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -101,13 +119,30 @@ export default function Home() {
   }, [sources]);
 
   useEffect(() => {
-    const handler = () => refreshSources();
+    const handler = () => {
+      refreshSources();
+      refreshMCPConnectors();
+      refreshApiConnectors();
+    };
     window.addEventListener("data-chat:sources-changed", handler as EventListener);
     return () => window.removeEventListener("data-chat:sources-changed", handler as EventListener);
-  }, [refreshSources]);
+  }, [refreshSources, refreshMCPConnectors, refreshApiConnectors]);
 
   const selectedSources = sources.filter((s) => selectedSourceIds.includes(s.id));
   const activeSource = selectedSources[0] || sources.find((s) => s.active);
+  const artifacts = useMemo(() => artifactItems(messages), [messages]);
+  const visibleMcpConnectors = mcpConnectors.filter((connector) => {
+    if (connector.scope !== "project") return true;
+    return Boolean(currentProjectId && connector.project_ids?.includes(currentProjectId));
+  });
+  const attachedApiNames = new Set(sources.filter((source) => source.kind === "api").map((source) => source.name));
+  const sourceBadgeCount = sources.length + apiConnectors.filter((connector) => !attachedApiNames.has(connector.label)).length;
+
+  useEffect(() => {
+    if (selectedArtifactId && !artifacts.some((artifact) => artifact.id === selectedArtifactId)) {
+      setSelectedArtifactId(null);
+    }
+  }, [artifacts, selectedArtifactId]);
 
   const addMessage = useCallback((m: Message) => setMessages((prev) => [...prev, m]), []);
   const updateMessage = useCallback((id: string, patch: Partial<Message>) => {
@@ -267,7 +302,9 @@ export default function Home() {
         const sourceMeta = (pending.args.sources as SourceMeta[]).find((s) => s.id === sourceId);
         if (sourceMeta) {
           setSelectedSourceIds([sourceId]);
-          await api.activateSource(sourceId).catch(() => {});
+          if (!isMcpSourceId(sourceId)) {
+            await api.activateSource(sourceId).catch(() => {});
+          }
           refreshSources();
         }
         updateMessage(messageId, { resolved: true, content: `OK, using **${sourceMeta?.name ?? sourceId}** for this conversation.`, pending: undefined });
@@ -322,7 +359,7 @@ export default function Home() {
             setSelectedSourceIds((ids) => Array.from(new Set([
               ...ids,
               ...sources.map((source) => source.id),
-              ...(resolved.mcp_connector ? ["mcp"] : []),
+              ...(resolved.mcp_connector ? [`mcp:${resolved.mcp_connector.id}`] : []),
             ])));
             updateMessage(messageId, {
               thinking: null,
@@ -346,7 +383,7 @@ export default function Home() {
           setSelectedSourceIds((ids) => Array.from(new Set([
             ...ids,
             ...sources.map((source) => source.id),
-            ...(resolved.mcp_connector ? ["mcp"] : []),
+            ...(resolved.mcp_connector ? [`mcp:${resolved.mcp_connector.id}`] : []),
           ])));
           updateMessage(messageId, {
             thinking: null,
@@ -439,63 +476,64 @@ export default function Home() {
           project_id: currentProjectId,
           model_mode: modelMode,
         }, queryAbortRef.current.signal)) {
-          // flushSync forces React to commit before the next await — without this,
-          // updates inside async iteration get batched until the loop finishes,
-          // and the user sees "Thinking…" until the entire stream completes.
-          flushSync(() => {
-            if (ev.event === "meta") {
-              if (ev.data.chat_id !== currentChatId) {
-                // If it's a new chat and we have a project selected, link it
-                if (!currentChatId && currentProjectId) {
-                   api.updateChatProject(ev.data.chat_id, currentProjectId).catch(() => {});
-                }
-                setCurrentChatId(ev.data.chat_id);
+          if (ev.event === "meta") {
+            if (ev.data.chat_id !== currentChatId) {
+              // If it's a new chat and we have a project selected, link it
+              if (!currentChatId && currentProjectId) {
+                 api.updateChatProject(ev.data.chat_id, currentProjectId).catch(() => {});
               }
-              updateMessage(assistantId, { source: ev.data.source });
-            } else if (ev.event === "thinking") {
-              updateMessage(assistantId, { thinking: ev.data.step });
-            } else if (ev.event === "result") {
-              updateMessage(assistantId, { result: ev.data as ResultPayload, thinking: null });
-              setLoading(false);
-            } else if (ev.event === "text") {
-              fullText += ev.data.delta;
-              const snapshot = fullText;
-              updateMessage(assistantId, { content: snapshot, thinking: null });
-            } else if (ev.event === "travel_result") {
-              updateMessage(assistantId, {
-                content: ev.data.text,
-                travel_intent: ev.data.travel_intent,
-                travel_offers: ev.data.travel_offers,
-                hotel_offers: ev.data.hotel_offers,
-                thinking: null,
-              });
-              setLoading(false);
-            } else if (ev.event === "clarify") {
-              updateMessage(assistantId, {
-                content: ev.data.content,
-                thinking: null,
-                pending: {
-                  resolver: "clarify_text",
-                  hint: "Add the missing detail",
-                  options: [
-                    { label: "Revenue", value: "Use revenue as the metric" },
-                    { label: "Monthly", value: "Group it by month" },
-                    { label: "Top 10", value: "Show the top 10 results" },
-                  ],
-                  args: { original: question },
-                },
-              });
-              setLoading(false);
-            } else if (ev.event === "error") {
-              updateMessage(assistantId, { content: ev.data.message, error: true, thinking: null });
-              setLoading(false);
-            } else if (ev.event === "notice") {
-              updateMessage(assistantId, { notice: ev.data });
-            } else if (ev.event === "done") {
-              updateMessage(assistantId, { id: ev.data.message_id || assistantId, streaming: false, thinking: null });
-              if (ev.data.chat_id) setCurrentChatId(ev.data.chat_id);
+              setCurrentChatId(ev.data.chat_id);
             }
-          });
+            updateMessage(assistantId, { source: ev.data.source });
+          } else if (ev.event === "thinking") {
+            updateMessage(assistantId, { thinking: ev.data.step });
+          } else if (ev.event === "result") {
+            updateMessage(assistantId, { result: ev.data as ResultPayload, thinking: null });
+            setLoading(false);
+          } else if (ev.event === "text") {
+            fullText += ev.data.delta;
+            const snapshot = fullText;
+            updateMessage(assistantId, { content: snapshot, thinking: null });
+          } else if (ev.event === "travel_result") {
+            updateMessage(assistantId, {
+              content: ev.data.text,
+              travel_intent: ev.data.travel_intent,
+              travel_offers: ev.data.travel_offers,
+              hotel_offers: ev.data.hotel_offers,
+              thinking: null,
+            });
+            setLoading(false);
+          } else if (ev.event === "clarify") {
+            updateMessage(assistantId, {
+              content: ev.data.content,
+              thinking: null,
+              pending: {
+                resolver: "clarify_text",
+                hint: "Add the missing detail",
+                options: [
+                  { label: "Revenue", value: "Use revenue as the metric" },
+                  { label: "Monthly", value: "Group it by month" },
+                  { label: "Top 10", value: "Show the top 10 results" },
+                ],
+                args: { original: question },
+              },
+            });
+            setLoading(false);
+          } else if (ev.event === "error") {
+            setMessages((prev) => prev.map((m) => {
+              if (m.id !== assistantId || m.role !== "assistant") return m;
+              if (m.result || (m.artifacts?.length ?? 0) > 0) {
+                return { ...m, error: undefined, streaming: false, thinking: null };
+              }
+              return { ...m, content: ev.data.message, error: true, streaming: false, thinking: null };
+            }));
+            setLoading(false);
+          } else if (ev.event === "notice") {
+            updateMessage(assistantId, { notice: ev.data });
+          } else if (ev.event === "done") {
+            updateMessage(assistantId, { id: ev.data.message_id || assistantId, streaming: false, thinking: null });
+            if (ev.data.chat_id) setCurrentChatId(ev.data.chat_id);
+          }
           if (ev.event === "done") refreshChats();
         }
       } catch (e: any) {
@@ -535,6 +573,8 @@ export default function Home() {
     setUser(null);
     setChats([]);
     setSources([]);
+    setMcpConnectors([]);
+    setApiConnectors([]);
     setProjects([]);
     setMessages([]);
     setCurrentChatId(null);
@@ -609,6 +649,7 @@ export default function Home() {
           role: "assistant",
           content: m.content,
           result: m.payload?.result,
+          artifacts: m.payload?.artifacts,
           travel_intent: m.payload?.travel_intent,
           travel_offers: m.payload?.travel_offers,
           hotel_offers: m.payload?.hotel_offers,
@@ -629,7 +670,9 @@ export default function Home() {
       } else if (chatSourceIds.length === 1) {
         // Single source — activate silently
         setSelectedSourceIds(chatSourceIds);
-        await api.activateSource(chatSourceIds[0]).catch(() => {});
+        if (!isMcpSourceId(chatSourceIds[0])) {
+          await api.activateSource(chatSourceIds[0]).catch(() => {});
+        }
         refreshSources();
       } else {
         // Multiple sources — ask the user which one to use
@@ -677,17 +720,71 @@ export default function Home() {
     setSelectedSourceIds((prev) => (
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     ));
-    if (id !== "mcp") {
+    if (!isMcpSourceId(id)) {
       await api.activateSource(id).catch(() => {});
       refreshSources();
     }
   }, [refreshSources]);
 
   const handleDeleteSource = useCallback(async (id: string) => {
-    await api.deleteSource(id);
-    setSelectedSourceIds((prev) => prev.filter((x) => x !== id));
-    refreshSources();
-  }, [refreshSources]);
+    try {
+      if (id.startsWith("mcp:")) {
+        await api.removeMCPConnector(id.slice(4));
+        setSelectedSourceIds((prev) => prev.filter((x) => x !== id));
+        setPreviewSourceId((current) => (current === id ? null : current));
+        refreshSources();
+        refreshMCPConnectors();
+        return;
+      }
+      await api.deleteSource(id);
+      setSelectedSourceIds((prev) => prev.filter((x) => x !== id));
+      setPreviewSourceId((current) => (current === id ? null : current));
+      refreshSources();
+    } catch {
+      addMessage({
+        id: `local_${Date.now()}`,
+        role: "assistant",
+        content: "Couldn't delete that source. Refreshing the source list.",
+        error: true,
+      });
+      refreshSources();
+      refreshMCPConnectors();
+    }
+  }, [addMessage, refreshSources, refreshMCPConnectors]);
+
+  const handleDeleteConnector = useCallback(async (connectorId: string) => {
+    try {
+      await api.deleteConnector(connectorId);
+      refreshApiConnectors();
+    } catch {
+      addMessage({
+        id: `local_${Date.now()}`,
+        role: "assistant",
+        content: "Couldn't delete that saved API source.",
+        error: true,
+      });
+      refreshApiConnectors();
+    }
+  }, [addMessage, refreshApiConnectors]);
+
+  const handleRetryMCPConnector = useCallback(async (connectorId: string) => {
+    setRetryingMcpConnectorId(connectorId);
+    try {
+      await api.updateMCPConnector(connectorId, { retry: true });
+      refreshSources();
+      refreshMCPConnectors();
+    } catch {
+      addMessage({
+        id: `local_${Date.now()}`,
+        role: "assistant",
+        content: "Couldn't reconnect that MCP bridge yet. Check that the bridge service is running, then retry.",
+        error: true,
+      });
+      refreshMCPConnectors();
+    } finally {
+      setRetryingMcpConnectorId(null);
+    }
+  }, [addMessage, refreshSources, refreshMCPConnectors]);
 
   const handleAttachedFromInput = useCallback((s: Source) => {
     setSelectedSourceIds((ids) => Array.from(new Set([...ids, s.id])));
@@ -697,7 +794,32 @@ export default function Home() {
       content: `Connected to **${displaySourceName(s.name)}**. Ask away.`,
     });
     refreshSources();
-  }, [addMessage, refreshSources]);
+    refreshApiConnectors();
+  }, [addMessage, refreshSources, refreshApiConnectors]);
+
+  const handleUseConnector = useCallback(async (connectorId: string) => {
+    setUsingConnectorId(connectorId);
+    try {
+      const source = await api.useConnector(connectorId);
+      setSelectedSourceIds((ids) => Array.from(new Set([...ids, source.id])));
+      addMessage({
+        id: `local_${Date.now()}`,
+        role: "assistant",
+        content: `Connected to **${displaySourceName(source.name)}**. Ask away.`,
+      });
+      refreshSources();
+      refreshApiConnectors();
+    } catch {
+      addMessage({
+        id: `local_${Date.now()}`,
+        role: "assistant",
+        content: "Couldn't load that saved API source.",
+        error: true,
+      });
+    } finally {
+      setUsingConnectorId(null);
+    }
+  }, [addMessage, refreshSources, refreshApiConnectors]);
 
   const handleSaveProjectNote = useCallback(async (message: Extract<Message, { role: "assistant" }>) => {
     if (!currentProjectId) return;
@@ -774,8 +896,19 @@ export default function Home() {
   const [previewData, setPreviewData] = useState<any>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
+  const handleOpenArtifact = useCallback((artifactId: string) => {
+    setPreviewSourceId(null);
+    setSourcesOpen(false);
+    setSelectedArtifactId(artifactId);
+    setArtifactsOpen(true);
+  }, []);
+
   const handlePreviewSource = useCallback(async (id: string) => {
+    if (!selectedSourceIds.includes(id)) return;
+    if (isMcpSourceId(id)) return;
     setPreviewSourceId(id);
+    setArtifactsOpen(false);
+    setSourcesOpen(true);
     setPreviewLoading(true);
     try {
       const data = await api.previewSource(id);
@@ -786,6 +919,11 @@ export default function Home() {
     } finally {
       setPreviewLoading(false);
     }
+  }, [selectedSourceIds]);
+
+  const handleCloseSourcePreview = useCallback(() => {
+    setPreviewSourceId(null);
+    setPreviewData(null);
   }, []);
 
   useKeyboardShortcuts({
@@ -802,6 +940,8 @@ export default function Home() {
     return <AuthScreen onAuthenticated={(nextUser) => setUser(nextUser)} />;
   }
 
+  const isLanding = messages.length === 0 && !loading;
+
   return (
     <div className="flex h-[100dvh] w-screen overflow-hidden relative">
       {sidebarOpen && <button className="fixed inset-0 z-30 bg-black/20 lg:hidden" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)} />}
@@ -809,14 +949,9 @@ export default function Home() {
         <Sidebar
           chats={chats}
           currentChatId={currentChatId}
-          sources={sources}
-          selectedSourceIds={selectedSourceIds}
           onNewChat={() => { handleNewChat(); }}
           onSelectChat={(id) => { handleSelectChat(id); }}
           onDeleteChat={handleDeleteChat}
-          onToggleSource={handleToggleSource}
-          onDeleteSource={handleDeleteSource}
-          onPreviewSource={handlePreviewSource}
           projects={projects}
           currentProjectId={currentProjectId}
           onSelectProject={(id) => { handleSelectProject(id); }}
@@ -828,7 +963,7 @@ export default function Home() {
           isAdmin={isAdmin}
         />
       </div>
-      <main className="flex flex-col flex-1 min-w-0 min-h-0 relative" style={{ background: "var(--color-background-primary)" }}>
+      <main className={`flex flex-col flex-1 min-w-0 min-h-0 relative ${isLanding ? "landing-composer-shell" : ""}`} style={{ background: "var(--color-background-primary)" }}>
         <StreamingBar visible={loading} />
         <Topbar  
           title={chatTitle} 
@@ -841,6 +976,22 @@ export default function Home() {
           sidebarOpen={sidebarOpen}
           onOpenSettings={() => setSettingsOpen(true)}
           isAdmin={isAdmin}
+          sourceCount={sourceBadgeCount}
+          sourcesOpen={sourcesOpen}
+          onToggleSources={() => {
+            setPreviewSourceId(null);
+            setPreviewData(null);
+            setSourcesOpen((open) => !open);
+            setArtifactsOpen(false);
+          }}
+          artifactCount={artifacts.length}
+          artifactsOpen={artifactsOpen}
+          onToggleArtifacts={() => {
+            setPreviewSourceId(null);
+            setPreviewData(null);
+            setArtifactsOpen((open) => !open);
+            setSourcesOpen(false);
+          }}
         />
         <MessageList
           messages={messages}
@@ -854,6 +1005,7 @@ export default function Home() {
           onAskFollowUp={handleSend}
           onFeedback={handleFeedback}
           onRetryQuestion={handleSend}
+          onOpenArtifact={handleOpenArtifact}
         />
         <InputBar
           onSend={handleSend}
@@ -869,22 +1021,43 @@ export default function Home() {
           onModelModeChange={setModelMode}
         />
       </main>
+      <SourcesPanel
+        open={sourcesOpen}
+        sources={sources}
+        selectedSourceIds={selectedSourceIds}
+        selectedSourceId={previewSourceId}
+        sourcePreviewData={previewData}
+        sourcePreviewLoading={previewLoading}
+        mcpConnectors={visibleMcpConnectors}
+        apiConnectors={apiConnectors}
+        usingConnectorId={usingConnectorId}
+        retryingMcpConnectorId={retryingMcpConnectorId}
+        onOpenSource={handlePreviewSource}
+        onToggleSource={handleToggleSource}
+        onDeleteSource={handleDeleteSource}
+        onUseConnector={handleUseConnector}
+        onDeleteConnector={handleDeleteConnector}
+        onRetryMCPConnector={handleRetryMCPConnector}
+        onCloseSourcePreview={handleCloseSourcePreview}
+        onClose={() => {
+          setSourcesOpen(false);
+          handleCloseSourcePreview();
+        }}
+      />
+      <ArtifactsPanel
+        messages={messages}
+        open={artifactsOpen}
+        selectedArtifactId={selectedArtifactId}
+        onSelectArtifact={handleOpenArtifact}
+        onClose={() => setArtifactsOpen(false)}
+      />
       {projectDialogOpen && currentProjectId && (
         <ProjectDialog
           projectId={currentProjectId}
           onClose={() => setProjectDialogOpen(false)}
-          onUpdate={() => { refreshProjects(); refreshSources(); }}
+          onUpdate={() => { refreshProjects(); refreshSources(); refreshApiConnectors(); }}
         />
       )}
-      <SourcePreviewDrawer
-        open={previewSourceId !== null}
-        onClose={() => {
-          setPreviewSourceId(null);
-          setPreviewData(null);
-        }}
-        data={previewData}
-        loading={previewLoading}
-      />
       {settingsOpen && (
         <SettingsPanel
           modelMode={modelMode}
@@ -928,6 +1101,7 @@ function SettingsPanel({
               className="rounded-[10px] px-3 py-2"
               style={{ background: "var(--color-background-secondary)", color: "var(--color-text-primary)", border: "1px solid var(--color-border-secondary)" }}
             >
+              <option value="auto">Auto</option>
               <option value="flash">Flash</option>
               <option value="pro">Pro</option>
             </select>

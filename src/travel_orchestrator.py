@@ -17,6 +17,7 @@ from typing import Any, AsyncIterator
 
 from opentelemetry import trace
 
+from src.currency import convert_money
 from src.mcp_pool import extract_text_content
 
 TRACER = trace.get_tracer(__name__)
@@ -83,6 +84,8 @@ class HotelOffer:
     policy_compliant: bool
     policy_violation_reason: str | None
     score: float = 0.0
+    price_per_night_usd: float | None = None
+    total_price_usd: float | None = None
 
 
 @dataclass
@@ -108,6 +111,8 @@ class FlightOffer:
     # untouched so the UI can render outbound + return on the same card. None
     # for one-way offers.
     return_slice: dict[str, Any] | None = None
+    original_price: float | None = None
+    original_currency: str | None = None
 
 
 # ── Multi-loop thinking chain ─────────────────────────────────────────────────
@@ -141,9 +146,13 @@ _IATA_RE = re.compile(r'\b([A-Z]{3})\b')
 _DATE_RE = re.compile(r'\b(\d{4}-\d{2}-\d{2})\b')
 _PAX_RE  = re.compile(r'\b(\d+)\s*(?:passenger|pax|adult|people|person|travell?er)', re.I)
 _AIRLINE_COL_RE = re.compile(r'(?i)(preferred|favorite|favourite|fav)[\s_]*(airline|carrier)')
-_NO_PREF_RE = re.compile(r'(?i)\b(no preference|no preferred|none|skip|any airline|any carrier|doesn.?t matter|don.?t care)\b')
+_NO_PREF_RE = re.compile(r'(?i)\b(no pref(?:erence|rence)|no preferred|none|skip|any airline|any carrier|doesn.?t matter|don.?t care)\b')
 _HOTEL_KEYWORDS_RE = re.compile(
     r'\b(hotel|hotels|stay|stays|lodging|accommodation|accommodations|room|rooms)\b',
+    re.IGNORECASE,
+)
+_NO_HOTEL_RE = re.compile(
+    r'\b(?:flight(?:s)? only|only flight(?:s)?|no hotel|no hotels|without hotel|without hotels|skip hotel|skip hotels)\b',
     re.IGNORECASE,
 )
 _FLIGHT_KEYWORDS_RE = re.compile(
@@ -190,13 +199,14 @@ def extract_travel_intent(question: str) -> TravelIntent:
             break
 
     mentions_hotel = bool(_HOTEL_KEYWORDS_RE.search(question))
+    declines_hotel = bool(_NO_HOTEL_RE.search(question))
     mentions_flight = bool(_FLIGHT_KEYWORDS_RE.search(question))
     if mentions_hotel and not mentions_flight:
         intent.wants_flights = False
-        intent.wants_hotels = True
+        intent.wants_hotels = not declines_hotel
     elif mentions_hotel and mentions_flight:
         intent.wants_flights = True
-        intent.wants_hotels = True
+        intent.wants_hotels = not declines_hotel
     elif mentions_flight:
         intent.wants_flights = True
         intent.wants_hotels = False
@@ -209,11 +219,17 @@ def extract_travel_intent(question: str) -> TravelIntent:
     if guests_match:
         intent.guests = int(guests_match.group(1))
 
+    _apply_default_hotel_for_round_trip(intent, question)
+
+    return intent
+
+
+def _apply_default_hotel_for_round_trip(intent: TravelIntent, question: str) -> None:
+    if intent.wants_flights and intent.return_date and not _NO_HOTEL_RE.search(question):
+        intent.wants_hotels = True
     if intent.wants_hotels:
         intent.check_in_date = intent.check_in_date or intent.departure_date
         intent.check_out_date = intent.check_out_date or intent.return_date
-
-    return intent
 
 
 def _extract_preferred_airline_from_dfs(dataframes: list[Any]) -> str | None:
@@ -282,6 +298,26 @@ def _extract_airline_answer_from_history(
     return cleaned[:40] if cleaned else None
 
 
+def _question_for_airline_followup(current_question: str, chat_history: list[dict[str, Any]]) -> str:
+    if _extract_airline_answer_from_history(current_question, chat_history) is None:
+        return current_question
+
+    skipped_current_user = False
+    saw_airline_clarify = False
+    for msg in reversed(chat_history):
+        role = (msg.get("role") or "").lower()
+        content = str(msg.get("content") or "").strip()
+        if role == "user" and not skipped_current_user:
+            skipped_current_user = True
+            continue
+        if role == "assistant" and AIRLINE_CLARIFY_MARKER in content:
+            saw_airline_clarify = True
+            continue
+        if saw_airline_clarify and role == "user" and content:
+            return content
+    return current_question
+
+
 def _load_policy() -> dict[str, Any]:
     try:
         return json.loads(POLICY_PATH.read_text(encoding="utf-8"))
@@ -332,14 +368,16 @@ def _score_offer(offer_data: dict[str, Any], history: TravelHistory, policy_tier
 def _score_hotel(
     raw: dict[str, Any], history: TravelHistory, policy_tier: dict[str, Any]
 ) -> tuple[float, bool, str | None]:
-    price_per_night = float(raw.get("price_per_night") or 0)
+    price_per_night_raw = float(raw.get("price_per_night") or 0)
     per_night_cap = float(policy_tier.get("hotel_max_per_night_usd") or 200)
     currency = str(raw.get("currency") or "USD")
+    converted_price = convert_money(price_per_night_raw, currency, "USD")
+    price_per_night = converted_price.amount if converted_price else price_per_night_raw
     star = raw.get("star_rating")
     star_score = (star / 5.0) if isinstance(star, (int, float)) else 0.5
     review = raw.get("review_score")
     review_score_val = (review / 10.0) if isinstance(review, (int, float)) else 0.5
-    if currency != "USD":
+    if currency.upper() != "USD" and converted_price is None:
         price_score = 0.5
         composite = 0.5 * price_score + 0.3 * star_score + 0.2 * review_score_val
         return composite, False, f"Cannot verify ${per_night_cap:.0f}/night cap — hotel priced in {currency}"
@@ -382,7 +420,8 @@ class TravelOrchestrator:
 
             # ── Phase 1: Customer Context (inner loop) ────────────────────
             yield {"kind": "thinking", "step": "✈️ Extracting travel intent…", "progress": 15}
-            intent = await self._customer_context_agent(question, router, request_id)
+            intent_question = _question_for_airline_followup(question, chat_history or [])
+            intent = await self._customer_context_agent(intent_question, router, request_id)
             span.set_attribute("intent.origin", intent.origin or "")
             span.set_attribute("intent.destination", intent.destination or "")
 
@@ -440,6 +479,8 @@ class TravelOrchestrator:
                     history.user_preferred_airline = None  # user explicitly said no preference
                 elif from_history:
                     history.user_preferred_airline = from_history
+                elif _NO_PREF_RE.search(question):
+                    history.user_preferred_airline = None  # user included no preference in the original request
                 else:
                     # First time we hit this question for this trip — ask.
                     yield {
@@ -501,6 +542,7 @@ class TravelOrchestrator:
             # Fast-path: heuristic already confident
             if chain.should_continue(0, intent.confidence):
                 intent = await self._llm_fill_intent(question, intent, router, request_id)
+            _apply_default_hotel_for_round_trip(intent, question)
             return intent
 
     async def _llm_fill_intent(
@@ -711,7 +753,15 @@ class TravelOrchestrator:
             policy_tier = history.policy
             offers: list[FlightOffer] = []
             for raw in raw_offers[:10]:
-                score, compliant, violation = _score_offer(raw, history, policy_tier)
+                original_currency = str(raw.get("currency") or "USD").upper()
+                try:
+                    original_price = float(raw.get("price_usd") or 0)
+                except (TypeError, ValueError):
+                    original_price = 0.0
+                converted = convert_money(original_price, original_currency, "USD")
+                price_usd = converted.amount if converted else original_price
+                scored_raw = {**raw, "price_usd": price_usd, "currency": "USD"}
+                score, compliant, violation = _score_offer(scored_raw, history, policy_tier)
                 offers.append(FlightOffer(
                     offer_id=str(raw.get("offer_id") or ""),
                     airline=str(raw.get("airline") or ""),
@@ -723,14 +773,16 @@ class TravelOrchestrator:
                     duration_minutes=int(raw.get("duration_minutes") or 0),
                     stops=int(raw.get("stops") or 0),
                     cabin_class=str(raw.get("cabin_class") or intent.cabin_class),
-                    price_usd=float(raw.get("price_usd") or 0),
-                    currency=str(raw.get("currency") or "USD"),
+                    price_usd=price_usd,
+                    currency="USD",
                     policy_compliant=compliant,
                     policy_violation_reason=violation,
                     booking_redirect_url=str(raw.get("booking_redirect_url") or ""),
                     expires_at=raw.get("expires_at"),
                     score=score,
                     return_slice=raw.get("return_slice") if isinstance(raw.get("return_slice"), dict) else None,
+                    original_price=original_price,
+                    original_currency=original_currency,
                 ))
 
             offers.sort(key=lambda o: (-o.score, o.price_usd))
@@ -822,6 +874,11 @@ class TravelOrchestrator:
             hotels: list[HotelOffer] = []
             for raw in parsed[:10]:
                 score, compliant, violation = _score_hotel(raw, history, policy_tier)
+                currency = str(raw.get("currency") or "USD").upper()
+                price_per_night = float(raw.get("price_per_night") or 0)
+                total_price = float(raw.get("total_price") or 0)
+                converted_nightly = convert_money(price_per_night, currency, "USD")
+                converted_total = convert_money(total_price, currency, "USD")
                 hotels.append(HotelOffer(
                     hotel_id=str(raw.get("hotel_id") or ""),
                     name=str(raw.get("name") or ""),
@@ -829,9 +886,9 @@ class TravelOrchestrator:
                     star_rating=raw.get("star_rating"),
                     review_score=raw.get("review_score"),
                     photo_url=str(raw.get("photo_url") or ""),
-                    price_per_night=float(raw.get("price_per_night") or 0),
-                    total_price=float(raw.get("total_price") or 0),
-                    currency=str(raw.get("currency") or "USD"),
+                    price_per_night=price_per_night,
+                    total_price=total_price,
+                    currency=currency,
                     check_in_date=str(raw.get("check_in_date") or check_in),
                     check_out_date=str(raw.get("check_out_date") or check_out),
                     rooms=int(raw.get("rooms") or intent.rooms),
@@ -840,9 +897,11 @@ class TravelOrchestrator:
                     policy_compliant=compliant,
                     policy_violation_reason=violation,
                     score=score,
+                    price_per_night_usd=converted_nightly.amount if converted_nightly else None,
+                    total_price_usd=converted_total.amount if converted_total else None,
                 ))
 
-            hotels.sort(key=lambda h: (-h.score, h.total_price))
+            hotels.sort(key=lambda h: (-h.score, h.total_price_usd if h.total_price_usd is not None else h.total_price))
             span.set_attribute("hotels.returned", len(hotels))
             return hotels
 
@@ -870,6 +929,8 @@ class TravelOrchestrator:
                     "cabin_class": o.cabin_class,
                     "price_usd": o.price_usd,
                     "currency": o.currency,
+                    "original_price": o.original_price,
+                    "original_currency": o.original_currency,
                     "policy_compliant": o.policy_compliant,
                     "policy_violation_reason": o.policy_violation_reason,
                     "booking_redirect_url": o.booking_redirect_url,
@@ -890,6 +951,8 @@ class TravelOrchestrator:
                     "photo_url": h.photo_url,
                     "price_per_night": h.price_per_night,
                     "total_price": h.total_price,
+                    "price_per_night_usd": h.price_per_night_usd,
+                    "total_price_usd": h.total_price_usd,
                     "currency": h.currency,
                     "check_in_date": h.check_in_date,
                     "check_out_date": h.check_out_date,
