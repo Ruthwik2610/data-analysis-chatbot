@@ -243,8 +243,10 @@ from src.query_engine import (
     underspecified_clarification,
     validate_readonly_sql,
 )
+from src.semantic_manifest import build_wren_mdl_from_schema
 from src.utils import conversation_summary, params_key
 from src.visualization import choose_visualization, deterministic_summary
+from src.wren_engine_adapter import WrenEngineAdapter, WrenEngineUnavailable, build_duckdb_connection_info
 
 from backend.storage import Storage
 
@@ -260,6 +262,7 @@ PENDING_TTL_SECONDS = 1800
 ARCHIVE_PDF_MAX_BYTES = int(float(os.getenv("ARCHIVE_PDF_MAX_MB", "0")) * 1024 * 1024)
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "2GB")
 DUCKDB_THREADS = max(1, int(os.getenv("DUCKDB_THREADS", "1")))
+WREN_ENGINE_ENABLED = os.getenv("WREN_ENGINE_ENABLED", "0").strip() == "1"
 TEST_USER_EMAIL = os.getenv("TEST_USER_EMAIL", "").strip().lower()
 TEST_USER_PASSWORD = os.getenv("TEST_USER_PASSWORD", "").strip()
 DEFAULT_TEST_ACCOUNT_EMAIL = "test@unipro.ai"
@@ -841,6 +844,41 @@ def _connect_duckdb(path: str = ":memory:", *, read_only: bool = False):
     with contextlib.suppress(Exception):
         con.execute("SET preserve_insertion_order=false")
     return con
+
+
+def _wren_plan_for_source(
+    sql: str,
+    source: DataSource,
+    *,
+    adapter: WrenEngineAdapter | None = None,
+    enabled: bool = WREN_ENGINE_ENABLED,
+    request_id: str | None = None,
+) -> dict[str, Any] | None:
+    if not enabled or not source.db_path:
+        return None
+
+    mdl = build_wren_mdl_from_schema(
+        source.schema,
+        model_name=source.table_name,
+        table_name=source.table_name,
+        data_source="duckdb",
+    )
+    engine = adapter or WrenEngineAdapter()
+    try:
+        planned_sql = engine.dry_plan(
+            manifest=mdl,
+            data_source="duckdb",
+            connection_info=build_duckdb_connection_info(source.db_path),
+            sql=sql,
+        )
+    except WrenEngineUnavailable as exc:
+        log_event(LOGGERS["query"], "wren_engine_unavailable", request_id=request_id or "", error_type=type(exc).__name__)
+        return {"status": "unavailable", "data_source": "duckdb", "message": "Wren Engine SDK is not installed."}
+    except Exception as exc:
+        log_event(LOGGERS["query"], "wren_engine_plan_failed", request_id=request_id or "", error_type=type(exc).__name__)
+        return {"status": "error", "data_source": "duckdb", "message": "Wren Engine planning failed."}
+
+    return {"status": "planned", "data_source": "duckdb", "planned_sql": planned_sql}
 
 
 def _detect_join_candidates(source_summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4965,10 +5003,16 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
 
                     plan = ledger_plan or build_query_plan(intent, question, source.allowed_columns)
                     validate_readonly_sql(plan.sql)
+                    wren_engine_plan = await loop.run_in_executor(
+                        None,
+                        lambda: _wren_plan_for_source(plan.sql, source, request_id=request_id),
+                    )
 
                     filter_count = len(intent.get("filters") or [])
                     filter_note = f" · {filter_count} filter{'s' if filter_count != 1 else ''}" if filter_count else ""
                     yield {"event": "thinking", "data": json.dumps({"step": f"Understood: {plan.title}{filter_note}"})}
+                    if wren_engine_plan and wren_engine_plan.get("status") == "planned":
+                        yield {"event": "thinking", "data": json.dumps({"step": "Checked semantic plan with Wren Engine"})}
                     yield {"event": "thinking", "data": json.dumps({"step": f"Querying {active_row['name']}"})}
 
                     max_retries = 3
@@ -5030,6 +5074,8 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         "view_type": _get_view_type(chat_id),
                         **_df_to_payload(df),
                     }
+                    if wren_engine_plan:
+                        result_payload["wren_engine"] = wren_engine_plan
                     yield {"event": "result", "data": json.dumps(result_payload, default=str)}
                     yield {"event": "thinking", "data": json.dumps({"step": "Putting an answer together"})}
 

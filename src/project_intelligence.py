@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from src.domain_detection import detect_domain
+from src.semantic_manifest import compact_semantic_context
 
 
 COUNT_WORDS = ("how many", "count", "number of")
@@ -250,6 +251,10 @@ def build_instruction_context(
     payload = {
         "source": normalize_instructions(source_instructions, allowed_columns),
         "project": project_clean,
+        "semantic": {
+            "source": compact_semantic_context(source_instructions, allowed_columns=allowed_columns),
+            "project": compact_semantic_context(project_instructions, allowed_columns=allowed_columns),
+        },
         "memory": [
             {
                 "title": str(item.get("title") or "")[:120],

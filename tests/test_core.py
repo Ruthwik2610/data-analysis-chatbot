@@ -382,6 +382,17 @@ class QueryPlanTests(unittest.TestCase):
                 "items_sold": {"column": "quantity", "aggregation": "sum", "synonyms": ["items sold"]},
                 "bad_metric": {"column": "missing_column", "aggregation": "sum"},
             },
+            "relationships": [
+                {
+                    "from_model": "order_lines",
+                    "from_column": "order_id",
+                    "to_model": "orders",
+                    "to_column": "id",
+                    "cardinality": "many_to_one",
+                    "approved": True,
+                }
+            ],
+            "routing": {"good_for": ["restaurant sales"], "not_for": ["payroll"]},
             "notes": "Use order_id as the order number.",
         }
 
@@ -396,6 +407,10 @@ class QueryPlanTests(unittest.TestCase):
         self.assertIn("line_item", context)
         self.assertIn("order_id", context)
         self.assertIn("items_sold", context)
+        self.assertIn("sum(quantity)", context)
+        self.assertIn("order_lines.order_id -> orders.id", context)
+        self.assertIn("restaurant sales", context)
+        self.assertIn("payroll", context)
         self.assertNotIn("missing_column", context)
 
     def test_real_pizza_csv_instruction_metrics_execute(self) -> None:
