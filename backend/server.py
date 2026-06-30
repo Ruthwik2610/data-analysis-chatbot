@@ -194,6 +194,7 @@ class QueryRequest(BaseModel):
     source_ids: list[str] | None = None
     project_id: str | None = None
     model_mode: str | None = None
+    business_logic_enabled: bool = False
 
 
 class ResolvePending(BaseModel):
@@ -262,7 +263,7 @@ PENDING_TTL_SECONDS = 1800
 ARCHIVE_PDF_MAX_BYTES = int(float(os.getenv("ARCHIVE_PDF_MAX_MB", "0")) * 1024 * 1024)
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "2GB")
 DUCKDB_THREADS = max(1, int(os.getenv("DUCKDB_THREADS", "1")))
-WREN_ENGINE_ENABLED = os.getenv("WREN_ENGINE_ENABLED", "0").strip() == "1"
+BUSINESS_LOGIC_ENGINE_ENABLED = os.getenv("BUSINESS_LOGIC_ENGINE_ENABLED", "0").strip() == "1"
 TEST_USER_EMAIL = os.getenv("TEST_USER_EMAIL", "").strip().lower()
 TEST_USER_PASSWORD = os.getenv("TEST_USER_PASSWORD", "").strip()
 DEFAULT_TEST_ACCOUNT_EMAIL = "test@unipro.ai"
@@ -846,12 +847,12 @@ def _connect_duckdb(path: str = ":memory:", *, read_only: bool = False):
     return con
 
 
-def _wren_plan_for_source(
+def _business_logic_plan_for_source(
     sql: str,
     source: DataSource,
     *,
     adapter: WrenEngineAdapter | None = None,
-    enabled: bool = WREN_ENGINE_ENABLED,
+    enabled: bool = BUSINESS_LOGIC_ENGINE_ENABLED,
     request_id: str | None = None,
 ) -> dict[str, Any] | None:
     if not enabled or not source.db_path:
@@ -872,11 +873,11 @@ def _wren_plan_for_source(
             sql=sql,
         )
     except WrenEngineUnavailable as exc:
-        log_event(LOGGERS["query"], "wren_engine_unavailable", request_id=request_id or "", error_type=type(exc).__name__)
-        return {"status": "unavailable", "data_source": "duckdb", "message": "Wren Engine SDK is not installed."}
+        log_event(LOGGERS["query"], "business_logic_unavailable", request_id=request_id or "", error_type=type(exc).__name__)
+        return {"status": "unavailable", "data_source": "duckdb", "message": "Business Logic Layer is not available."}
     except Exception as exc:
-        log_event(LOGGERS["query"], "wren_engine_plan_failed", request_id=request_id or "", error_type=type(exc).__name__)
-        return {"status": "error", "data_source": "duckdb", "message": "Wren Engine planning failed."}
+        log_event(LOGGERS["query"], "business_logic_plan_failed", request_id=request_id or "", error_type=type(exc).__name__)
+        return {"status": "error", "data_source": "duckdb", "message": "Business Logic Layer planning failed."}
 
     return {"status": "planned", "data_source": "duckdb", "planned_sql": planned_sql}
 
@@ -5003,16 +5004,21 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
 
                     plan = ledger_plan or build_query_plan(intent, question, source.allowed_columns)
                     validate_readonly_sql(plan.sql)
-                    wren_engine_plan = await loop.run_in_executor(
+                    business_logic_plan = await loop.run_in_executor(
                         None,
-                        lambda: _wren_plan_for_source(plan.sql, source, request_id=request_id),
+                        lambda: _business_logic_plan_for_source(
+                            plan.sql,
+                            source,
+                            enabled=BUSINESS_LOGIC_ENGINE_ENABLED and body.business_logic_enabled,
+                            request_id=request_id,
+                        ),
                     )
 
                     filter_count = len(intent.get("filters") or [])
                     filter_note = f" · {filter_count} filter{'s' if filter_count != 1 else ''}" if filter_count else ""
                     yield {"event": "thinking", "data": json.dumps({"step": f"Understood: {plan.title}{filter_note}"})}
-                    if wren_engine_plan and wren_engine_plan.get("status") == "planned":
-                        yield {"event": "thinking", "data": json.dumps({"step": "Checked semantic plan with Wren Engine"})}
+                    if business_logic_plan and business_logic_plan.get("status") == "planned":
+                        yield {"event": "thinking", "data": json.dumps({"step": "Checked business logic layer"})}
                     yield {"event": "thinking", "data": json.dumps({"step": f"Querying {active_row['name']}"})}
 
                     max_retries = 3
@@ -5074,8 +5080,8 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         "view_type": _get_view_type(chat_id),
                         **_df_to_payload(df),
                     }
-                    if wren_engine_plan:
-                        result_payload["wren_engine"] = wren_engine_plan
+                    if business_logic_plan:
+                        result_payload["business_logic"] = business_logic_plan
                     yield {"event": "result", "data": json.dumps(result_payload, default=str)}
                     yield {"event": "thinking", "data": json.dumps({"step": "Putting an answer together"})}
 

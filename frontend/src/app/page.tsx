@@ -19,6 +19,7 @@ import { buildCustomSheetQuestion, buildSheetModeQuestion } from "@/lib/uploadPe
 import type { ChatSummary, Source, SourceMeta, Message, ResultPayload, Pending, Project, ModelMode, MCPConnector, Connector } from "@/lib/types";
 
 const URL_RE = /\bhttps?:\/\/[^\s,;]+/i;
+const BUSINESS_LOGIC_STORAGE_KEY = "datachat_business_logic_enabled";
 const isMcpSourceId = (id: string) => id === "mcp" || id.startsWith("mcp:");
 
 export default function Home() {
@@ -36,6 +37,10 @@ export default function Home() {
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [modelMode, setModelMode] = useState<ModelMode>("auto");
+  const [businessLogicEnabled, setBusinessLogicEnabled] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(BUSINESS_LOGIC_STORAGE_KEY) === "1";
+  });
   const [chatsReady, setChatsReady] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
@@ -103,6 +108,10 @@ export default function Home() {
   }, [authReady, user]);
 
   useEffect(() => { refreshSources(); refreshMCPConnectors(); refreshApiConnectors(); refreshChats(); refreshProjects(); }, [refreshSources, refreshMCPConnectors, refreshApiConnectors, refreshChats, refreshProjects]);
+
+  useEffect(() => {
+    window.localStorage.setItem(BUSINESS_LOGIC_STORAGE_KEY, businessLogicEnabled ? "1" : "0");
+  }, [businessLogicEnabled]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -475,6 +484,7 @@ export default function Home() {
           source_ids: selectedSourceIds,
           project_id: currentProjectId,
           model_mode: modelMode,
+          business_logic_enabled: businessLogicEnabled,
         }, queryAbortRef.current.signal)) {
           if (ev.event === "meta") {
             if (ev.data.chat_id !== currentChatId) {
@@ -1062,6 +1072,8 @@ export default function Home() {
         <SettingsPanel
           modelMode={modelMode}
           onModelModeChange={setModelMode}
+          businessLogicEnabled={businessLogicEnabled}
+          onBusinessLogicEnabledChange={setBusinessLogicEnabled}
           onClose={() => setSettingsOpen(false)}
           onClearChat={handleNewChat}
           isAdmin={isAdmin}
@@ -1071,15 +1083,19 @@ export default function Home() {
   );
 }
 
-function SettingsPanel({
+export function SettingsPanel({
   modelMode,
   onModelModeChange,
+  businessLogicEnabled,
+  onBusinessLogicEnabledChange,
   onClose,
   onClearChat,
   isAdmin,
 }: {
   modelMode: ModelMode;
   onModelModeChange: (mode: ModelMode) => void;
+  businessLogicEnabled: boolean;
+  onBusinessLogicEnabledChange: (enabled: boolean) => void;
   onClose: () => void;
   onClearChat: () => void;
   isAdmin: boolean;
@@ -1106,6 +1122,31 @@ function SettingsPanel({
               <option value="pro">Pro</option>
             </select>
           </label>
+          <div className="flex items-center justify-between gap-4 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+            <span>Business Logic Layer</span>
+            <button
+              type="button"
+              role="switch"
+              aria-label="Business Logic Layer"
+              aria-checked={businessLogicEnabled}
+              onClick={() => onBusinessLogicEnabledChange(!businessLogicEnabled)}
+              className="relative h-6 w-11 flex-shrink-0 rounded-full transition-colors"
+              style={{
+                background: businessLogicEnabled ? "var(--color-text-info)" : "var(--color-background-secondary)",
+                border: "1px solid var(--color-border-secondary)",
+              }}
+            >
+              <span
+                aria-hidden="true"
+                className="absolute top-0.5 h-5 w-5 rounded-full transition-transform"
+                style={{
+                  background: "var(--color-background-elevated)",
+                  boxShadow: "var(--shadow-sm)",
+                  transform: businessLogicEnabled ? "translateX(20px)" : "translateX(2px)",
+                }}
+              />
+            </button>
+          </div>
           <button type="button" onClick={() => { onClearChat(); onClose(); }} className="rounded-[10px] px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--color-border-secondary)", color: "var(--color-text-primary)" }}>
             Clear current screen
           </button>

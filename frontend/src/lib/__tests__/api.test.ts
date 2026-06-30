@@ -61,6 +61,28 @@ describe("streamQuery", () => {
     expect(events).toEqual([{ event: "done", data: { chat_id: "chat_1" } }]);
   });
 
+  it("serializes the business logic toggle in the query request", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("event: done\ndata: {\"chat_id\":\"chat_1\"}\n\n"));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      body: stream,
+    } as Response);
+
+    const events = [];
+    for await (const event of streamQuery({ chat_id: null, question: "total sales", business_logic_enabled: true })) {
+      events.push(event);
+    }
+
+    const requestInit = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(requestInit.body)).business_logic_enabled).toBe(true);
+    expect(events).toEqual([{ event: "done", data: { chat_id: "chat_1" } }]);
+  });
+
   it("sanitizes internal thinking steps before exposing stream events", async () => {
     const stream = new ReadableStream({
       start(controller) {

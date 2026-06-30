@@ -86,6 +86,7 @@ export interface ResultPayload {
   row_count: number;
   truncated: boolean;
   view_type?: string;
+  business_logic?: { status: string; data_source: string; planned_sql?: string; message?: string };
 }
 
 export type PendingResolver =

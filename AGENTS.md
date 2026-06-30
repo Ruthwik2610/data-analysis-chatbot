@@ -46,17 +46,17 @@ This project intentionally uses DeepSeek models through OpenRouter:
 
 Do not switch Flash mode to Gemini or another provider/model unless the user explicitly asks for that change. If model availability breaks, verify the OpenRouter model id and provider routing first before changing defaults.
 
-# Wren Engine Integration Workflow
+# Business Logic Engine Integration Workflow
 
-For Wren AI/Wren Engine work in this repository:
+For Business Logic Engine work in this repository:
 
-- Treat Wren Engine as a direct Python SDK integration, not an MCP bridge, unless the user explicitly asks for an MCP path.
+- Treat the Business Logic Engine as a direct Python SDK integration, not an MCP bridge, unless the user explicitly asks for an MCP path.
 - Start from a clean worktree. Create a backup branch at the current HEAD before implementation, then do development on a new `codex/` branch.
 - Use TDD for implementation: write the failing backend test first, verify the failure, then add the smallest production code that makes it pass.
-- Keep Wren Engine behavior explicit behind `WREN_ENGINE_ENABLED`; do not silently change production query routing without tests and a rollback path.
-- Keep DuckDB/DataChat query execution as the source of truth until Wren-backed planning/query parity is proven with regression tests.
+- Keep Business Logic Engine behavior explicit behind `BUSINESS_LOGIC_ENGINE_ENABLED`; do not silently change production query routing without tests and a rollback path.
+- Keep DuckDB/DataChat query execution as the source of truth until engine-backed planning/query parity is proven with regression tests.
 - Add or update CI-style checks with exact commands. At minimum, run focused pytest for touched backend paths; run the broader backend suite before deployment-sensitive changes.
-- Do not expose raw Wren exceptions, database paths beyond existing internal payloads, credentials, or connector secrets in user-facing UI. Log sanitized operator details only.
+- Do not expose raw engine exceptions, database paths beyond existing internal payloads, credentials, or connector secrets in user-facing UI. Log sanitized operator details only.
 
 # Jules + Codex Development Workflow
 

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from src.data_sources import DataSource
 from backend import server
-from backend.server import _wren_plan_for_source
+from backend.server import _business_logic_plan_for_source
 
 
-class FakeWrenAdapter:
+class FakeBusinessLogicAdapter:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
@@ -28,8 +28,8 @@ SCHEMA = {
 }
 
 
-def test_wren_plan_for_duckdb_source_uses_direct_engine_adapter() -> None:
-    adapter = FakeWrenAdapter()
+def test_business_logic_plan_for_duckdb_source_uses_direct_engine_adapter() -> None:
+    adapter = FakeBusinessLogicAdapter()
     source = DataSource(
         source_kind="DuckDB file",
         schema=SCHEMA,
@@ -38,7 +38,7 @@ def test_wren_plan_for_duckdb_source_uses_direct_engine_adapter() -> None:
         table_name="orders",
     )
 
-    result = _wren_plan_for_source(
+    result = _business_logic_plan_for_source(
         'SELECT sum(total_price) AS total FROM "orders"',
         source,
         adapter=adapter,
@@ -59,8 +59,8 @@ def test_wren_plan_for_duckdb_source_uses_direct_engine_adapter() -> None:
     assert call["manifest"]["models"][0]["columns"][1]["name"] == "total_price"
 
 
-def test_wren_plan_for_source_skips_non_duckdb_backed_sources() -> None:
-    adapter = FakeWrenAdapter()
+def test_business_logic_plan_for_source_skips_non_duckdb_backed_sources() -> None:
+    adapter = FakeBusinessLogicAdapter()
     source = DataSource(
         source_kind="Uploaded CSV",
         schema=SCHEMA,
@@ -68,12 +68,12 @@ def test_wren_plan_for_source_skips_non_duckdb_backed_sources() -> None:
         dataframe=None,
     )
 
-    assert _wren_plan_for_source("SELECT 1", source, adapter=adapter, enabled=True) is None
+    assert _business_logic_plan_for_source("SELECT 1", source, adapter=adapter, enabled=True) is None
     assert adapter.calls == []
 
 
-def test_wren_plan_for_source_skips_when_disabled() -> None:
-    adapter = FakeWrenAdapter()
+def test_business_logic_plan_for_source_skips_when_disabled() -> None:
+    adapter = FakeBusinessLogicAdapter()
     source = DataSource(
         source_kind="DuckDB file",
         schema=SCHEMA,
@@ -82,11 +82,11 @@ def test_wren_plan_for_source_skips_when_disabled() -> None:
         table_name="orders",
     )
 
-    assert _wren_plan_for_source("SELECT 1", source, adapter=adapter, enabled=False) is None
+    assert _business_logic_plan_for_source("SELECT 1", source, adapter=adapter, enabled=False) is None
     assert adapter.calls == []
 
 
-def test_wren_plan_failure_logs_sanitized_error(monkeypatch) -> None:
+def test_business_logic_plan_failure_logs_sanitized_error(monkeypatch) -> None:
     class BrokenAdapter:
         def dry_plan(self, **kwargs):
             raise RuntimeError("secret path /tmp/datachat/orders.duckdb")
@@ -105,12 +105,12 @@ def test_wren_plan_failure_logs_sanitized_error(monkeypatch) -> None:
         table_name="orders",
     )
 
-    result = _wren_plan_for_source("SELECT 1", source, adapter=BrokenAdapter(), enabled=True, request_id="req-1")
+    result = _business_logic_plan_for_source("SELECT 1", source, adapter=BrokenAdapter(), enabled=True, request_id="req-1")
 
-    assert result == {"status": "error", "data_source": "duckdb", "message": "Wren Engine planning failed."}
+    assert result == {"status": "error", "data_source": "duckdb", "message": "Business Logic Layer planning failed."}
     assert events == [
         {
-            "event": "wren_engine_plan_failed",
+            "event": "business_logic_plan_failed",
             "request_id": "req-1",
             "error_type": "RuntimeError",
         }

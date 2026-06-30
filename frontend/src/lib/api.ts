@@ -276,8 +276,17 @@ export const api = {
     }).then(r => r.json()),
 };
 
+export type StreamQueryBody = {
+  chat_id: string | null;
+  question: string;
+  source_ids?: string[];
+  project_id?: string | null;
+  model_mode?: ModelMode;
+  business_logic_enabled?: boolean;
+};
+
 export async function* streamQuery(
-  body: { chat_id: string | null; question: string; source_ids?: string[]; project_id?: string | null; model_mode?: ModelMode },
+  body: StreamQueryBody,
   signal?: AbortSignal,
 ): AsyncGenerator<SSEEvent> {
   const res = await fetch(`${BASE}/query`, {
