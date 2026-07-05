@@ -308,6 +308,141 @@ class QueryPlanTests(unittest.TestCase):
         df = pd.DataFrame({"period": pd.to_datetime(["2024-01-01", "2024-02-01"]), "revenue": [1, 2]})
         self.assertEqual(choose_visualization("monthly revenue trend", intent, df), "line")
 
+    def test_monthly_trend_executes_with_text_dates_and_currency_amounts(self) -> None:
+        plan = build_query_plan(
+            {
+                "intent_type": "trend",
+                "aggregation": "sum",
+                "metric_column": "net",
+                "dimensions": [],
+                "date_grain": "month",
+                "filters": [],
+                "limit": 100,
+            },
+            "month wise sales?",
+            {"date", "vno", "product", "net"},
+        )
+
+        validate_readonly_sql(plan.sql)
+        df = pd.DataFrame(
+            [
+                {"date": "15/01/2026", "vno": 1, "product": "Seeds", "net": "1,000.50"},
+                {"date": "20/01/2026", "vno": 2, "product": "Tools", "net": "₹90.00"},
+                {"date": "05/02/2026", "vno": 3, "product": "Seeds", "net": "25"},
+            ]
+        )
+        con = duckdb.connect(":memory:")
+        try:
+            con.register("orders", df)
+            result = con.execute(plan.sql, plan.params).fetchdf()
+        finally:
+            con.close()
+
+        self.assertTrue(result["period"].notna().all())
+        self.assertEqual(result["period"].dt.strftime("%Y-%m").tolist(), ["2026-01", "2026-02"])
+        self.assertEqual(result["net"].tolist(), [1090.5, 25.0])
+
+    def test_multi_metric_prompt_builds_all_requested_columns(self) -> None:
+        allowed = {"order_id", "sales", "profit", "quantity"}
+        plan = build_query_plan(
+            {
+                "intent_type": "aggregate",
+                "aggregation": "sum",
+                "metric_column": "sales",
+                "filters": [],
+                "limit": 100,
+            },
+            "What are total sales, total profit, and total quantity?",
+            allowed,
+        )
+
+        validate_readonly_sql(plan.sql)
+        self.assertIn('AS "total_sales"', plan.sql)
+        self.assertIn('AS "total_profit"', plan.sql)
+        self.assertIn('AS "total_quantity"', plan.sql)
+
+        df = pd.DataFrame([
+            {"order_id": "O-1", "sales": "1,200.50", "profit": "300", "quantity": "3"},
+            {"order_id": "O-2", "sales": "800", "profit": "-20", "quantity": "2"},
+        ])
+        con = duckdb.connect(":memory:")
+        try:
+            con.register("orders", df)
+            result = con.execute(plan.sql, plan.params).fetchdf().iloc[0].to_dict()
+        finally:
+            con.close()
+
+        self.assertEqual(result["total_sales"], 2000.5)
+        self.assertEqual(result["total_profit"], 280.0)
+        self.assertEqual(result["total_quantity"], 5.0)
+
+    def test_revenue_and_items_terms_map_to_sales_and_quantity(self) -> None:
+        allowed = {"order_id", "sales", "quantity"}
+        plan = build_query_plan(
+            {"intent_type": "aggregate", "aggregation": "sum", "metric_column": "revenue", "filters": []},
+            "Show total revenue and items sold.",
+            allowed,
+        )
+
+        self.assertIn('SUM(COALESCE(TRY_CAST("sales" AS DOUBLE)', plan.sql)
+        self.assertIn('AS "total_sales"', plan.sql)
+        self.assertIn('SUM(COALESCE(TRY_CAST("quantity" AS DOUBLE)', plan.sql)
+        self.assertIn('AS "total_quantity"', plan.sql)
+
+    def test_loss_making_orders_filter_profit_negative(self) -> None:
+        allowed = {"order_id", "order_date", "customer", "sales", "profit", "quantity"}
+        plan = build_query_plan(
+            {"intent_type": "aggregate", "aggregation": "count", "filters": []},
+            "Which orders are loss-making?",
+            allowed,
+        )
+
+        validate_readonly_sql(plan.sql)
+        self.assertIn('"profit"', plan.sql)
+        self.assertIn("< 0", plan.sql)
+
+        df = pd.DataFrame([
+            {"order_id": "O-1", "order_date": "2026-01-01", "customer": "A", "sales": 100, "profit": 10, "quantity": 1},
+            {"order_id": "O-2", "order_date": "2026-01-02", "customer": "B", "sales": 50, "profit": -5, "quantity": 2},
+        ])
+        con = duckdb.connect(":memory:")
+        try:
+            con.register("orders", df)
+            result = con.execute(plan.sql, plan.params).fetchdf()
+        finally:
+            con.close()
+
+        self.assertEqual(result["order_id"].tolist(), ["O-2"])
+        self.assertEqual(result["profit"].tolist(), [-5])
+
+    def test_data_quality_audit_checks_values_and_duplicate_rows(self) -> None:
+        allowed = {"order_id", "order_date", "branch", "sales", "profit"}
+        plan = build_query_plan(
+            {"intent_type": "multi_step", "requested_visualization": "table"},
+            "Are there data quality gaps? Check missing, empty strings, placeholders, invalid dates, numeric anomalies, and duplicates.",
+            allowed,
+        )
+
+        validate_readonly_sql(plan.sql)
+        df = pd.DataFrame([
+            {"order_id": "O-1", "order_date": "2026-01-01", "branch": "<Branch>", "sales": "100", "profit": "10"},
+            {"order_id": "O-2", "order_date": "not-a-date", "branch": "", "sales": "abc", "profit": "-5"},
+            {"order_id": "O-2", "order_date": "not-a-date", "branch": "", "sales": "abc", "profit": "-5"},
+        ])
+        con = duckdb.connect(":memory:")
+        try:
+            con.register("orders", df)
+            result = con.execute(plan.sql, plan.params).fetchdf()
+        finally:
+            con.close()
+
+        by_column = {row["column_name"]: row for row in result.to_dict(orient="records")}
+        self.assertEqual(by_column["branch"]["empty_string_count"], 2)
+        self.assertEqual(by_column["branch"]["placeholder_count"], 1)
+        self.assertEqual(by_column["order_date"]["invalid_date_count"], 2)
+        self.assertEqual(by_column["sales"]["numeric_anomaly_count"], 2)
+        self.assertEqual(by_column["__row__"]["exact_duplicate_rows"], 1)
+
     def test_table_by_location_groups_by_city(self) -> None:
         allowed = ALLOWED | {"ship_city"}
         intent = heuristic_intent("give me a table by location", allowed)
@@ -319,7 +454,7 @@ class QueryPlanTests(unittest.TestCase):
         allowed = {"location", "revenue"}
         intent = heuristic_intent("give me a table by location", allowed)
         plan = build_query_plan(intent, "give me a table by location", allowed)
-        self.assertIn('SUM(TRY_CAST("revenue" AS DOUBLE))', plan.sql)
+        self.assertIn('SUM(COALESCE(TRY_CAST("revenue" AS DOUBLE)', plan.sql)
         self.assertEqual(plan.sql.count('"location" AS "location"'), 1)
 
     def test_pizza_instructions_distinguish_items_sold_and_orders(self) -> None:
@@ -345,7 +480,8 @@ class QueryPlanTests(unittest.TestCase):
 
         plan = build_query_plan(intent, "how many items sold vs how many orders", allowed)
 
-        self.assertIn('SUM(TRY_CAST("quantity" AS DOUBLE)) AS "items_sold"', plan.sql)
+        self.assertIn('SUM(COALESCE(TRY_CAST("quantity" AS DOUBLE)', plan.sql)
+        self.assertIn('AS "items_sold"', plan.sql)
         self.assertIn('COUNT(DISTINCT "order_id") AS "orders"', plan.sql)
 
     def test_pizza_instructions_count_rows_line_items_and_distinct_orders(self) -> None:

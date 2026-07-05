@@ -201,8 +201,8 @@ Columns:
 - DuckDB SQL. SELECT only — no INSERT/UPDATE/DELETE/DROP/ALTER.
 - Use ONLY the column names listed above. Never invent columns.
 - Quote names with double quotes when in doubt: "column name".
-- For numeric ops on text-typed columns: TRY_CAST("col" AS DOUBLE).
-- Monthly grouping: date_trunc('month', "date_col").
+- For numeric ops on text-typed columns: COALESCE(TRY_CAST("col" AS DOUBLE), TRY_CAST(regexp_replace(NULLIF(TRIM(CAST("col" AS VARCHAR)), ''), '[^0-9.-]', '', 'g') AS DOUBLE)).
+- Monthly grouping on text/date columns: date_trunc('month', COALESCE(TRY_CAST("date_col" AS TIMESTAMP), try_strptime(NULLIF(TRIM(CAST("date_col" AS VARCHAR)), ''), ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%m/%d/%Y', '%m-%d-%Y']))).
 - Always include a LIMIT (default 100).
 
 ## Multi-step & Analytics strategy

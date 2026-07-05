@@ -235,11 +235,13 @@ from src.project_intelligence import (
     normalize_instructions,
 )
 from src.query_engine import (
+    build_deterministic_query_plan,
     build_ledger_query_plan,
     build_query_plan,
     build_total_plan,
     heuristic_intent,
     is_underspecified,
+    missing_requested_columns_message,
     quote_ident,
     underspecified_clarification,
     validate_readonly_sql,
@@ -3714,6 +3716,16 @@ def _result_grounded_answer(question: str, payload: dict[str, Any]) -> str:
         count = rows[0][columns.index("product_count")]
         return f"I found **{count:,} matching products**. The verified count is shown below."
 
+    # Single-row metric/card summary
+    if row_count == 1 and rows and columns and len(columns) <= 5:
+        row = rows[0]
+        values = []
+        for idx, col in enumerate(columns):
+            value = row[idx] if isinstance(row, list) and idx < len(row) else None
+            label = str(col).replace("_", " ").title()
+            values.append(f"**{label}**: {value}")
+        return ", ".join(values) + "."
+
     # General list summary
     if row_count > 0:
         count_str = f"{row_count:,}"
@@ -4883,6 +4895,23 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
 
                     route = (intent.get("route") or "local").lower()
                     ledger_plan = build_ledger_query_plan(question, source.allowed_columns) if source is not None else None
+                    deterministic_plan = build_deterministic_query_plan(question, source.allowed_columns) if source is not None else None
+                    missing_columns_content = (
+                        missing_requested_columns_message(question, source.allowed_columns, active_row["name"])
+                        if source is not None
+                        else None
+                    )
+
+                    if missing_columns_content and ledger_plan is None and deterministic_plan is None:
+                        msg = DB.add_message(
+                            chat_id,
+                            "assistant",
+                            missing_columns_content,
+                            payload={"kind": "clarification", "model": model_used, "model_selection": _payload_model_selection(model_selection)},
+                        )
+                        yield {"event": "clarify", "data": json.dumps({"content": missing_columns_content, "message_id": msg["id"]})}
+                        yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+                        return
 
                     # Explicit MCP route — classifier decided the question belongs to a connected MCP source.
                     if route == "mcp" and has_selected_mcp:
@@ -4891,26 +4920,26 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         return
 
                     # Compound question that needs sequential SQL — route to local agent loop.
-                    if intent.get("intent_type") == "multi_step" and source is not None and ledger_plan is None:
+                    if intent.get("intent_type") == "multi_step" and source is not None and ledger_plan is None and deterministic_plan is None:
                         async for ev in _run_local_agent(chat_id, question, source, analysis_history, request_id, model_used, llm_router, user_msg["id"], model_selection):
                             yield ev
                         return
 
-                    if intent.get("intent_type") == "clarification" and ledger_plan is None:
+                    if intent.get("intent_type") == "clarification" and ledger_plan is None and deterministic_plan is None:
                         content = intent.get("clarifying_question") or "Can you clarify the metric or grouping?"
                         msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used, "model_selection": _payload_model_selection(model_selection)})
                         yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
                         yield {"event": "done", "data": json.dumps({"message_id": msg["id"]})}
                         return
 
-                    if is_underspecified(intent, question, source.allowed_columns) and ledger_plan is None:
+                    if is_underspecified(intent, question, source.allowed_columns) and ledger_plan is None and deterministic_plan is None:
                         content = underspecified_clarification(source.allowed_columns, active_row["name"])
                         msg = DB.add_message(chat_id, "assistant", content, payload={"kind": "clarification", "model": model_used, "model_selection": _payload_model_selection(model_selection)})
                         yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
                         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
                         return
 
-                    if intent.get("intent_type") == "unsupported" and ledger_plan is None:
+                    if intent.get("intent_type") == "unsupported" and ledger_plan is None and deterministic_plan is None:
                         # Safety net: if the classifier missed the route field but MCP is connected,
                         # let the agent try (e.g. user asked about BigQuery while a CSV is active).
                         # However, if the user explicitly asked about the "table" or "file" or if the
@@ -4928,7 +4957,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
                         return
 
-                    if intent.get("intent_type") == "multi_step" and ledger_plan is None:
+                    if intent.get("intent_type") == "multi_step" and ledger_plan is None and deterministic_plan is None:
                         yield {"event": "thinking", "data": json.dumps({"step": "Preparing analysis"})}
                         try:
                             from backend.code_execution import CodeSandbox
@@ -5002,7 +5031,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                             # Fallback to standard SQL execution on failure
                             yield {"event": "thinking", "data": json.dumps({"step": "Trying another analysis path"})}
 
-                    plan = ledger_plan or build_query_plan(intent, question, source.allowed_columns)
+                    plan = ledger_plan or deterministic_plan or build_query_plan(intent, question, source.allowed_columns)
                     validate_readonly_sql(plan.sql)
                     business_logic_plan = await loop.run_in_executor(
                         None,
@@ -5094,6 +5123,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     sample = sample_df.to_dict(orient="records")
                     full_text_parts: list[str] = []
                     stream_filter = _DSMLStreamFilter()
+                    emitted_text = False
 
                     # Always compute the grand total for multi-row breakdowns so the answer can quote it
                     # without summing the (possibly truncated) sample. ~50ms extra DuckDB query.
@@ -5138,19 +5168,25 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                                 visible_chunk = stream_filter.feed(chunk)
                                 if visible_chunk:
                                     yield {"event": "text", "data": json.dumps({"delta": visible_chunk})}
+                                    emitted_text = True
                         except LLMUnavailable as exc:
                             text = deterministic_summary(question, df, len(df))
                             full_text_parts = [text]
                             yield {"event": "text", "data": json.dumps({"delta": text})}
+                            emitted_text = True
                     else:
                         text = deterministic_summary(question, df, len(df))
                         full_text_parts = [text]
                         yield {"event": "text", "data": json.dumps({"delta": text})}
+                        emitted_text = True
 
                     final_visible_delta = stream_filter.finish()
                     if final_visible_delta and llm_router.available:
                         yield {"event": "text", "data": json.dumps({"delta": final_visible_delta})}
+                        emitted_text = True
                     full_text = _finalize_visible_answer("".join(full_text_parts) or "(no answer)", question, result_payload)
+                    if not emitted_text and full_text and full_text != "(no answer)":
+                        yield {"event": "text", "data": json.dumps({"delta": full_text})}
                     
                     # Log tokens for the answer (estimated for stream)
                     if llm_router.available:

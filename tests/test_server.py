@@ -1412,6 +1412,13 @@ class OrdersDummyRouter:
         yield "Total sales are $4,450."
 
 
+class SilentOrdersRouter(OrdersDummyRouter):
+    def summarize_answer_stream(self, **kwargs):
+        self.summary_questions.append(kwargs["user_question"])
+        if False:
+            yield ""
+
+
 def _write_orders_csv(path):
     path.write_text(
         "\n".join([
@@ -1501,6 +1508,67 @@ def test_answerable_injection_prompt_is_normalized_before_querying(isolated_serv
     assert "$4,450" in response.text
     assert "999999" not in "".join(router.classified_questions)
     assert "999999" not in "".join(router.summary_questions)
+
+
+def test_missing_requested_columns_return_safe_clarification(isolated_server, tmp_path, monkeypatch):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    source_id = "src_orders_missing_columns"
+    csv_path = tmp_path / "orders.csv"
+    _write_orders_csv(csv_path)
+    _register_orders_source(storage, source_id, csv_path)
+
+    router = OrdersDummyRouter({"intent_type": "multi_step", "requested_visualization": "table"})
+    monkeypatch.setattr(server, "_router_for_model_mode", lambda _mode: router)
+
+    async def fail_local_agent(*_args, **_kwargs):
+        raise AssertionError("missing schema fields should be handled before the agent path")
+        yield {}
+
+    monkeypatch.setattr(server, "_run_local_agent", fail_local_agent)
+
+    response = TestClient(server.app).post(
+        "/query",
+        json={
+            "question": "How many orders are missing pricelist, location, or tax classification?",
+            "source_ids": [source_id],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "not present" in response.text
+    assert "pricelist" in response.text
+    assert "tax classification" in response.text
+    assert "I couldn't answer" not in response.text
+
+
+def test_empty_summary_stream_emits_grounded_text(isolated_server, tmp_path, monkeypatch):
+    server, storage, _pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    source_id = "src_orders_empty_summary"
+    csv_path = tmp_path / "orders.csv"
+    _write_orders_csv(csv_path)
+    _register_orders_source(storage, source_id, csv_path)
+
+    router = SilentOrdersRouter({
+        "intent_type": "aggregate",
+        "aggregation": "sum",
+        "metric_column": "sales",
+        "filters": [],
+    })
+    monkeypatch.setattr(server, "_router_for_model_mode", lambda _mode: router)
+
+    response = TestClient(server.app).post(
+        "/query",
+        json={"question": "What are total sales?", "source_ids": [source_id]},
+    )
+
+    assert response.status_code == 200
+    assert "event: text" in response.text
+    assert "(no answer)" not in response.text
+    assert "Total Sales" in response.text
 
 
 def _write_ledger_csv(path):

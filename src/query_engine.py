@@ -13,9 +13,9 @@ VALID_AGGREGATIONS = {"sum", "avg", "count", "count_distinct", "min", "max"}
 # question text identified a column. Each entry is a substring to look for in
 # the column name; the first match wins. The LLM-driven path bypasses this.
 _FALLBACK_METRIC_HINTS = (
-    "revenue", "sales", "amount", "value", "total",
-    "price", "cost",
-    "qty", "quantity",
+    "revenue", "sales", "profit", "margin", "amount", "value", "total",
+    "price", "cost", "discount", "net", "gross",
+    "qty", "quantity", "items", "units",
     "salary", "wage", "pay", "score",
 )
 
@@ -49,6 +49,21 @@ DIMENSION_ALIASES = {
     "status": "order_status",
     "device": "device_type",
 }
+
+METRIC_TERM_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("sales", ("sales", "sale", "revenue", "turnover", "gmv")),
+    ("profit", ("profit", "profits", "loss", "losses", "margin")),
+    ("quantity", ("quantity", "qty", "items", "item", "units", "unit")),
+    ("discount", ("discount", "discounts")),
+)
+
+_DATE_COLUMN_HINT_RE = re.compile(r"(date|datetime|timestamp|_at|_time)\b")
+_QUALITY_HINT_RE = re.compile(
+    r"\b(data\s+quality|quality\s+gap|quality\s+issue|missing\s+values?|nulls?|"
+    r"empty\s+strings?|placeholders?|duplicates?|invalid\s+dates?|numeric\s+anomal)\b",
+    re.I,
+)
+_LOSS_MAKING_RE = re.compile(r"\b(loss[-\s]?making|losses|negative\s+profit|unprofitable)\b", re.I)
 
 @dataclass
 class QueryPlan:
@@ -134,6 +149,63 @@ def fallback_metric_column(
     return None
 
 
+def _column_lookup(allowed_columns: set[str]) -> dict[str, str]:
+    return {canonical_column(col): col for col in allowed_columns}
+
+
+def _metric_like_column(column: str) -> bool:
+    col = canonical_column(column)
+    if any(bad in col for bad in _NON_METRIC_SUBSTRINGS):
+        return False
+    return any(hint in col for hint in _FALLBACK_METRIC_HINTS)
+
+
+def _semantic_metric_column(text: str, allowed_columns: set[str], exclude: set[str] | frozenset[str] = frozenset()) -> str | None:
+    q = normalize_text(text or "")
+    if not q:
+        return None
+    lookup = _column_lookup(allowed_columns)
+    for preferred, terms in METRIC_TERM_GROUPS:
+        if not any(re.search(rf"\b{re.escape(term)}\b", q) for term in terms):
+            continue
+        direct = lookup.get(preferred)
+        if direct and direct not in exclude:
+            return direct
+        for col in sorted(allowed_columns):
+            if col in exclude:
+                continue
+            canon = canonical_column(col)
+            if any(term in canon for term in terms) and _metric_like_column(col):
+                return col
+    return None
+
+
+def requested_metric_columns(question: str, allowed_columns: set[str]) -> list[tuple[str, str]]:
+    q = normalize_text(question or "")
+    requested: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(column: str) -> None:
+        if column in seen:
+            return
+        seen.add(column)
+        requested.append((column, f"total_{canonical_column(column)}"))
+
+    for preferred, terms in METRIC_TERM_GROUPS:
+        if any(re.search(rf"\b{re.escape(term)}\b", q) for term in terms):
+            column = _semantic_metric_column(preferred, allowed_columns, exclude=seen)
+            if column:
+                add(column)
+
+    for col in sorted(allowed_columns, key=len, reverse=True):
+        if col in seen or not _metric_like_column(col):
+            continue
+        if find_column_in_question(question, {col}):
+            add(col)
+
+    return requested
+
+
 def infer_metric_column(
     question: str,
     provided: Any,
@@ -143,6 +215,12 @@ def infer_metric_column(
     canonical = canonical_column(provided) if provided else ""
     if canonical and canonical in allowed_columns:
         return canonical
+    semantic = _semantic_metric_column(str(provided or ""), allowed_columns, exclude=exclude)
+    if semantic:
+        return semantic
+    semantic = _semantic_metric_column(question, allowed_columns, exclude=exclude)
+    if semantic:
+        return semantic
     found = find_column_in_question(question, allowed_columns, exclude=exclude)
     if found and found not in exclude:
         return found
@@ -320,6 +398,222 @@ def _ledger_amount_expr(column: str | None) -> str:
     ident = quote_ident(column)
     cleaned = f"regexp_replace(CAST({ident} AS VARCHAR), '[^0-9.\\-]', '', 'g')"
     return f"COALESCE(TRY_CAST({ident} AS DOUBLE), TRY_CAST({cleaned} AS DOUBLE), 0.0)"
+
+
+_DATE_PARSE_FORMATS = (
+    "%Y-%m-%d",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d %H:%M:%S",
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%d/%m/%Y %H:%M",
+    "%d-%m-%Y %H:%M",
+    "%m/%d/%Y",
+    "%m-%d-%Y",
+    "%m/%d/%Y %H:%M",
+    "%m-%d-%Y %H:%M",
+    "%Y/%m/%d",
+    "%b %d %Y",
+    "%d %b %Y",
+)
+
+
+def _timestamp_expression(column: str) -> str:
+    ident = quote_ident(column)
+    trimmed = f"NULLIF(TRIM(CAST({ident} AS VARCHAR)), '')"
+    formats = "[" + ", ".join(f"'{fmt}'" for fmt in _DATE_PARSE_FORMATS) + "]"
+    return f"COALESCE(TRY_CAST({ident} AS TIMESTAMP), try_strptime({trimmed}, {formats}))"
+
+
+def _numeric_expression(column: str) -> str:
+    ident = quote_ident(column)
+    trimmed = f"NULLIF(TRIM(CAST({ident} AS VARCHAR)), '')"
+    cleaned = f"regexp_replace({trimmed}, '[^0-9.\\-]', '', 'g')"
+    return f"COALESCE(TRY_CAST({ident} AS DOUBLE), TRY_CAST({cleaned} AS DOUBLE))"
+
+
+def _trimmed_string(column: str) -> str:
+    return f"TRIM(CAST({quote_ident(column)} AS VARCHAR))"
+
+
+def _nonempty_string(column: str) -> str:
+    return f"NULLIF({_trimmed_string(column)}, '')"
+
+
+def _placeholder_condition(column: str) -> str:
+    raw = _trimmed_string(column)
+    lowered = f"LOWER({raw})"
+    tokens = ("'n/a'", "'na'", "'none'", "'null'", "'unknown'", "'not available'", "'tbd'", "'-'", "'--'")
+    return (
+        f"{quote_ident(column)} IS NOT NULL "
+        f"AND NULLIF({raw}, '') IS NOT NULL "
+        f"AND (({raw} LIKE '<%>' AND {raw} LIKE '%>') OR {lowered} IN ({', '.join(tokens)}))"
+    )
+
+
+def _count_case(condition: str, alias: str) -> str:
+    return f"CAST(SUM(CASE WHEN {condition} THEN 1 ELSE 0 END) AS BIGINT) AS {quote_ident(alias)}"
+
+
+def _is_date_like_column(column: str) -> bool:
+    return bool(_DATE_COLUMN_HINT_RE.search(canonical_column(column)))
+
+
+def is_data_quality_question(question: str) -> bool:
+    return bool(_QUALITY_HINT_RE.search(question or ""))
+
+
+def build_data_quality_plan(question: str, allowed_columns: set[str]) -> QueryPlan | None:
+    if not is_data_quality_question(question):
+        return None
+
+    sorted_columns = sorted(allowed_columns)
+    duplicate_cols = ", ".join(quote_ident(col) for col in sorted_columns)
+    if duplicate_cols:
+        duplicate_sql = (
+            "SELECT COALESCE(CAST(SUM(cnt - 1) AS BIGINT), 0) "
+            f"FROM (SELECT {duplicate_cols}, COUNT(*) AS cnt FROM orders GROUP BY ALL HAVING COUNT(*) > 1) duplicate_signatures"
+        )
+    else:
+        duplicate_sql = "SELECT CAST(0 AS BIGINT)"
+
+    rows = [
+        (
+            "SELECT '__row__' AS column_name, "
+            "CAST(0 AS BIGINT) AS null_count, "
+            "CAST(0 AS BIGINT) AS empty_string_count, "
+            "CAST(0 AS BIGINT) AS placeholder_count, "
+            "CAST(0 AS BIGINT) AS invalid_date_count, "
+            "CAST(0 AS BIGINT) AS numeric_anomaly_count, "
+            f"({duplicate_sql}) AS exact_duplicate_rows"
+        )
+    ]
+
+    for column in sorted_columns:
+        nonempty = _nonempty_string(column)
+        placeholder = _placeholder_condition(column)
+        column_label = column.replace("'", "''")
+        empty_string = f"{quote_ident(column)} IS NOT NULL AND {_trimmed_string(column)} = ''"
+        invalid_date = (
+            f"{nonempty} IS NOT NULL AND NOT ({placeholder}) AND {_timestamp_expression(column)} IS NULL"
+            if _is_date_like_column(column)
+            else "FALSE"
+        )
+        numeric_anomaly = (
+            f"{nonempty} IS NOT NULL AND NOT ({placeholder}) AND {_numeric_expression(column)} IS NULL"
+            if _metric_like_column(column)
+            else "FALSE"
+        )
+        rows.append(
+            "SELECT "
+            f"'{column_label}' AS column_name, "
+            f"{_count_case(f'{quote_ident(column)} IS NULL', 'null_count')}, "
+            f"{_count_case(empty_string, 'empty_string_count')}, "
+            f"{_count_case(placeholder, 'placeholder_count')}, "
+            f"{_count_case(invalid_date, 'invalid_date_count')}, "
+            f"{_count_case(numeric_anomaly, 'numeric_anomaly_count')}, "
+            "CAST(0 AS BIGINT) AS exact_duplicate_rows "
+            "FROM orders"
+        )
+
+    sql = (
+        "WITH audit AS ("
+        + " UNION ALL ".join(rows)
+        + ") SELECT * FROM audit "
+        "ORDER BY CASE WHEN column_name = '__row__' THEN 0 ELSE 1 END, column_name LIMIT 500"
+    )
+    return QueryPlan(
+        sql=sql,
+        params=[],
+        display_type="table",
+        title="Data Quality Audit",
+        how="Checked nulls, empty strings, placeholder tokens, invalid date-like values, numeric parse anomalies, and exact duplicate rows from the available columns only.",
+    )
+
+
+def build_loss_making_plan(question: str, allowed_columns: set[str]) -> QueryPlan | None:
+    if not _LOSS_MAKING_RE.search(question or "") or "profit" not in _column_lookup(allowed_columns):
+        return None
+    selected: list[str] = []
+    preferred = ("order_id", "order_date", "customer", "customer_name", "category", "product_name", "sales", "profit", "quantity")
+    for column in preferred:
+        if column in allowed_columns and column not in selected:
+            selected.append(column)
+    if not selected:
+        selected = sorted(allowed_columns)[:12]
+    selects = ", ".join(quote_ident(col) for col in selected)
+    profit_expr = _numeric_expression("profit")
+    order_col = "order_date" if "order_date" in allowed_columns else None
+    sql = f"SELECT {selects} FROM orders WHERE {profit_expr} < 0 ORDER BY {profit_expr} ASC NULLS LAST"
+    if order_col:
+        sql += f", {_timestamp_expression(order_col)} DESC NULLS LAST"
+    sql += " LIMIT 500"
+    return QueryPlan(
+        sql=sql,
+        params=[],
+        display_type="table",
+        title="Loss-Making Orders",
+        how="Mapped loss-making to rows where profit is below zero and returned the matching order records.",
+    )
+
+
+def build_deterministic_query_plan(question: str, allowed_columns: set[str]) -> QueryPlan | None:
+    return build_loss_making_plan(question, allowed_columns) or build_data_quality_plan(question, allowed_columns)
+
+
+def missing_requested_columns_message(question: str, allowed_columns: set[str], source_name: str = "this dataset") -> str | None:
+    q = question or ""
+    lowered = q.lower()
+    if "columns present" in lowered or "columns that are present" in lowered:
+        return None
+
+    field_texts: list[str] = []
+    missing_match = re.search(r"\bmissing\s+(.+?)(?:\?|$)", q, re.I)
+    if missing_match:
+        field_texts.append(missing_match.group(1))
+    placeholder_match = re.search(
+        r"\b(?:do|does|are|is)\s+(.+?)\s+(?:placeholder\s+values?|placeholders?)\b",
+        q,
+        re.I,
+    )
+    if placeholder_match:
+        field_texts.append(placeholder_match.group(1))
+
+    if not field_texts:
+        return None
+
+    lookup = _column_lookup(allowed_columns)
+    missing: list[str] = []
+    for text in field_texts:
+        cleaned = re.sub(r"\blike\s+<[^>]+>.*$", "", text, flags=re.I)
+        cleaned = re.sub(r"\b(values?|fields?|columns?|records?|rows?)\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\b(?:do|does|are|is|orders?|entries?)\b", "", cleaned, flags=re.I)
+        parts = [
+            part.strip(" .,:;\"'")
+            for part in re.split(r"\s*(?:,|\bor\b|\band\b)\s*", cleaned, flags=re.I)
+            if part.strip(" .,:;\"'")
+        ]
+        for part in parts:
+            canonical = canonical_column(part)
+            if not canonical or canonical in lookup:
+                continue
+            if find_column_in_question(part, allowed_columns):
+                continue
+            if part.lower() in {"missing", "placeholder", "value", "values"}:
+                continue
+            if part not in missing:
+                missing.append(part)
+
+    if not missing:
+        return None
+
+    available = ", ".join(sorted(allowed_columns)[:12])
+    more = "..." if len(allowed_columns) > 12 else ""
+    missing_text = ", ".join(missing)
+    return (
+        f"I can't check {missing_text} because those columns are not present in {source_name}. "
+        f"Available columns include: {available}{more}."
+    )
 
 
 def _ledger_contains_expr(columns: list[str], terms: list[str]) -> str:
@@ -559,6 +853,9 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
     ledger_plan = build_ledger_query_plan(question, allowed_columns)
     if ledger_plan is not None:
         return ledger_plan
+    deterministic_plan = build_deterministic_query_plan(question, allowed_columns)
+    if deterministic_plan is not None:
+        return deterministic_plan
     
     if intent_type == "clarification":
         raise ValueError(intent.get("clarifying_question") or "I need one more detail to answer that.")
@@ -575,8 +872,8 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
         sql = (
             f"SELECT \"product\" FROM (\n"
             f"  SELECT \"product\",\n"
-            f"         MAX(CASE WHEN EXTRACT(month FROM TRY_CAST(\"date\" AS TIMESTAMP)) = ? THEN 1 ELSE 0 END) as in_include_month,\n"
-            f"         MAX(CASE WHEN EXTRACT(month FROM TRY_CAST(\"date\" AS TIMESTAMP)) = ? THEN 1 ELSE 0 END) as in_exclude_month\n"
+            f"         MAX(CASE WHEN EXTRACT(month FROM {_timestamp_expression('date')}) = ? THEN 1 ELSE 0 END) as in_include_month,\n"
+            f"         MAX(CASE WHEN EXTRACT(month FROM {_timestamp_expression('date')}) = ? THEN 1 ELSE 0 END) as in_exclude_month\n"
             f"  FROM orders\n"
             f"  GROUP BY \"product\"\n"
             f") AS product_months WHERE in_include_month = 1 AND in_exclude_month = 0"
@@ -594,7 +891,7 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
         where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
         sql = (
             f"SELECT COUNT(DISTINCT \"vno\") AS \"orders\", "
-            f"SUM(TRY_CAST(\"quantity\" AS DOUBLE)) AS \"items_sold\" "
+            f"SUM({_numeric_expression('quantity')}) AS \"items_sold\" "
             f"FROM orders"
         )
         if where_sql:
@@ -609,6 +906,44 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
 
     if intent_type == "lookup":
         return build_lookup_plan(intent.get("filters") or [], intent, allowed_columns, question=question)
+
+    requested_metrics = requested_metric_columns(question, allowed_columns)
+    if len(requested_metrics) > 1:
+        dimensions = infer_dimensions(question, intent.get("dimensions") or [], allowed_columns)
+        date_grain = infer_date_grain(question, intent.get("date_grain"))
+        date_column = primary_date_column(allowed_columns)
+        aggregation = infer_aggregation(question, intent.get("aggregation"))
+        selects: list[str] = []
+        groups: list[str] = []
+        if date_grain and date_column:
+            selects.append(f"date_trunc('{date_grain}', {_timestamp_expression(date_column)}) AS period")
+            groups.append("period")
+        for dim in dimensions:
+            selects.append(f"{quote_ident(dim)} AS {quote_ident(dim)}")
+            groups.append(quote_ident(dim))
+        aliases: list[str] = []
+        for column, alias in requested_metrics[:5]:
+            expr, out_alias = metric_expression(column, aggregation, allowed_columns, alias=alias, question=question)
+            selects.append(expr)
+            aliases.append(out_alias)
+        where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
+        sql = f"SELECT {', '.join(selects)} FROM orders"
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+        if groups:
+            sql += f" GROUP BY {', '.join(groups)}"
+            if "period" in groups:
+                sql += " ORDER BY period ASC NULLS LAST"
+            elif aliases:
+                sql += f" ORDER BY {quote_ident(aliases[0])} DESC NULLS LAST"
+            sql += f" LIMIT {max(1, min(int(intent.get('limit') or infer_limit(question)), 500))}"
+        return QueryPlan(
+            sql=sql,
+            params=params,
+            display_type="table" if groups else "card",
+            title="Key Metrics",
+            how=f"Computed {len(aliases)} requested metric(s) from the available schema.",
+        )
 
     multi_metrics = intent.get("metrics") or []
     if isinstance(multi_metrics, list) and multi_metrics:
@@ -656,7 +991,7 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
     date_column = primary_date_column(allowed_columns)
     has_period = bool(date_grain and date_column)
     if has_period:
-        selects.append(f"date_trunc('{date_grain}', TRY_CAST({quote_ident(date_column)} AS TIMESTAMP)) AS period")
+        selects.append(f"date_trunc('{date_grain}', {_timestamp_expression(date_column)}) AS period")
         groups.append("period")
     for dim in dimensions:
         selects.append(f"{quote_ident(dim)} AS {quote_ident(dim)}")
@@ -716,7 +1051,7 @@ def metric_expression(
     op = agg.upper()
     out_alias = alias or metric_column
     return (
-        f"{op}(TRY_CAST({quote_ident(metric_column)} AS DOUBLE)) AS {quote_ident(out_alias)}",
+        f"{op}({_numeric_expression(metric_column)}) AS {quote_ident(out_alias)}",
         out_alias,
     )
 
@@ -782,13 +1117,14 @@ def build_filters(filters: list[dict[str, Any]], allowed_columns: set[str], ques
         
         # Heuristic: swap date filters for EXTRACT(month) if it looks like a month-only filter
         if target_month_idx > 0 and column == "date":
+            month_expr = f"EXTRACT(month FROM {_timestamp_expression(column)})"
             if op == "between" and isinstance(value, list) and len(value) == 2:
-                clauses.append(f"EXTRACT(month FROM TRY_CAST({ident} AS TIMESTAMP)) = ?")
+                clauses.append(f"{month_expr} = ?")
                 params.append(target_month_idx)
                 continue
             if op in {">=", "<="}:
-                if not any(f"EXTRACT(month FROM TRY_CAST({ident}" in c for c in clauses):
-                    clauses.append(f"EXTRACT(month FROM TRY_CAST({ident} AS TIMESTAMP)) = ?")
+                if not any(month_expr in c for c in clauses):
+                    clauses.append(f"{month_expr} = ?")
                     params.append(target_month_idx)
                 continue
 
