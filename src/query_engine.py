@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -50,6 +50,18 @@ DIMENSION_ALIASES = {
     "device": "device_type",
 }
 
+DIMENSION_TERM_GROUPS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("product", ("product", "products", "item", "items", "sku"), ("product_name", "prod_name", "product", "item", "item_name", "sku")),
+    ("category", ("category", "categories"), ("category", "prod_category", "product_category")),
+    ("subcategory", ("subcategory", "sub-category", "sub category"), ("subcategory", "sub_category", "prod_subcategory", "product_subcategory")),
+    ("segment", ("segment", "segments", "customer segment", "customer segments"), ("segment", "cust_segment", "customer_segment")),
+    ("region", ("region", "regions"), ("region", "ship_region", "sales_region")),
+    ("location", ("location", "locations", "city", "cities", "state", "country"), ("location", "city", "ship_city", "state", "ship_state", "country", "ship_country")),
+    ("customer", ("customer", "customers", "client", "clients"), ("customer", "customer_name", "cust_name", "client", "client_name")),
+    ("branch", ("branch", "branches"), ("branch", "branch_name")),
+    ("executive", ("executive", "executives", "salesperson", "sales person"), ("executive", "salesperson", "sales_person")),
+)
+
 METRIC_TERM_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("sales", ("sales", "sale", "revenue", "turnover", "gmv")),
     ("profit", ("profit", "profits", "loss", "losses", "margin")),
@@ -77,6 +89,63 @@ class QueryPlan:
     def cache_key(self) -> str:
         payload = json.dumps({"sql": self.sql, "params": self.params}, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass
+class SemanticQueryContract:
+    intent: str
+    metrics: list[dict[str, Any]] = field(default_factory=list)
+    dimensions: list[str] = field(default_factory=list)
+    filters: list[dict[str, Any]] = field(default_factory=list)
+    time_grain: str | None = None
+    result_shape: str = "metric_card"
+    required_columns: list[str] = field(default_factory=list)
+    required_aliases: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+    @property
+    def actionable(self) -> bool:
+        if self.intent in {"data_quality_audit", "executive_summary", "trend", "grouped_metric"}:
+            return True
+        return bool(self.metrics or self.dimensions or self.filters or self.time_grain)
+
+    def to_intent(self, base: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(base or {})
+        if self.intent == "data_quality_audit":
+            payload["intent_type"] = "multi_step"
+            payload["requested_visualization"] = "table"
+        elif self.intent == "trend":
+            payload["intent_type"] = "trend"
+        elif self.intent == "executive_summary":
+            payload["intent_type"] = "executive_summary"
+        elif self.intent == "grouped_metric":
+            payload["intent_type"] = "aggregate"
+        else:
+            payload.setdefault("intent_type", "aggregate")
+
+        if self.metrics:
+            payload["metrics"] = self.metrics
+        if self.dimensions:
+            payload["dimensions"] = self.dimensions
+        if self.filters:
+            payload["filters"] = self.filters
+        else:
+            payload.setdefault("filters", [])
+        if self.time_grain:
+            payload["date_grain"] = self.time_grain
+        payload["query_contract"] = {
+            "intent": self.intent,
+            "metrics": self.metrics,
+            "dimensions": self.dimensions,
+            "filters": self.filters,
+            "time_grain": self.time_grain,
+            "result_shape": self.result_shape,
+            "required_columns": self.required_columns,
+            "required_aliases": self.required_aliases,
+            "confidence": self.confidence,
+        }
+        payload["confidence"] = max(float(payload.get("confidence") or 0), self.confidence)
+        return payload
 
 
 def quote_ident(name: str) -> str:
@@ -207,6 +276,225 @@ def requested_metric_columns(question: str, allowed_columns: set[str]) -> list[t
             add(col)
 
     return requested
+
+
+def _order_entity_column(allowed_columns: set[str], instructions: dict[str, Any] | None = None) -> str | None:
+    entities = (instructions or {}).get("entities") if isinstance(instructions, dict) else {}
+    if isinstance(entities, dict):
+        order_col = str(entities.get("order") or "").strip()
+        if order_col in allowed_columns:
+            return order_col
+    lookup = _column_lookup(allowed_columns)
+    for alias in ("order_id", "order_no", "order_number", "orderno", "vno", "voucher_no", "voucherno", "invoice_no", "invoice_number", "transaction_id"):
+        column = lookup.get(canonical_column(alias))
+        if column:
+            return column
+    return None
+
+
+def _question_requests_order_count(question: str) -> bool:
+    q = normalize_text(question or "")
+    return bool(
+        re.search(r"\b(order\s+count|orders?\s+count|number\s+of\s+orders|how\s+many\s+orders|count\s+orders?)\b", q)
+        or re.search(r"\b(order|orders)\b", q) and re.search(r"\b(executive\s+summary|executive\s+analysis|full\s+analysis|overview)\b", q)
+    )
+
+
+def _instruction_metric_matches(
+    question: str,
+    allowed_columns: set[str],
+    *,
+    source_instructions: dict[str, Any] | None = None,
+    project_instructions: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    q = normalize_text(question or "")
+    metrics: dict[str, dict[str, Any]] = {}
+    for raw in (project_instructions, source_instructions):
+        if not isinstance(raw, dict):
+            continue
+        for name, metric in (raw.get("metrics") or {}).items():
+            if isinstance(metric, dict):
+                metrics[str(name)] = metric
+
+    matched: list[tuple[int, dict[str, Any]]] = []
+    for name, metric in metrics.items():
+        column = str(metric.get("column") or "").strip()
+        if column not in allowed_columns:
+            continue
+        terms = [name.replace("_", " "), column.replace("_", " "), *(metric.get("synonyms") or [])]
+        positions = [q.find(str(term).strip().lower()) for term in terms if str(term).strip() and q.find(str(term).strip().lower()) >= 0]
+        if not positions and not any(re.search(rf"\b{re.escape(str(term).strip().lower())}\b", q) for term in terms if str(term).strip()):
+            continue
+        alias = canonical_column(name) or canonical_column(column)
+        matched.append((
+            min(positions) if positions else len(q),
+            {
+                "name": alias,
+                "column": column,
+                "aggregation": str(metric.get("aggregation") or "sum").lower(),
+            },
+        ))
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for _pos, metric in sorted(matched, key=lambda item: item[0]):
+        key = (metric["column"], metric["aggregation"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(metric)
+    return out
+
+
+def _metric_contracts_from_question(
+    question: str,
+    allowed_columns: set[str],
+    *,
+    source_instructions: dict[str, Any] | None = None,
+    project_instructions: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    metrics = _instruction_metric_matches(
+        question,
+        allowed_columns,
+        source_instructions=source_instructions,
+        project_instructions=project_instructions,
+    )
+    seen_columns = {metric["column"] for metric in metrics}
+    for column, alias in requested_metric_columns(question, allowed_columns):
+        if column in seen_columns:
+            continue
+        metrics.append({"name": alias, "column": column, "aggregation": "sum"})
+        seen_columns.add(column)
+
+    order_col = _order_entity_column(allowed_columns, source_instructions) or _order_entity_column(allowed_columns, project_instructions)
+    if _question_requests_order_count(question) and not any(metric.get("name") in {"orders", "order_count"} for metric in metrics):
+        metrics.append({
+            "name": "orders",
+            "column": order_col or "",
+            "aggregation": "count_distinct" if order_col else "count",
+        })
+    return metrics[:6]
+
+
+def _looks_like_item_dimension_request(question: str) -> bool:
+    q = normalize_text(question or "")
+    return bool(
+        re.search(r"\b(which|top|bottom|best|worst|most|least)\s+items?\b", q)
+        or re.search(r"\bitems?\s+(generated|driving|caused|with|by)\b", q)
+    )
+
+
+def _dimension_column_for_term(term: str, allowed_columns: set[str]) -> str | None:
+    lookup = _column_lookup(allowed_columns)
+    canonical = canonical_column(term)
+    if canonical in lookup and not _metric_like_column(lookup[canonical]):
+        return lookup[canonical]
+    for _name, terms, candidates in DIMENSION_TERM_GROUPS:
+        if canonical not in {canonical_column(t) for t in terms}:
+            continue
+        for candidate in candidates:
+            column = lookup.get(canonical_column(candidate))
+            if column and not _metric_like_column(column):
+                return column
+        for column in sorted(allowed_columns):
+            col = canonical_column(column)
+            if any(canonical_column(candidate) in col for candidate in candidates) and not _metric_like_column(column):
+                return column
+    return None
+
+
+def _infer_contract_dimensions(question: str, provided: list[str] | None, allowed_columns: set[str]) -> list[str]:
+    dims = infer_dimensions(question, provided, allowed_columns)
+    q = normalize_text(question or "")
+
+    def add(column: str | None) -> None:
+        if column and column in allowed_columns and column not in dims:
+            dims.append(column)
+
+    for _name, terms, _candidates in DIMENSION_TERM_GROUPS:
+        for term in terms:
+            if canonical_column(term) in {"item", "items"} and not _looks_like_item_dimension_request(question):
+                continue
+            if re.search(rf"\b{re.escape(term)}s?\b", q):
+                add(_dimension_column_for_term(term, allowed_columns))
+                break
+    return dims[:4]
+
+
+def _required_contract_columns(metrics: list[dict[str, Any]], dimensions: list[str], filters: list[dict[str, Any]], date_column: str | None) -> list[str]:
+    required: list[str] = []
+    for column in [*(metric.get("column") for metric in metrics), *dimensions, *(flt.get("column") for flt in filters), date_column]:
+        if column and column not in required:
+            required.append(str(column))
+    return required
+
+
+def build_semantic_contract(
+    question: str,
+    allowed_columns: set[str],
+    *,
+    source_instructions: dict[str, Any] | None = None,
+    project_instructions: dict[str, Any] | None = None,
+) -> SemanticQueryContract:
+    q = normalize_text(question or "")
+    date_grain = infer_date_grain(question)
+    date_column = primary_date_column(allowed_columns) if date_grain else None
+    metrics = _metric_contracts_from_question(
+        question,
+        allowed_columns,
+        source_instructions=source_instructions,
+        project_instructions=project_instructions,
+    )
+    dimensions = _infer_contract_dimensions(question, [], allowed_columns)
+    filters: list[dict[str, Any]] = []
+    profit_column = _semantic_metric_column("profit", allowed_columns)
+    if _LOSS_MAKING_RE.search(question or "") and profit_column:
+        filters.append({"column": profit_column, "operator": "<", "value": 0})
+        if not any(metric.get("column") == profit_column for metric in metrics):
+            metrics.append({"name": f"total_{canonical_column(profit_column)}", "column": profit_column, "aggregation": "sum"})
+
+    has_quality = is_data_quality_question(question)
+    is_executive = bool(re.search(r"\b(executive\s+(summary|analysis)|full\s+(executive\s+)?analysis|business\s+summary|overall\s+summary)\b", q))
+    if is_executive:
+        intent = "executive_summary"
+        result_shape = "summary_table"
+        if not metrics:
+            metric_column = fallback_metric_column(allowed_columns)
+            if metric_column:
+                metrics.append({"name": f"total_{canonical_column(metric_column)}", "column": metric_column, "aggregation": "sum"})
+    elif has_quality and not (metrics or dimensions or filters or date_grain):
+        intent = "data_quality_audit"
+        result_shape = "audit_table"
+    elif date_grain and (metrics or dimensions):
+        intent = "trend"
+        result_shape = "grouped_table"
+    elif dimensions:
+        intent = "grouped_metric"
+        result_shape = "grouped_table"
+    else:
+        intent = "metric"
+        result_shape = "metric_card"
+
+    if metrics and not dimensions and (filters or re.search(r"\bby\s+", q)):
+        dimensions = _infer_contract_dimensions(question, dimensions, allowed_columns)
+        if dimensions and intent == "metric":
+            intent = "grouped_metric"
+            result_shape = "grouped_table"
+
+    required_aliases = [str(metric.get("name")) for metric in metrics if metric.get("name")]
+    required_columns = _required_contract_columns(metrics, dimensions, filters, date_column)
+    confidence = 0.92 if intent in {"executive_summary", "trend", "grouped_metric", "data_quality_audit"} else (0.8 if metrics else 0.0)
+    return SemanticQueryContract(
+        intent=intent,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters,
+        time_grain=date_grain,
+        result_shape=result_shape,
+        required_columns=required_columns,
+        required_aliases=required_aliases,
+        confidence=confidence,
+    )
 
 
 def infer_metric_column(
@@ -925,6 +1213,149 @@ def build_ledger_query_plan(question: str, allowed_columns: set[str]) -> QueryPl
     return None
 
 
+def _metric_value_expression(metric: dict[str, Any], allowed_columns: set[str]) -> str | None:
+    lookup = _column_lookup(allowed_columns)
+    requested_column = canonical_column(metric.get("column") or "")
+    column = lookup.get(requested_column, requested_column)
+    aggregation = str(metric.get("aggregation") or "sum").lower()
+    if aggregation == "count_distinct" and column in allowed_columns:
+        return f"CAST(COUNT(DISTINCT {quote_ident(column)}) AS DOUBLE)"
+    if aggregation == "count":
+        return "CAST(COUNT(*) AS DOUBLE)"
+    if column not in allowed_columns:
+        return None
+    if aggregation not in VALID_AGGREGATIONS:
+        aggregation = "sum"
+    if aggregation == "count_distinct":
+        return f"CAST(COUNT(DISTINCT {quote_ident(column)}) AS DOUBLE)"
+    if aggregation == "count":
+        return "CAST(COUNT(*) AS DOUBLE)"
+    return f"{aggregation.upper()}({_numeric_expression(column)})"
+
+
+def _executive_dimension_candidates(question: str, allowed_columns: set[str]) -> list[str]:
+    dims = _infer_contract_dimensions(question, [], allowed_columns)
+    for term in ("product", "category", "segment", "region", "customer", "location"):
+        column = _dimension_column_for_term(term, allowed_columns)
+        if column and column not in dims:
+            dims.append(column)
+    return dims[:3]
+
+
+def build_executive_summary_plan(intent: dict[str, Any], question: str, allowed_columns: set[str]) -> QueryPlan | None:
+    metrics = [metric for metric in (intent.get("metrics") or []) if isinstance(metric, dict)]
+    if not metrics:
+        return None
+
+    rows: list[str] = []
+    for metric in metrics[:6]:
+        value_expr = _metric_value_expression(metric, allowed_columns)
+        if not value_expr:
+            continue
+        metric_name = canonical_column(metric.get("name") or metric.get("column") or "metric")
+        metric_label = metric_name.replace("'", "''")
+        rows.append(
+            "SELECT 'overall' AS section, "
+            f"'{metric_label}' AS metric, "
+            "CAST(NULL AS VARCHAR) AS label, "
+            f"{value_expr} AS value FROM orders"
+        )
+
+    primary_metric = next((metric for metric in metrics if str(metric.get("aggregation") or "").lower() != "count_distinct"), metrics[0])
+    primary_value = _metric_value_expression(primary_metric, allowed_columns)
+    primary_metric_name = canonical_column(primary_metric.get("name") or primary_metric.get("column") or "metric").replace("'", "''")
+    profit_metric = next((metric for metric in metrics if "profit" in canonical_column(metric.get("name") or metric.get("column") or "")), None)
+    profit_value = _metric_value_expression(profit_metric, allowed_columns) if profit_metric else None
+    profit_metric_name = canonical_column((profit_metric or {}).get("name") or (profit_metric or {}).get("column") or "profit").replace("'", "''")
+
+    for dim in _executive_dimension_candidates(question, allowed_columns):
+        if primary_value:
+            rows.append(
+                "SELECT * FROM (SELECT "
+                f"'top_{canonical_column(dim)}' AS section, "
+                f"'{primary_metric_name}' AS metric, "
+                f"CAST({quote_ident(dim)} AS VARCHAR) AS label, "
+                f"{primary_value} AS value FROM orders "
+                f"GROUP BY {quote_ident(dim)} ORDER BY value DESC NULLS LAST LIMIT 1)"
+            )
+        if profit_value:
+            rows.append(
+                "SELECT * FROM (SELECT "
+                f"'worst_{canonical_column(dim)}' AS section, "
+                f"'{profit_metric_name}' AS metric, "
+                f"CAST({quote_ident(dim)} AS VARCHAR) AS label, "
+                f"{profit_value} AS value FROM orders "
+                f"GROUP BY {quote_ident(dim)} ORDER BY value ASC NULLS LAST LIMIT 1)"
+            )
+
+    if not rows:
+        return None
+    sql = " UNION ALL ".join(rows) + " LIMIT 500"
+    return QueryPlan(
+        sql=sql,
+        params=[],
+        display_type="table",
+        title="Executive Summary",
+        how="Built a deterministic executive summary with overall metrics plus top and worst available business dimensions.",
+    )
+
+
+def validate_plan_against_contract(plan: QueryPlan, contract: SemanticQueryContract | None) -> str | None:
+    if not contract or not contract.actionable:
+        return None
+    sql = plan.sql.lower()
+    if contract.intent == "data_quality_audit":
+        return None if plan.title == "Data Quality Audit" else "expected data-quality audit plan"
+    if contract.intent == "executive_summary":
+        if plan.title == "Data Quality Audit":
+            return "executive summary was planned as data-quality audit only"
+        if plan.title == "Executive Summary":
+            for alias in contract.required_aliases:
+                if alias and alias.lower().replace("'", "''") not in sql:
+                    return f"missing metric {alias}"
+            return None
+    if contract.time_grain:
+        if "date_trunc" not in sql or "period" not in sql:
+            return f"missing {contract.time_grain} time grouping"
+    for dim in contract.dimensions:
+        if quote_ident(dim).lower() not in sql:
+            return f"missing requested dimension {dim}"
+    for alias in contract.required_aliases:
+        if alias and quote_ident(alias).lower() not in sql:
+            return f"missing requested metric {alias}"
+    for flt in contract.filters:
+        column = str(flt.get("column") or "")
+        operator = str(flt.get("operator") or "")
+        if column and quote_ident(column).lower() not in sql:
+            return f"missing requested filter column {column}"
+        if operator and operator not in sql:
+            return f"missing requested filter operator {operator}"
+    return None
+
+
+def validate_result_against_contract(columns: list[str], row_count: int, contract: SemanticQueryContract | None) -> str | None:
+    if not contract or not contract.actionable:
+        return None
+    present = {canonical_column(col) for col in columns}
+    if contract.intent == "executive_summary":
+        expected = {"section", "metric", "label", "value"}
+        return None if expected.issubset(present) else "executive summary result shape is incomplete"
+    if contract.intent == "data_quality_audit":
+        expected = {"column_name", "null_count", "empty_string_count", "placeholder_count"}
+        return None if expected.issubset(present) else "data quality result shape is incomplete"
+    if contract.time_grain and "period" not in present:
+        return "result is missing requested time period"
+    for dim in contract.dimensions:
+        if canonical_column(dim) not in present:
+            return f"result is missing requested dimension {dim}"
+    for alias in contract.required_aliases:
+        if canonical_column(alias) not in present:
+            return f"result is missing requested metric {alias}"
+    if row_count == 0 and contract.result_shape in {"grouped_table", "summary_table"}:
+        return "result has no rows for requested grouped answer"
+    return None
+
+
 def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set[str]) -> QueryPlan:
     from opentelemetry import trace
     tracer = trace.get_tracer(__name__)
@@ -938,7 +1369,7 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
     if ledger_plan is not None:
         return ledger_plan
     deterministic_plan = build_deterministic_query_plan(question, allowed_columns)
-    if deterministic_plan is not None:
+    if deterministic_plan is not None and not (intent.get("metrics") or intent.get("dimensions") or intent.get("date_grain") or intent.get("intent_type") == "executive_summary"):
         return deterministic_plan
     set_difference_plan = build_set_difference_plan(question, allowed_columns)
     if set_difference_plan is not None:
@@ -970,9 +1401,25 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
     if intent_type == "lookup":
         return build_lookup_plan(intent.get("filters") or [], intent, allowed_columns, question=question)
 
+    if intent_type == "executive_summary":
+        summary_plan = build_executive_summary_plan(intent, question, allowed_columns)
+        if summary_plan is not None:
+            return summary_plan
+
     multi_metrics = intent.get("metrics") or []
     if isinstance(multi_metrics, list) and multi_metrics:
         selects: list[str] = []
+        groups: list[str] = []
+        dimensions = infer_dimensions(question, intent.get("dimensions") or [], allowed_columns)
+        date_grain = infer_date_grain(question, intent.get("date_grain"))
+        date_column = primary_date_column(allowed_columns)
+        if date_grain and date_column:
+            selects.append(f"date_trunc('{date_grain}', {_timestamp_expression(date_column)}) AS period")
+            groups.append("period")
+        for dim in dimensions:
+            selects.append(f"{quote_ident(dim)} AS {quote_ident(dim)}")
+            groups.append(quote_ident(dim))
+        aliases: list[str] = []
         lookup = _column_lookup(allowed_columns)
         for metric in multi_metrics[:5]:
             if not isinstance(metric, dict):
@@ -983,17 +1430,25 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
             aggregation = infer_aggregation(question, metric.get("aggregation"))
             expr, _alias = metric_expression(column, aggregation, allowed_columns, alias=name, question=question)
             selects.append(expr)
+            aliases.append(_alias)
         if selects:
             where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
             sql = f"SELECT {', '.join(selects)} FROM orders"
             if where_sql:
                 sql += f" WHERE {where_sql}"
+            if groups:
+                sql += f" GROUP BY {', '.join(groups)}"
+                if "period" in groups:
+                    sql += " ORDER BY period ASC NULLS LAST"
+                elif aliases:
+                    sql += f" ORDER BY {quote_ident(aliases[0])} DESC NULLS LAST"
+                sql += f" LIMIT {max(1, min(int(intent.get('limit') or infer_limit(question)), 500))}"
             return QueryPlan(
                 sql=sql,
                 params=params,
-                display_type="card",
+                display_type="table" if groups else "card",
                 title="Key Metrics",
-                how=f"Computed {len(selects)} instruction-defined metric(s); filters: {len(params)} parameter(s).",
+                how=f"Computed {len(aliases)} instruction-defined metric(s); grouped by {', '.join(groups) if groups else 'none'}; filters: {len(params)} parameter(s).",
             )
 
     requested_metrics = requested_metric_columns(question, allowed_columns)

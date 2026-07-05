@@ -1311,6 +1311,38 @@ def test_query_selected_mcp_connector_limits_agent_allowlist(isolated_server, mo
     assert captured["allowed_mcp_ids"] == {"rapidai"}
 
 
+def test_selected_persisted_mcp_without_live_pool_streams_safe_unavailable_message(isolated_server):
+    server, storage, pool = isolated_server
+    from fastapi.testclient import TestClient
+
+    pool.connectors.clear()
+    storage.upsert_mcp_connector(
+        connector_id="rapidai",
+        name="RapidAI",
+        scope="global",
+        transport="stdio",
+        url=None,
+        command="mcp-server",
+        args=[],
+        tools=[{"name": "search_schema"}],
+        status="connected",
+        last_error=None,
+        description="RapidAI exposes schema and query tools.",
+        generated_description=None,
+        description_status="metadata",
+    )
+
+    response = TestClient(server.app).post(
+        "/query",
+        json={"question": "Run a data quality audit on RapidAI", "source_ids": ["mcp:rapidai"]},
+    )
+
+    assert response.status_code == 200
+    assert "Attach a source first" not in response.text
+    assert "RapidAI" in response.text
+    assert "done" in response.text
+
+
 def test_unsupported_local_table_query_does_not_fall_through_to_mcp(isolated_server, tmp_path):
     server, storage, pool = isolated_server
     from fastapi.testclient import TestClient

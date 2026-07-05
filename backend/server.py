@@ -240,13 +240,16 @@ from src.query_engine import (
     build_deterministic_query_plan,
     build_ledger_query_plan,
     build_query_plan,
+    build_semantic_contract,
     build_total_plan,
     heuristic_intent,
     is_underspecified,
     missing_requested_columns_message,
     quote_ident,
     underspecified_clarification,
+    validate_plan_against_contract,
     validate_readonly_sql,
+    validate_result_against_contract,
 )
 from src.semantic_manifest import build_wren_mdl_from_schema
 from src.utils import conversation_summary, params_key
@@ -4727,12 +4730,13 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
         pool = get_pool()
         allowed_mcp_ids = _allowed_mcp_connector_ids_for_project(chat.get("project_id") if chat else None)
         requested_source_ids = body.source_ids or []
-        selected_mcp_ids = _selected_mcp_connector_ids(requested_source_ids, allowed_mcp_ids)
+        requested_mcp_ids = _selected_mcp_connector_ids(requested_source_ids, allowed_mcp_ids)
         selected_mcp_states = [
             s for s in pool.connectors.values()
-            if s.status == "connected" and s.id in selected_mcp_ids
+            if s.status == "connected" and s.id in requested_mcp_ids
         ]
         selected_mcp_ids = {s.id for s in selected_mcp_states}
+        unavailable_mcp_ids = set(requested_mcp_ids) - selected_mcp_ids
         has_selected_mcp = bool(selected_mcp_states)
         selected_sources = await _load_query_sources(
             requested_source_ids,
@@ -4742,7 +4746,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
         )
         pre_source_history = _load_history(chat_id, owner_id=owner_id, include_legacy=include_legacy)
 
-        if not selected_sources and _query_requires_source(question, "", pre_source_history, has_selected_mcp):
+        if not selected_sources and not requested_mcp_ids and _query_requires_source(question, "", pre_source_history, has_selected_mcp):
             raise HTTPException(status_code=400, detail="Attach a source first")
 
         active_for_legacy = selected_sources[0] if len(selected_sources) == 1 else None
@@ -4853,6 +4857,26 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     selected_label = str(model_selection.get("effective_model_mode") or "flash").capitalize()
                     yield {"event": "thinking", "data": json.dumps({"step": f"Auto selected {selected_label}"})}
 
+                if unavailable_mcp_ids and not selected_sources and not selected_mcp_states:
+                    names: list[str] = []
+                    for connector_id in sorted(unavailable_mcp_ids):
+                        record = DB.get_mcp_connector(connector_id)
+                        names.append(str((record or {}).get("name") or connector_id))
+                    connector_label = ", ".join(names) or "the selected connector"
+                    content = (
+                        f"{connector_label} is selected, but it is not available in the live connector pool right now. "
+                        "Retry the connector from the Sources panel or choose an uploaded/API source for this question."
+                    )
+                    msg = DB.add_message(
+                        chat_id,
+                        "assistant",
+                        content,
+                        payload={"kind": "unsupported", "missing_mcp_connector_ids": sorted(unavailable_mcp_ids)},
+                    )
+                    yield {"event": "clarify", "data": json.dumps({"content": content, "message_id": msg["id"]})}
+                    yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+                    return
+
                 # ── Travel domain fast-path ─────────────────────────────────────────
                 _proj_category = (project_instructions or {}).get("category", "")
                 _is_travel_query = _is_travel_fast_path(question, _proj_category, analysis_history)
@@ -4923,7 +4947,21 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         allowed_columns=source.allowed_columns,
                         char_budget=3000,
                     )
-                    if llm_router.available:
+                    semantic_contract = build_semantic_contract(
+                        question,
+                        source.allowed_columns,
+                        source_instructions=source_instructions,
+                        project_instructions=project_instructions,
+                    )
+                    contract_eligible = (
+                        semantic_contract.intent in {"executive_summary", "trend", "grouped_metric", "data_quality_audit"}
+                        or (semantic_contract.intent == "metric" and bool(semantic_contract.metrics) and not semantic_contract.filters)
+                    )
+                    active_contract = semantic_contract if contract_eligible and semantic_contract.actionable else None
+                    if active_contract is not None:
+                        intent = active_contract.to_intent()
+                        model_used = model_preset["model"] if llm_router.available else "offline-heuristic"
+                    elif llm_router.available:
                         def _classify_with(router: LLMRouter):
                             return router.classify_intent(
                                 request_id=request_id,
@@ -4975,17 +5013,20 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         intent, model_used = heuristic_intent(question, source.allowed_columns), "offline-heuristic"
                     if model_used != "offline-heuristic":
                         model_used = model_preset["model"]
-                    intent = apply_instruction_rules(
-                        intent,
-                        question,
-                        source.allowed_columns,
-                        source_instructions=source_instructions,
-                        project_instructions=project_instructions,
-                    )
+                    if active_contract is None:
+                        intent = apply_instruction_rules(
+                            intent,
+                            question,
+                            source.allowed_columns,
+                            source_instructions=source_instructions,
+                            project_instructions=project_instructions,
+                        )
 
                     route = (intent.get("route") or "local").lower()
                     ledger_plan = build_ledger_query_plan(question, source.allowed_columns) if source is not None else None
-                    deterministic_plan = build_deterministic_query_plan(question, source.allowed_columns) if source is not None else None
+                    deterministic_plan = None if active_contract is not None else (
+                        build_deterministic_query_plan(question, source.allowed_columns) if source is not None else None
+                    )
                     missing_columns_content = (
                         missing_requested_columns_message(question, source.allowed_columns, active_row["name"])
                         if source is not None
@@ -5122,6 +5163,9 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                             yield {"event": "thinking", "data": json.dumps({"step": "Trying another analysis path"})}
 
                     plan = ledger_plan or deterministic_plan or build_query_plan(intent, question, source.allowed_columns)
+                    contract_plan_error = validate_plan_against_contract(plan, active_contract)
+                    if contract_plan_error:
+                        raise ValueError(f"Query contract validation failed before execution: {contract_plan_error}")
                     validate_readonly_sql(plan.sql)
                     business_logic_plan = await loop.run_in_executor(
                         None,
@@ -5178,6 +5222,9 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         raise ValueError(f"Failed to execute query after {max_retries} attempts. Last error: {last_error}")
 
                     log_event(LOGGERS["query"], "query_executed", request_id=request_id, source=source.source_kind, sql_hash=plan.cache_key, rows=len(df), elapsed_ms=elapsed_ms)
+                    contract_result_error = validate_result_against_contract(list(df.columns), len(df), active_contract)
+                    if contract_result_error:
+                        raise ValueError(f"Query contract validation failed after execution: {contract_result_error}")
                     if _is_no_match_aggregate_result(intent, df):
                         full_text = _no_match_message(question)
                         result_payload = _empty_result_payload(plan, question, elapsed_ms, source, model_used, chat_id)
@@ -5199,6 +5246,8 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         "view_type": _get_view_type(chat_id),
                         **_df_to_payload(df),
                     }
+                    if active_contract is not None:
+                        result_payload["query_contract"] = active_contract.to_intent().get("query_contract")
                     if business_logic_plan:
                         result_payload["business_logic"] = business_logic_plan
                     yield {"event": "result", "data": json.dumps(result_payload, default=str)}

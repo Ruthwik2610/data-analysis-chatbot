@@ -23,10 +23,12 @@ from src.query_engine import (
     build_filters,
     build_ledger_query_plan,
     build_query_plan,
+    build_semantic_contract,
     heuristic_intent,
     infer_date_grain,
     is_underspecified,
     primary_date_column,
+    validate_plan_against_contract,
     validate_readonly_sql,
 )
 from src.visualization import choose_visualization
@@ -393,6 +395,64 @@ class QueryPlanTests(unittest.TestCase):
         self.assertEqual(result["total_sales"], 2000.5)
         self.assertEqual(result["total_profit"], 280.0)
         self.assertEqual(result["total_quantity"], 5.0)
+
+    def test_monthly_multi_metric_contract_requires_period_and_all_metrics(self) -> None:
+        allowed = {"order_id", "order_date", "segment", "region", "sales", "profit", "quantity"}
+        question = "Analyze monthly sales, profit, quantity, and order count trends across the whole dataset."
+
+        contract = build_semantic_contract(question, allowed)
+        plan = build_query_plan(contract.to_intent(), question, allowed)
+
+        self.assertEqual(contract.intent, "trend")
+        self.assertEqual(contract.time_grain, "month")
+        self.assertEqual(contract.result_shape, "grouped_table")
+        self.assertIn("sales", contract.required_columns)
+        self.assertIn("profit", contract.required_columns)
+        self.assertIn("quantity", contract.required_columns)
+        self.assertIn("order_id", contract.required_columns)
+        self.assertIsNone(validate_plan_against_contract(plan, contract))
+        self.assertIn("date_trunc('month'", plan.sql)
+        self.assertIn('AS "total_sales"', plan.sql)
+        self.assertIn('AS "total_profit"', plan.sql)
+        self.assertIn('AS "total_quantity"', plan.sql)
+        self.assertIn('COUNT(DISTINCT "order_id") AS "orders"', plan.sql)
+        self.assertIn("GROUP BY period", plan.sql)
+
+    def test_loss_making_items_contract_keeps_grouping_and_all_metrics(self) -> None:
+        allowed = {"order_id", "product_name", "segment", "region", "sales", "profit", "quantity"}
+        question = "Which items generated the most revenue and quantity, and which items are loss-making?"
+
+        contract = build_semantic_contract(question, allowed)
+        plan = build_query_plan(contract.to_intent(), question, allowed)
+
+        self.assertEqual(contract.intent, "grouped_metric")
+        self.assertIn("product_name", contract.dimensions)
+        self.assertEqual(contract.filters, [{"column": "profit", "operator": "<", "value": 0}])
+        self.assertIsNone(validate_plan_against_contract(plan, contract))
+        self.assertIn('"product_name" AS "product_name"', plan.sql)
+        self.assertIn('AS "total_sales"', plan.sql)
+        self.assertIn('AS "total_profit"', plan.sql)
+        self.assertIn('AS "total_quantity"', plan.sql)
+        self.assertIn('< TRY_CAST(? AS DOUBLE)', plan.sql)
+
+    def test_executive_summary_contract_is_not_only_data_quality_audit(self) -> None:
+        allowed = {"order_id", "order_date", "category", "product_name", "sales", "profit", "quantity"}
+        question = (
+            "Give me a full executive analysis of this orders dataset. Include total sales, profit, "
+            "quantity, order count, top products, and any data quality concerns."
+        )
+
+        contract = build_semantic_contract(question, allowed)
+        plan = build_query_plan(contract.to_intent(), question, allowed)
+
+        self.assertEqual(contract.intent, "executive_summary")
+        self.assertIsNone(validate_plan_against_contract(plan, contract))
+        self.assertEqual(plan.title, "Executive Summary")
+        self.assertIn("'total_sales' AS metric", plan.sql)
+        self.assertIn("'total_profit' AS metric", plan.sql)
+        self.assertIn("'total_quantity' AS metric", plan.sql)
+        self.assertIn("'orders' AS metric", plan.sql)
+        self.assertIn("top_product_name", plan.sql)
 
     def test_structured_metric_intent_keeps_per_metric_aggregations(self) -> None:
         plan = build_query_plan(
