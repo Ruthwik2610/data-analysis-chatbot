@@ -631,7 +631,11 @@ class QueryPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(instructions["profile_source"], "ai")
-        self.assertNotIn("invented_revenue", instructions["semantic_profile"]["columns"])
+        self.assertEqual(instructions["semantic_profile"]["kind"], "datachat.semantic_manifest")
+        manifest_columns = {col["name"] for col in instructions["semantic_profile"]["models"][0]["columns"]}
+        self.assertNotIn("invented_revenue", manifest_columns)
+        self.assertEqual(instructions["semantic_profile"]["models"][0]["row_grain"], "transaction")
+        self.assertEqual(instructions["semantic_profile"]["models"][0]["default_date_column"], "posted_on")
         self.assertEqual(instructions["metrics"]["revenue"]["column"], "gross_amount")
         self.assertEqual(instructions["metrics"]["profit"]["column"], "net_income")
         self.assertEqual(instructions["metrics"]["items_sold"]["column"], "units_count")
@@ -642,31 +646,43 @@ class QueryPlanTests(unittest.TestCase):
         instructions = normalize_instructions(
             {
                 "semantic_profile": {
-                    "columns": {
-                        "gross_amount": {
-                            "role": "metric",
-                            "business_name": "sales",
-                            "synonyms": ["sales", "revenue"],
-                            "default_aggregation": "sum",
-                        },
-                        "net_income": {
-                            "role": "metric",
-                            "business_name": "profit",
-                            "synonyms": ["profit", "loss"],
-                            "default_aggregation": "sum",
-                        },
-                        "units_count": {
-                            "role": "metric",
-                            "business_name": "quantity",
-                            "synonyms": ["quantity", "items"],
-                            "default_aggregation": "sum",
-                        },
-                        "product_name": {
-                            "role": "dimension",
-                            "business_name": "product",
-                            "synonyms": ["product", "item"],
-                        },
-                    }
+                    "kind": "datachat.semantic_manifest",
+                    "models": [
+                        {
+                            "name": "business_data",
+                            "table": "orders",
+                            "row_grain": "transaction",
+                            "columns": [
+                                {
+                                    "name": "gross_amount",
+                                    "role": "metric",
+                                    "business_name": "sales",
+                                    "synonyms": ["sales", "revenue"],
+                                    "default_aggregation": "sum",
+                                },
+                                {
+                                    "name": "net_income",
+                                    "role": "metric",
+                                    "business_name": "profit",
+                                    "synonyms": ["profit", "loss"],
+                                    "default_aggregation": "sum",
+                                },
+                                {
+                                    "name": "units_count",
+                                    "role": "metric",
+                                    "business_name": "quantity",
+                                    "synonyms": ["quantity", "items"],
+                                    "default_aggregation": "sum",
+                                },
+                                {
+                                    "name": "product_name",
+                                    "role": "dimension",
+                                    "business_name": "product",
+                                    "synonyms": ["product", "item"],
+                                },
+                            ],
+                        }
+                    ],
                 }
             },
             allowed,

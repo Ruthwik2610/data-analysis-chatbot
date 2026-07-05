@@ -13,6 +13,16 @@ ROW_WORDS = ("row", "rows", "line item", "line items", "records")
 VALID_AGGREGATIONS = {"sum", "avg", "count", "count_distinct", "min", "max"}
 SEMANTIC_ROLES = {"metric", "measure", "dimension", "date", "id", "text", "unknown"}
 PLACEHOLDER_TOKENS = ["n/a", "na", "none", "null", "unknown", "not available", "tbd", "-", "--"]
+SEMANTIC_MANIFEST_KIND = "datachat.semantic_manifest"
+SEMANTIC_MANIFEST_VERSION = 1
+DATA_QUALITY_CHECKS = [
+    {"name": "nulls", "description": "Count NULL values by column."},
+    {"name": "empty_strings", "description": "Count blank text values by column."},
+    {"name": "placeholders", "description": "Count placeholder tokens by column."},
+    {"name": "duplicate_rows", "description": "Count exact duplicate rows."},
+    {"name": "invalid_dates", "description": "Count date-like values that cannot be parsed."},
+    {"name": "numeric_anomalies", "description": "Count metric-like values that cannot be parsed as numbers."},
+]
 
 
 def _columns(schema: dict[str, Any] | None) -> set[str]:
@@ -43,6 +53,10 @@ def _clean_terms(values: Any, *, limit: int = 10) -> list[str]:
 
 def _canonical(value: Any) -> str:
     return re.sub(r"[^0-9a-z]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _safe_model_name(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_]+", "_", (value or "source").strip()).strip("_") or "source"
 
 
 def _column_type(column: dict[str, Any]) -> str:
@@ -150,9 +164,75 @@ def _default_aggregation(column: str, role: str) -> str | None:
     return "sum"
 
 
+def _column_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    role = str(payload.get("role") or "unknown").strip().lower()
+    if role == "measure":
+        role = "metric"
+    if role not in SEMANTIC_ROLES:
+        role = "unknown"
+    aggregation = str(payload.get("default_aggregation") or "").strip().lower()
+    if aggregation not in VALID_AGGREGATIONS:
+        aggregation = None
+    entity = str(payload.get("entity") or "").strip().lower() or None
+    return {
+        "name": name,
+        "type": str(payload.get("type") or "").strip() or "VARCHAR",
+        "role": role,
+        "business_name": str(payload.get("business_name") or _business_name(name)).strip()[:80],
+        "description": str(payload.get("description") or payload.get("meaning") or "").strip()[:240],
+        "synonyms": _clean_terms(payload.get("synonyms")),
+        "default_aggregation": aggregation,
+        "entity": entity,
+        "is_calculated": bool(payload.get("is_calculated") or payload.get("isCalculated")),
+    }
+
+
+def _profile_column_map(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    columns: dict[str, dict[str, Any]] = {}
+    for model in profile.get("models") or []:
+        if not isinstance(model, dict):
+            continue
+        for payload in model.get("columns") or []:
+            if not isinstance(payload, dict):
+                continue
+            name = str(payload.get("name") or "").strip()
+            if name:
+                columns[name] = payload
+    legacy_columns = profile.get("columns")
+    if isinstance(legacy_columns, dict):
+        for name, payload in legacy_columns.items():
+            if isinstance(payload, dict):
+                columns[str(name)] = payload
+    return columns
+
+
+def _profile_metric_map(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    metrics: dict[str, dict[str, Any]] = {}
+    raw_metrics = profile.get("metrics")
+    if isinstance(raw_metrics, dict):
+        for name, payload in raw_metrics.items():
+            if isinstance(payload, dict):
+                metrics[str(name)] = payload
+    elif isinstance(raw_metrics, list):
+        for payload in raw_metrics:
+            if isinstance(payload, dict) and payload.get("name"):
+                metrics[str(payload["name"])] = payload
+    return metrics
+
+
+def _profile_model(profile: dict[str, Any]) -> dict[str, Any]:
+    models = profile.get("models")
+    if isinstance(models, list):
+        for model in models:
+            if isinstance(model, dict):
+                return model
+    return {}
+
+
 def _deterministic_semantic_profile(schema: dict[str, Any], display_name: str = "") -> dict[str, Any]:
-    columns: dict[str, Any] = {}
+    columns: list[dict[str, Any]] = []
     default_date_column: str | None = None
+    primary_key: str | None = None
     for column in (schema or {}).get("columns", []):
         if not isinstance(column, dict):
             continue
@@ -165,27 +245,61 @@ def _deterministic_semantic_profile(schema: dict[str, Any], display_name: str = 
         if role == "date" and default_date_column is None:
             default_date_column = name
             synonyms = list(dict.fromkeys(synonyms + ["date", "time"]))
-        columns[name] = {
+        if role == "id" and primary_key is None:
+            primary_key = name
+        columns.append({
+            "name": name,
+            "type": str(column.get("type") or column.get("dtype") or "VARCHAR"),
             "role": role,
             "business_name": _business_name(name),
-            "meaning": f"{_business_name(name)} column",
+            "description": f"{_business_name(name)} column",
             "synonyms": synonyms[:8],
             "default_aggregation": _default_aggregation(name, role),
             "entity": entity,
-        }
+            "is_calculated": False,
+        })
+
+    model_name = _safe_model_name(display_name.rsplit(".", 1)[0] if display_name else "source")
+    metrics = []
+    for column in columns:
+        if column["role"] != "metric":
+            continue
+        name = _default_metric_name(column["name"], column.get("synonyms") or [])
+        metrics.append({
+            "name": name,
+            "column": column["name"],
+            "expression": f"{column.get('default_aggregation') or 'sum'}({column['name']})",
+            "aggregation": column.get("default_aggregation") or "sum",
+            "synonyms": _clean_terms([column.get("business_name"), *(column.get("synonyms") or []), column["name"].replace("_", " ")]),
+            "default_date_column": default_date_column,
+            "description": column.get("description") or "",
+        })
 
     return {
-        "version": 1,
+        "version": SEMANTIC_MANIFEST_VERSION,
+        "kind": SEMANTIC_MANIFEST_KIND,
         "source": "deterministic",
-        "columns": columns,
+        "models": [
+            {
+                "name": model_name,
+                "table": "orders",
+                "table_reference": {"catalog": "datachat", "schema": "main", "table": "orders"},
+                "row_grain": "line_item" if "pizza" in display_name.lower() and any(c["name"] == "quantity" for c in columns) else "row",
+                "primary_key": primary_key,
+                "default_date_column": default_date_column,
+                "columns": columns,
+            }
+        ],
+        "metrics": metrics,
+        "relationships": [],
+        "routing": {"good_for": [], "not_for": []},
         "data_quality": {
             "placeholder_tokens": PLACEHOLDER_TOKENS,
+            "checks": DATA_QUALITY_CHECKS,
             "notes": [
                 "Check nulls, empty strings, placeholder values, duplicate rows, invalid dates, and numeric parse anomalies by column."
             ],
         },
-        "default_date_column": default_date_column,
-        "row_grain": "line_item" if "pizza" in display_name.lower() and "quantity" in columns else "row",
     }
 
 
@@ -232,50 +346,88 @@ def normalize_instructions(instructions: dict[str, Any] | None, allowed_columns:
                 normalized["synonyms"][str(key).strip().lower()] = clean
 
     profile_raw = raw.get("semantic_profile") if isinstance(raw.get("semantic_profile"), dict) else {}
+    profile_model = _profile_model(profile_raw)
     profile_columns: dict[str, Any] = {}
-    for column, payload in (profile_raw.get("columns") or raw.get("columns") or {}).items():
+    source_columns = _profile_column_map(profile_raw)
+    if not source_columns and isinstance(raw.get("columns"), dict):
+        source_columns = raw.get("columns") or {}
+    for column, payload in source_columns.items():
         col = str(column or "").strip()
         if col not in allowed_columns or not isinstance(payload, dict):
             continue
-        role = str(payload.get("role") or "unknown").strip().lower()
-        if role == "measure":
-            role = "metric"
-        if role not in SEMANTIC_ROLES:
-            role = "unknown"
-        aggregation = str(payload.get("default_aggregation") or "").strip().lower()
-        if aggregation not in VALID_AGGREGATIONS:
-            aggregation = None
-        entity = str(payload.get("entity") or "").strip().lower() or None
-        profile_columns[col] = {
-            "role": role,
-            "business_name": str(payload.get("business_name") or _business_name(col)).strip()[:80],
-            "meaning": str(payload.get("meaning") or "").strip()[:240],
-            "synonyms": _clean_terms(payload.get("synonyms")),
-            "default_aggregation": aggregation,
-            "entity": entity,
-        }
+        profile_columns[col] = _column_payload(col, payload)
 
     if profile_columns:
+        profile_source = str(profile_raw.get("source") or raw.get("profile_source") or "deterministic")[:40]
+        model_name = str(profile_model.get("name") or "source").strip() or "source"
+        row_grain = str(profile_model.get("row_grain") or profile_raw.get("row_grain") or raw.get("row_grain") or "").strip() or None
+        default_date = str(profile_model.get("default_date_column") or profile_raw.get("default_date_column") or "").strip()
+        primary_key = str(profile_model.get("primary_key") or "").strip() or None
+        fixed_columns = [profile_columns[col] for col in sorted(profile_columns)]
         semantic_profile = {
-            "version": int(profile_raw.get("version") or 1) if str(profile_raw.get("version") or "1").isdigit() else 1,
-            "source": str(profile_raw.get("source") or raw.get("profile_source") or "deterministic")[:40],
-            "columns": profile_columns,
+            "version": int(profile_raw.get("version") or SEMANTIC_MANIFEST_VERSION) if str(profile_raw.get("version") or str(SEMANTIC_MANIFEST_VERSION)).isdigit() else SEMANTIC_MANIFEST_VERSION,
+            "kind": str(profile_raw.get("kind") or SEMANTIC_MANIFEST_KIND),
+            "source": profile_source,
+            "models": [
+                {
+                    "name": model_name,
+                    "table": str(profile_model.get("table") or "orders"),
+                    "table_reference": profile_model.get("table_reference") if isinstance(profile_model.get("table_reference"), dict) else {"catalog": "datachat", "schema": "main", "table": "orders"},
+                    "row_grain": row_grain,
+                    "primary_key": primary_key if primary_key in allowed_columns else None,
+                    "default_date_column": default_date if default_date in allowed_columns else None,
+                    "columns": fixed_columns,
+                }
+            ],
+            "metrics": [],
+            "relationships": [rel for rel in (profile_raw.get("relationships") or []) if isinstance(rel, dict)],
+            "routing": profile_raw.get("routing") if isinstance(profile_raw.get("routing"), dict) else {"good_for": [], "not_for": []},
         }
         data_quality = profile_raw.get("data_quality") if isinstance(profile_raw.get("data_quality"), dict) else raw.get("data_quality")
         if isinstance(data_quality, dict):
             semantic_profile["data_quality"] = {
                 "placeholder_tokens": _clean_terms(data_quality.get("placeholder_tokens"), limit=20) or PLACEHOLDER_TOKENS,
+                "checks": [
+                    check for check in (data_quality.get("checks") or DATA_QUALITY_CHECKS)
+                    if isinstance(check, dict) and str(check.get("name") or "").strip()
+                ][:12],
                 "notes": [str(note).strip()[:160] for note in (data_quality.get("notes") or []) if str(note).strip()][:8],
+            }
+        else:
+            semantic_profile["data_quality"] = {
+                "placeholder_tokens": PLACEHOLDER_TOKENS,
+                "checks": DATA_QUALITY_CHECKS,
+                "notes": [],
             }
         normalized["semantic_profile"] = semantic_profile
         normalized["profile_source"] = semantic_profile["source"]
 
         if normalized["default_date_column"] is None:
-            profile_date = str(profile_raw.get("default_date_column") or "").strip()
+            profile_date = str(profile_model.get("default_date_column") or profile_raw.get("default_date_column") or "").strip()
             if profile_date in allowed_columns:
                 normalized["default_date_column"] = profile_date
             else:
                 normalized["default_date_column"] = next((col for col, payload in profile_columns.items() if payload["role"] == "date"), None)
+
+        profile_metrics = _profile_metric_map(profile_raw)
+        for name, metric in profile_metrics.items():
+            column = str(metric.get("column") or "").strip()
+            aggregation = str(metric.get("aggregation") or metric.get("default_aggregation") or "sum").strip().lower()
+            if column in allowed_columns and aggregation in VALID_AGGREGATIONS:
+                normalized["metrics"][str(name).strip().lower()] = {
+                    "column": column,
+                    "aggregation": aggregation,
+                    "synonyms": _clean_terms(metric.get("synonyms")),
+                }
+                semantic_profile["metrics"].append({
+                    "name": str(name).strip().lower(),
+                    "column": column,
+                    "expression": str(metric.get("expression") or f"{aggregation}({column})"),
+                    "aggregation": aggregation,
+                    "synonyms": _clean_terms(metric.get("synonyms")),
+                    "default_date_column": normalized["default_date_column"],
+                    "description": str(metric.get("description") or "").strip()[:200],
+                })
 
         for col, payload in profile_columns.items():
             role = payload["role"]
@@ -289,14 +441,31 @@ def normalize_instructions(instructions: dict[str, Any] | None, allowed_columns:
                             [payload.get("business_name"), *(payload.get("synonyms") or []), col.replace("_", " ")]
                         ),
                     }
+                if not any(metric.get("name") == metric_name for metric in semantic_profile["metrics"]):
+                    aggregation = payload.get("default_aggregation") or "sum"
+                    semantic_profile["metrics"].append({
+                        "name": metric_name,
+                        "column": col,
+                        "expression": f"{aggregation}({col})",
+                        "aggregation": aggregation,
+                        "synonyms": _clean_terms([payload.get("business_name"), *(payload.get("synonyms") or []), col.replace("_", " ")]),
+                        "default_date_column": normalized["default_date_column"],
+                        "description": payload.get("description") or "",
+                    })
             if role == "id" and payload.get("entity"):
                 normalized["entities"].setdefault(str(payload["entity"]).strip().lower(), col)
+                if semantic_profile["models"][0].get("primary_key") is None:
+                    semantic_profile["models"][0]["primary_key"] = col
 
     if raw.get("data_quality") and "semantic_profile" not in normalized:
         dq = raw.get("data_quality")
         if isinstance(dq, dict):
             normalized["data_quality"] = {
                 "placeholder_tokens": _clean_terms(dq.get("placeholder_tokens"), limit=20) or PLACEHOLDER_TOKENS,
+                "checks": [
+                    check for check in (dq.get("checks") or DATA_QUALITY_CHECKS)
+                    if isinstance(check, dict) and str(check.get("name") or "").strip()
+                ][:12],
                 "notes": [str(note).strip()[:160] for note in (dq.get("notes") or []) if str(note).strip()][:8],
             }
     return normalized
@@ -354,37 +523,75 @@ def build_source_semantic_profile(
     allowed = _columns(schema)
     base = _default_instruction_payload(schema, display_name)
     deterministic = _deterministic_semantic_profile(schema, display_name)
-    profile = dict(deterministic)
-    profile["columns"] = dict(deterministic.get("columns") or {})
     profile_source = "deterministic"
+    deterministic_model = _profile_model(deterministic)
+    ai_model = _profile_model(ai_profile or {}) if isinstance(ai_profile, dict) else {}
+    profile_columns = _profile_column_map(deterministic)
 
     if isinstance(ai_profile, dict):
-        ai_columns = ai_profile.get("columns") if isinstance(ai_profile.get("columns"), dict) else {}
+        ai_columns = _profile_column_map(ai_profile)
         if ai_columns:
-            profile["columns"] = {**profile["columns"], **ai_columns}
+            profile_columns = {**profile_columns, **ai_columns}
             profile_source = "ai"
-        for key in ("row_grain", "default_date_column", "data_quality"):
-            if ai_profile.get(key):
-                profile[key] = ai_profile[key]
+
+    row_grain = (
+        ai_model.get("row_grain")
+        or (ai_profile or {}).get("row_grain") if isinstance(ai_profile, dict) else None
+    ) or deterministic_model.get("row_grain")
+    default_date_column = (
+        ai_model.get("default_date_column")
+        or (ai_profile or {}).get("default_date_column") if isinstance(ai_profile, dict) else None
+    ) or deterministic_model.get("default_date_column")
+    primary_key = ai_model.get("primary_key") or deterministic_model.get("primary_key")
+    data_quality = (
+        (ai_profile or {}).get("data_quality")
+        if isinstance(ai_profile, dict) and isinstance((ai_profile or {}).get("data_quality"), dict)
+        else deterministic.get("data_quality")
+    )
+    routing = (
+        (ai_profile or {}).get("routing")
+        if isinstance(ai_profile, dict) and isinstance((ai_profile or {}).get("routing"), dict)
+        else deterministic.get("routing")
+    )
 
     instructions = {
         **base,
         "profile_source": profile_source,
         "semantic_profile": {
-            "version": 1,
+            "version": SEMANTIC_MANIFEST_VERSION,
+            "kind": SEMANTIC_MANIFEST_KIND,
             "source": profile_source,
-            "columns": profile.get("columns") or {},
-            "data_quality": profile.get("data_quality") or deterministic["data_quality"],
-            "default_date_column": profile.get("default_date_column"),
-            "row_grain": profile.get("row_grain"),
+            "models": [
+                {
+                    "name": ai_model.get("name") or deterministic_model.get("name") or _safe_model_name(display_name),
+                    "table": ai_model.get("table") or deterministic_model.get("table") or "orders",
+                    "table_reference": ai_model.get("table_reference") if isinstance(ai_model.get("table_reference"), dict) else deterministic_model.get("table_reference"),
+                    "row_grain": row_grain,
+                    "primary_key": primary_key,
+                    "default_date_column": default_date_column,
+                    "columns": [{**profile_columns[name], "name": name} for name in sorted(profile_columns)],
+                }
+            ],
+            "metrics": [
+                {"name": name, **metric}
+                for name, metric in _profile_metric_map(ai_profile or {}).items()
+            ] if isinstance(ai_profile, dict) and _profile_metric_map(ai_profile) else deterministic.get("metrics", []),
+            "relationships": (ai_profile or {}).get("relationships", []) if isinstance(ai_profile, dict) else [],
+            "routing": routing,
+            "data_quality": data_quality,
         },
     }
 
     if isinstance(ai_profile, dict):
-        if isinstance(ai_profile.get("metrics"), dict):
-            instructions["metrics"] = {**instructions["metrics"], **ai_profile["metrics"]}
+        ai_metrics = _profile_metric_map(ai_profile)
+        if ai_metrics:
+            instructions["metrics"] = {**instructions["metrics"], **ai_metrics}
         if isinstance(ai_profile.get("entities"), dict):
             instructions["entities"] = {**instructions["entities"], **ai_profile["entities"]}
+        if isinstance(ai_profile.get("synonyms"), dict):
+            instructions["synonyms"] = ai_profile["synonyms"]
+        if ai_profile.get("notes"):
+            instructions["notes"] = str(ai_profile["notes"])
         if ai_profile.get("row_grain"):
             instructions["row_grain"] = str(ai_profile["row_grain"])
         if ai_profile.get("default_date_column"):
@@ -518,8 +725,8 @@ def apply_instruction_rules(
             next_intent["count_distinct_column"] = metric["column"]
 
     profile_columns = {
-        **((project.get("semantic_profile") or {}).get("columns") or {}),
-        **((source.get("semantic_profile") or {}).get("columns") or {}),
+        **_profile_column_map(project.get("semantic_profile") or {}),
+        **_profile_column_map(source.get("semantic_profile") or {}),
     }
 
     if not next_intent.get("dimensions"):

@@ -234,6 +234,7 @@ from src.project_intelligence import (
     default_source_instructions,
     detect_project_category,
     normalize_instructions,
+    SEMANTIC_MANIFEST_KIND,
 )
 from src.query_engine import (
     build_deterministic_query_plan,
@@ -603,6 +604,13 @@ def _query_requires_source(question: str, project_category: str, history: list[d
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        migrated = _migrate_saved_source_semantic_profiles()
+        if migrated["converted"]:
+            logging.info("Migrated %s saved source semantic profile(s) to the fixed manifest format.", migrated["converted"])
+    except Exception as exc:
+        logging.warning("Source semantic profile migration failed: %s", exc)
+
     # Auto-load saved MCP bridges (mcp.json) into the pool, then start the
     # background health-check loop. Both happen on the FastAPI event loop.
     pool = get_pool()
@@ -1036,6 +1044,42 @@ def _source_semantic_instructions(source_id: str, source: DataSource, kind: str,
         except Exception as exc:
             log_event(LOGGERS["llm"], "semantic_profile_failed", request_id=source_id, source_kind=kind, error_type=type(exc).__name__)
     return build_source_semantic_profile(source.schema, source.display_name, ai_profile=ai_profile)
+
+
+def _source_profile_is_fixed_manifest(instructions: dict[str, Any] | None) -> bool:
+    if not isinstance(instructions, dict):
+        return False
+    profile = instructions.get("semantic_profile")
+    if not isinstance(profile, dict):
+        return False
+    return profile.get("kind") == SEMANTIC_MANIFEST_KIND and isinstance(profile.get("models"), list)
+
+
+def _migrated_source_instructions(row: dict[str, Any]) -> dict[str, Any]:
+    instructions = row.get("instructions") if isinstance(row.get("instructions"), dict) else {}
+    schema = _source_schema_from_row(row)
+    allowed = _source_allowed_columns_from_row(row)
+    normalized = normalize_instructions(instructions, allowed)
+    if _source_profile_is_fixed_manifest(normalized):
+        return normalized
+    return build_source_semantic_profile(schema, str(row.get("name") or ""), ai_profile=instructions)
+
+
+def _migrate_saved_source_semantic_profiles() -> dict[str, int]:
+    converted = 0
+    skipped = 0
+    for row in DB.list_source_instruction_rows():
+        instructions = row.get("instructions") if isinstance(row.get("instructions"), dict) else {}
+        if _source_profile_is_fixed_manifest(instructions):
+            skipped += 1
+            continue
+        migrated = _migrated_source_instructions(row)
+        if not _source_profile_is_fixed_manifest(migrated):
+            skipped += 1
+            continue
+        DB.upsert_source_instructions(str(row["id"]), migrated)
+        converted += 1
+    return {"converted": converted, "skipped": skipped}
 
 
 def _source_column_names(schema: dict[str, Any], limit: int = 12) -> list[str]:

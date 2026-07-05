@@ -45,39 +45,50 @@ def test_compact_semantic_context_promotes_metrics_entities_and_relationships() 
         {
             "row_grain": "line_item",
             "semantic_profile": {
-                "columns": {
-                    "total_price": {
-                        "role": "metric",
-                        "business_name": "revenue",
-                        "synonyms": ["sales"],
-                        "default_aggregation": "sum",
-                        "meaning": "Gross sales amount",
+                "kind": "datachat.semantic_manifest",
+                "models": [
+                    {
+                        "name": "orders",
+                        "table": "orders",
+                        "row_grain": "line_item",
+                        "columns": [
+                            {
+                                "name": "total_price",
+                                "role": "metric",
+                                "business_name": "revenue",
+                                "synonyms": ["sales"],
+                                "default_aggregation": "sum",
+                                "description": "Gross sales amount",
+                            }
+                        ],
                     }
-                },
+                ],
+                "metrics": [
+                    {
+                        "name": "revenue",
+                        "column": "total_price",
+                        "aggregation": "sum",
+                        "synonyms": ["sales", "gross revenue"],
+                    }
+                ],
+                "relationships": [
+                    {
+                        "from_model": "orders",
+                        "from_column": "customer_id",
+                        "to_model": "customers",
+                        "to_column": "id",
+                        "cardinality": "many_to_one",
+                        "approved": True,
+                    }
+                ],
+                "routing": {"good_for": ["sales"], "not_for": ["payroll"]},
                 "data_quality": {
                     "placeholder_tokens": ["unknown"],
+                    "checks": [{"name": "placeholders", "description": "Check placeholder tokens."}],
                     "notes": ["Check placeholders"],
                 },
             },
             "entities": {"order": "order_id", "customer": "customer_id"},
-            "metrics": {
-                "revenue": {
-                    "column": "total_price",
-                    "aggregation": "sum",
-                    "synonyms": ["sales", "gross revenue"],
-                }
-            },
-            "relationships": [
-                {
-                    "from_model": "orders",
-                    "from_column": "customer_id",
-                    "to_model": "customers",
-                    "to_column": "id",
-                    "cardinality": "many_to_one",
-                    "approved": True,
-                }
-            ],
-            "routing": {"good_for": ["sales"], "not_for": ["payroll"]},
         },
         allowed_columns={"order_id", "customer_id", "total_price"},
     )
@@ -93,6 +104,7 @@ def test_compact_semantic_context_promotes_metrics_entities_and_relationships() 
     ]
     assert context["routing"] == {"good_for": ["sales"], "not_for": ["payroll"]}
     assert context["data_quality"]["placeholder_tokens"] == ["unknown"]
+    assert context["data_quality"]["checks"] == ["placeholders"]
 
 
 def test_compact_semantic_context_drops_invalid_metric_columns() -> None:

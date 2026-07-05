@@ -78,6 +78,36 @@ def _metric_expression(metric: dict[str, Any]) -> str | None:
     return f"{aggregation}({column})"
 
 
+def _profile_columns(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    columns: dict[str, dict[str, Any]] = {}
+    for model in profile.get("models") or []:
+        if not isinstance(model, dict):
+            continue
+        for payload in model.get("columns") or []:
+            if isinstance(payload, dict) and payload.get("name"):
+                columns[str(payload["name"])] = payload
+    legacy_columns = profile.get("columns")
+    if isinstance(legacy_columns, dict):
+        for name, payload in legacy_columns.items():
+            if isinstance(payload, dict):
+                columns[str(name)] = payload
+    return columns
+
+
+def _profile_metrics(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    metrics: dict[str, dict[str, Any]] = {}
+    raw_metrics = profile.get("metrics")
+    if isinstance(raw_metrics, list):
+        for payload in raw_metrics:
+            if isinstance(payload, dict) and payload.get("name"):
+                metrics[str(payload["name"])] = payload
+    elif isinstance(raw_metrics, dict):
+        for name, payload in raw_metrics.items():
+            if isinstance(payload, dict):
+                metrics[str(name)] = payload
+    return metrics
+
+
 def compact_semantic_context(instructions: dict[str, Any] | None, *, allowed_columns: set[str]) -> dict[str, Any]:
     """Return a compact, prompt-safe semantic context from DataChat instructions.
 
@@ -95,7 +125,7 @@ def compact_semantic_context(instructions: dict[str, Any] | None, *, allowed_col
     }
 
     profile = raw.get("semantic_profile") if isinstance(raw.get("semantic_profile"), dict) else {}
-    for name, payload in sorted((profile.get("columns") or {}).items()):
+    for name, payload in sorted(_profile_columns(profile).items()):
         column = str(name or "").strip()
         if column not in allowed_columns or not isinstance(payload, dict):
             continue
@@ -115,6 +145,27 @@ def compact_semantic_context(instructions: dict[str, Any] | None, *, allowed_col
         if meaning:
             item["meaning"] = meaning[:160]
         context["columns"][column] = item
+
+    for name, metric in sorted(_profile_metrics(profile).items()):
+        if not isinstance(metric, dict):
+            continue
+        column = str(metric.get("column") or "").strip()
+        if column and column not in allowed_columns:
+            continue
+        expression = _metric_expression(metric)
+        if not expression:
+            continue
+        synonyms = [str(s).strip().lower() for s in metric.get("synonyms", []) if str(s).strip()]
+        payload = {"expression": expression}
+        if synonyms:
+            payload["synonyms"] = synonyms
+        default_date_column = str(metric.get("default_date_column") or "").strip()
+        if default_date_column and default_date_column in allowed_columns:
+            payload["default_date_column"] = default_date_column
+        description = str(metric.get("description") or "").strip()
+        if description:
+            payload["description"] = description[:160]
+        context["metrics"][str(name).strip().lower()] = payload
 
     for name, column in sorted((raw.get("entities") or {}).items()):
         col = str(column or "").strip()
@@ -140,9 +191,9 @@ def compact_semantic_context(instructions: dict[str, Any] | None, *, allowed_col
         fmt = str(metric.get("format") or "").strip()
         if fmt:
             payload["format"] = fmt
-        context["metrics"][str(name).strip().lower()] = payload
+        context["metrics"].setdefault(str(name).strip().lower(), payload)
 
-    for rel in raw.get("relationships") or []:
+    for rel in (profile.get("relationships") or raw.get("relationships") or []):
         if not isinstance(rel, dict):
             continue
         from_model = str(rel.get("from_model") or "").strip()
@@ -157,7 +208,7 @@ def compact_semantic_context(instructions: dict[str, Any] | None, *, allowed_col
             f"{from_model}.{from_column} -> {to_model}.{to_column} ({cardinality}, {approval})"
         )
 
-    routing = raw.get("routing")
+    routing = profile.get("routing") if isinstance(profile.get("routing"), dict) else raw.get("routing")
     if isinstance(routing, dict):
         context["routing"] = {
             key: [str(item) for item in value if str(item).strip()]
@@ -169,6 +220,11 @@ def compact_semantic_context(instructions: dict[str, Any] | None, *, allowed_col
     if isinstance(data_quality, dict):
         context["data_quality"] = {
             "placeholder_tokens": [str(item) for item in (data_quality.get("placeholder_tokens") or [])[:20]],
+            "checks": [
+                str(item.get("name"))
+                for item in (data_quality.get("checks") or [])
+                if isinstance(item, dict) and item.get("name")
+            ][:12],
             "notes": [str(item) for item in (data_quality.get("notes") or [])[:8]],
         }
 

@@ -891,7 +891,99 @@ def test_persist_source_creates_ai_semantic_profile_once(isolated_server, monkey
     assert fake_router.calls == 1
     assert instructions["profile_source"] == "ai"
     assert instructions["metrics"]["revenue"]["column"] == "gross_amount"
-    assert "missing_column" not in instructions["semantic_profile"]["columns"]
+    manifest = instructions["semantic_profile"]
+    assert manifest["kind"] == "datachat.semantic_manifest"
+    assert "missing_column" not in {col["name"] for col in manifest["models"][0]["columns"]}
+
+
+def test_migrate_saved_source_profiles_to_fixed_manifest(isolated_server):
+    server, storage, _pool = isolated_server
+    import json
+
+    schema = {
+        "row_count": 2,
+        "columns": [
+            {"name": "gross_amount", "type": "DOUBLE"},
+            {"name": "net_income", "type": "DOUBLE"},
+            {"name": "posted_on", "type": "DATE"},
+        ],
+    }
+    storage.upsert_source(
+        source_id="legacy_profile",
+        name="business_data",
+        kind="api",
+        rows=2,
+        schema_json=json.dumps(schema),
+        origin=None,
+    )
+    storage.upsert_source_instructions(
+        "legacy_profile",
+        {
+            "row_grain": "transaction",
+            "notes": "manual note",
+            "semantic_profile": {
+                "source": "ai",
+                "columns": {
+                    "gross_amount": {
+                        "role": "metric",
+                        "business_name": "sales",
+                        "synonyms": ["sales", "revenue"],
+                        "default_aggregation": "sum",
+                    },
+                    "missing_column": {
+                        "role": "metric",
+                        "business_name": "bad",
+                        "synonyms": ["bad"],
+                        "default_aggregation": "sum",
+                    },
+                },
+                "data_quality": {
+                    "placeholder_tokens": ["unknown"],
+                    "checks": [{"name": "placeholders", "description": "Check placeholders."}],
+                    "notes": ["Check placeholder tokens."],
+                },
+            },
+        },
+    )
+    storage.upsert_source(
+        source_id="legacy_instructions",
+        name="manual_orders",
+        kind="csv",
+        rows=2,
+        schema_json=json.dumps(schema),
+        origin=None,
+    )
+    storage.upsert_source_instructions(
+        "legacy_instructions",
+        {
+            "row_grain": "transaction",
+            "metrics": {
+                "net_profit": {
+                    "column": "net_income",
+                    "aggregation": "sum",
+                    "synonyms": ["profit", "loss"],
+                }
+            },
+            "entities": {"posting_date": "posted_on"},
+            "notes": "keep me",
+        },
+    )
+
+    result = server._migrate_saved_source_semantic_profiles()
+
+    assert result["converted"] == 2
+    migrated = storage.get_source_instructions("legacy_profile")
+    assert migrated["semantic_profile"]["kind"] == "datachat.semantic_manifest"
+    assert migrated["notes"] == "manual note"
+    assert "missing_column" not in {col["name"] for col in migrated["semantic_profile"]["models"][0]["columns"]}
+    assert migrated["semantic_profile"]["data_quality"]["checks"][0]["name"] == "placeholders"
+
+    migrated_manual = storage.get_source_instructions("legacy_instructions")
+    assert migrated_manual["semantic_profile"]["kind"] == "datachat.semantic_manifest"
+    assert migrated_manual["metrics"]["net_profit"]["column"] == "net_income"
+    assert migrated_manual["notes"] == "keep me"
+
+    assert server._migrate_saved_source_semantic_profiles()["converted"] == 0
 
 
 def test_mcp_tool_filter_prompt_includes_context_for_tool_selection():

@@ -163,30 +163,55 @@ def build_semantic_profile_prompt(
   <schema_context>{schema_xml}</schema_context>
   <output_contract>
     {{
-      "row_grain": "one short phrase like order, line_item, transaction, account, row, or unknown",
-      "default_date_column": "real_column_name_or_null",
-      "columns": {{
-        "real_column_name": {{
-          "role": "metric|dimension|date|id|text|unknown",
-          "business_name": "short business name",
-          "meaning": "one short meaning",
-          "synonyms": ["short user terms"],
-          "default_aggregation": "sum|avg|count|count_distinct|min|max|null",
-          "entity": "order|customer|product|account|location|null"
+      "version": 1,
+      "kind": "datachat.semantic_manifest",
+      "source": "ai",
+      "models": [
+        {{
+          "name": "short_model_name",
+          "table": "orders",
+          "table_reference": {{"catalog": "datachat", "schema": "main", "table": "orders"}},
+          "row_grain": "one short phrase like order, line_item, transaction, account, row, or unknown",
+          "primary_key": "real_column_name_or_null",
+          "default_date_column": "real_column_name_or_null",
+          "columns": [
+            {{
+              "name": "real_column_name",
+              "type": "schema type",
+              "role": "metric|dimension|date|id|text|unknown",
+              "business_name": "short business name",
+              "description": "one short meaning",
+              "synonyms": ["short user terms"],
+              "default_aggregation": "sum|avg|count|count_distinct|min|max|null",
+              "entity": "order|customer|product|account|location|null",
+              "is_calculated": false
+            }}
+          ]
         }}
-      }},
-      "metrics": {{
-        "metric_name": {{
+      ],
+      "metrics": [
+        {{
+          "name": "metric_name",
           "column": "real_column_name",
+          "expression": "sum(real_column_name)",
           "aggregation": "sum|avg|count|count_distinct|min|max",
-          "synonyms": ["short user terms"]
+          "synonyms": ["short user terms"],
+          "default_date_column": "real_column_name_or_null",
+          "description": "short metric meaning"
         }}
-      }},
-      "entities": {{
-        "entity_name": "real_column_name"
-      }},
+      ],
+      "relationships": [],
+      "routing": {{"good_for": ["short business topics"], "not_for": ["topics this source cannot answer"]}},
       "data_quality": {{
         "placeholder_tokens": ["n/a", "unknown"],
+        "checks": [
+          {{"name": "nulls", "description": "Count NULL values by column."}},
+          {{"name": "empty_strings", "description": "Count blank text values by column."}},
+          {{"name": "placeholders", "description": "Count placeholder tokens by column."}},
+          {{"name": "duplicate_rows", "description": "Count exact duplicate rows."}},
+          {{"name": "invalid_dates", "description": "Count date-like values that cannot be parsed."}},
+          {{"name": "numeric_anomalies", "description": "Count metric-like values that cannot be parsed as numbers."}}
+        ],
         "notes": ["short checks this source should run"]
       }}
     }}

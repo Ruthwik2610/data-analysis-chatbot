@@ -829,6 +829,26 @@ class Storage:
             return None
         return json.loads(row["instructions_json"])
 
+    def list_source_instruction_rows(self) -> list[dict[str, Any]]:
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT s.id, s.name, s.kind, s.schema_json, si.instructions_json
+                FROM source_instructions si
+                JOIN sources s ON s.id = si.source_id
+                ORDER BY s.created_at DESC
+                """
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["instructions"] = json.loads(item.get("instructions_json") or "{}")
+            except Exception:
+                item["instructions"] = {}
+            results.append(item)
+        return results
+
     def upsert_source_instructions(self, source_id: str, instructions: dict[str, Any]) -> dict[str, Any]:
         now = time.time()
         with self._conn() as con:
