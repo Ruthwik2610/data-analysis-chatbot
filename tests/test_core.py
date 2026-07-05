@@ -17,7 +17,16 @@ from src.project_intelligence import (
     build_instruction_context,
     default_source_instructions,
 )
-from src.query_engine import build_ledger_query_plan, build_query_plan, heuristic_intent, is_underspecified, validate_readonly_sql
+from src.query_engine import (
+    build_filters,
+    build_ledger_query_plan,
+    build_query_plan,
+    heuristic_intent,
+    infer_date_grain,
+    is_underspecified,
+    primary_date_column,
+    validate_readonly_sql,
+)
 from src.visualization import choose_visualization
 
 class RoutingTests(unittest.TestCase):
@@ -308,6 +317,13 @@ class QueryPlanTests(unittest.TestCase):
         df = pd.DataFrame({"period": pd.to_datetime(["2024-01-01", "2024-02-01"]), "revenue": [1, 2]})
         self.assertEqual(choose_visualization("monthly revenue trend", intent, df), "line")
 
+    def test_specific_date_grain_words_beat_generic_trend(self) -> None:
+        self.assertEqual(infer_date_grain("daily sales trend"), "day")
+        self.assertEqual(infer_date_grain("weekly sales trend"), "week")
+        self.assertEqual(infer_date_grain("quarterly sales trend"), "quarter")
+        self.assertEqual(infer_date_grain("yearly sales trend"), "year")
+        self.assertEqual(infer_date_grain("sales trend"), "month")
+
     def test_monthly_trend_executes_with_text_dates_and_currency_amounts(self) -> None:
         plan = build_query_plan(
             {
@@ -376,6 +392,25 @@ class QueryPlanTests(unittest.TestCase):
         self.assertEqual(result["total_profit"], 280.0)
         self.assertEqual(result["total_quantity"], 5.0)
 
+    def test_structured_metric_intent_keeps_per_metric_aggregations(self) -> None:
+        plan = build_query_plan(
+            {
+                "intent_type": "aggregate",
+                "metrics": [
+                    {"name": "avg_sales", "column": "sales", "aggregation": "avg"},
+                    {"name": "total_profit", "column": "profit", "aggregation": "sum"},
+                ],
+                "filters": [],
+            },
+            "average sales and total profit",
+            {"sales", "profit"},
+        )
+
+        self.assertIn('AVG(COALESCE(TRY_CAST("sales" AS DOUBLE)', plan.sql)
+        self.assertIn('AS "avg_sales"', plan.sql)
+        self.assertIn('SUM(COALESCE(TRY_CAST("profit" AS DOUBLE)', plan.sql)
+        self.assertIn('AS "total_profit"', plan.sql)
+
     def test_revenue_and_items_terms_map_to_sales_and_quantity(self) -> None:
         allowed = {"order_id", "sales", "quantity"}
         plan = build_query_plan(
@@ -388,6 +423,25 @@ class QueryPlanTests(unittest.TestCase):
         self.assertIn('AS "total_sales"', plan.sql)
         self.assertIn('SUM(COALESCE(TRY_CAST("quantity" AS DOUBLE)', plan.sql)
         self.assertIn('AS "total_quantity"', plan.sql)
+
+    def test_how_many_items_sold_sums_quantity(self) -> None:
+        allowed = {"order_id", "quantity"}
+        intent = heuristic_intent("how many items sold", allowed)
+        plan = build_query_plan(intent, "how many items sold", allowed)
+
+        self.assertEqual(intent["aggregation"], "sum")
+        self.assertEqual(intent["metric_column"], "quantity")
+        self.assertIn('SUM(COALESCE(TRY_CAST("quantity" AS DOUBLE)', plan.sql)
+        self.assertNotIn("COUNT(*)", plan.sql)
+
+    def test_actual_schema_column_after_by_becomes_dimension(self) -> None:
+        allowed = {"product", "sales", "date"}
+        intent = heuristic_intent("total sales by product", allowed)
+        plan = build_query_plan(intent, "total sales by product", allowed)
+
+        self.assertEqual(intent["dimensions"], ["product"])
+        self.assertIn('"product" AS "product"', plan.sql)
+        self.assertIn("GROUP BY", plan.sql)
 
     def test_loss_making_orders_filter_profit_negative(self) -> None:
         allowed = {"order_id", "order_date", "customer", "sales", "profit", "quantity"}
@@ -442,6 +496,77 @@ class QueryPlanTests(unittest.TestCase):
         self.assertEqual(by_column["order_date"]["invalid_date_count"], 2)
         self.assertEqual(by_column["sales"]["numeric_anomaly_count"], 2)
         self.assertEqual(by_column["__row__"]["exact_duplicate_rows"], 1)
+
+    def test_set_difference_uses_requested_months_and_date_column(self) -> None:
+        plan = build_query_plan(
+            {"intent_type": "aggregate", "filters": []},
+            "products in March but not in February",
+            {"product", "date"},
+        )
+
+        validate_readonly_sql(plan.sql)
+        self.assertEqual(plan.params, [3, 2])
+        df = pd.DataFrame([
+            {"product": "A", "date": "2026-01-10"},
+            {"product": "B", "date": "2026-03-10"},
+            {"product": "C", "date": "2026-02-10"},
+            {"product": "C", "date": "2026-03-11"},
+        ])
+        con = duckdb.connect(":memory:")
+        try:
+            con.register("orders", df)
+            result = con.execute(plan.sql, plan.params).fetchdf()
+        finally:
+            con.close()
+
+        self.assertEqual(result["product"].tolist(), ["B"])
+
+    def test_empty_in_filter_is_false_and_null_filters_use_is_null(self) -> None:
+        where_sql, params = build_filters(
+            [
+                {"column": "category", "operator": "in", "value": []},
+                {"column": "region", "operator": "=", "value": None},
+            ],
+            {"category", "region"},
+        )
+
+        self.assertIn("FALSE", where_sql)
+        self.assertIn('"region" IS NULL', where_sql)
+        self.assertEqual(params, [])
+
+    def test_date_filters_and_lookup_order_use_parsed_timestamps(self) -> None:
+        where_sql, params = build_filters(
+            [{"column": "order_date", "operator": "between", "value": ["2026-01-01", "2026-01-31"]}],
+            {"order_date"},
+        )
+        self.assertIn("try_strptime", where_sql)
+
+        lookup_plan = build_query_plan(
+            {"intent_type": "lookup", "filters": []},
+            "show records",
+            {"order_date", "sales"},
+        )
+        self.assertIn("try_strptime", lookup_plan.sql)
+
+        df = pd.DataFrame([
+            {"order_date": "20/01/2026", "sales": 20},
+            {"order_date": "05/02/2026", "sales": 50},
+            {"order_date": "15/01/2026", "sales": 15},
+        ])
+        con = duckdb.connect(":memory:")
+        try:
+            con.register("orders", df)
+            filtered = con.execute(f"SELECT * FROM orders WHERE {where_sql}", params).fetchdf()
+            ordered = con.execute(lookup_plan.sql, lookup_plan.params).fetchdf()
+        finally:
+            con.close()
+
+        self.assertEqual(filtered["sales"].tolist(), [20, 15])
+        self.assertEqual(ordered["sales"].tolist(), [50, 20, 15])
+
+    def test_primary_date_column_is_stable_and_ignores_candidate(self) -> None:
+        self.assertIsNone(primary_date_column({"candidate", "sales"}))
+        self.assertEqual(primary_date_column({"ship_date", "created_at"}), "created_at")
 
     def test_table_by_location_groups_by_city(self) -> None:
         allowed = ALLOWED | {"ship_city"}

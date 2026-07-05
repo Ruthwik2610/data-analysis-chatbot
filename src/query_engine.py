@@ -57,10 +57,10 @@ METRIC_TERM_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("discount", ("discount", "discounts")),
 )
 
-_DATE_COLUMN_HINT_RE = re.compile(r"(date|datetime|timestamp|_at|_time)\b")
+_DATE_COLUMN_HINT_RE = re.compile(r"(^|_)(date|datetime|timestamp|time)$|_at$")
 _QUALITY_HINT_RE = re.compile(
-    r"\b(data\s+quality|quality\s+gap|quality\s+issue|missing\s+values?|nulls?|"
-    r"empty\s+strings?|placeholders?|duplicates?|invalid\s+dates?|numeric\s+anomal)\b",
+    r"\b(data\s+quality|quality\s+gaps?|quality\s+issues?|missing\s+values?|nulls?|"
+    r"empty\s+strings?|placeholders?|duplicates?|invalid\s+dates?|numeric\s+anom(?:aly|alies))\b",
     re.I,
 )
 _LOSS_MAKING_RE = re.compile(r"\b(loss[-\s]?making|losses|negative\s+profit|unprofitable)\b", re.I)
@@ -100,9 +100,12 @@ def infer_limit(question: str, fallback: int = 100) -> int:
 
 def infer_aggregation(question: str, provided: Any = None) -> str:
     provided_agg = str(provided or "").strip().lower()
+    q = question.lower()
+    if re.search(r"\b(how many|number of)\b.*\b(items?|units?|quantity|qty)\b", q):
+        if not provided_agg or provided_agg == "count":
+            return "sum"
     if provided_agg in VALID_AGGREGATIONS:
         return provided_agg
-    q = question.lower()
     if any(term in q for term in ("average", " avg ", " avg.", "mean")) or q.startswith("avg "):
         return "avg"
     if any(term in q for term in ("how many", "number of")) or re.search(r"\bcount\b", q):
@@ -229,18 +232,33 @@ def infer_metric_column(
 
 def infer_dimensions(question: str, provided: list[str] | None, allowed_columns: set[str]) -> list[str]:
     dims: list[str] = []
+    lookup = _column_lookup(allowed_columns)
+
+    def add(column: str | None) -> None:
+        if column and column in allowed_columns and column not in dims:
+            dims.append(column)
+
     for dim in provided or []:
         canonical = canonical_column(dim)
-        if canonical in allowed_columns:
-            dims.append(canonical)
+        add(lookup.get(canonical))
     if dims:
         return dims[:3]
     q = question.lower()
-    if "location" in q and "location" in allowed_columns:
-        dims.append("location")
     for phrase, column in DIMENSION_ALIASES.items():
-        if phrase in q and column in allowed_columns and column not in dims:
-            dims.append(column)
+        if re.search(rf"\b{re.escape(phrase)}\b", q):
+            add(lookup.get(canonical_column(phrase)))
+            add(lookup.get(canonical_column(column)))
+    cue_pattern = re.compile(
+        r"\b(?:by|per|across|split\s+by|break(?:down|ing)?\s+by|broken\s+down\s+by)\s+([^,.;?]+)",
+        re.I,
+    )
+    for match in cue_pattern.finditer(question):
+        segment = match.group(1)
+        for col in sorted(allowed_columns, key=len, reverse=True):
+            if col in dims or _metric_like_column(col):
+                continue
+            if find_column_in_question(segment, {col}):
+                add(col)
     return dims[:3]
 
 
@@ -252,16 +270,18 @@ def infer_date_grain(question: str, provided: Any = None) -> str | None:
     if provided_grain in {"day", "week", "month", "quarter", "year"}:
         return provided_grain
     q = question.lower()
-    if any(term in q for term in ("monthly", "by month", "trend", "over time")):
-        return "month"
     if "daily" in q or "by day" in q:
         return "day"
     if "weekly" in q or "by week" in q:
         return "week"
+    if "monthly" in q or "by month" in q:
+        return "month"
     if "quarterly" in q or "by quarter" in q:
         return "quarter"
     if "yearly" in q or "by year" in q or "annual" in q:
         return "year"
+    if "trend" in q or "over time" in q:
+        return "month"
     return None
 
 
@@ -561,6 +581,70 @@ def build_deterministic_query_plan(question: str, allowed_columns: set[str]) -> 
     return build_loss_making_plan(question, allowed_columns) or build_data_quality_plan(question, allowed_columns)
 
 
+_MONTH_PATTERNS: tuple[tuple[str, int], ...] = (
+    (r"jan(?:uary)?", 1),
+    (r"feb(?:ruary)?", 2),
+    (r"mar(?:ch)?", 3),
+    (r"apr(?:il)?", 4),
+    (r"may", 5),
+    (r"jun(?:e)?", 6),
+    (r"jul(?:y)?", 7),
+    (r"aug(?:ust)?", 8),
+    (r"sep(?:t|tember)?", 9),
+    (r"oct(?:ober)?", 10),
+    (r"nov(?:ember)?", 11),
+    (r"dec(?:ember)?", 12),
+)
+
+
+def _month_indices_in_question(question: str) -> list[int]:
+    matches: list[tuple[int, int]] = []
+    for pattern, month_idx in _MONTH_PATTERNS:
+        for match in re.finditer(rf"\b{pattern}\b", question, re.I):
+            matches.append((match.start(), month_idx))
+    return [month_idx for _pos, month_idx in sorted(matches)]
+
+
+def _entity_column_for_set_difference(question: str, allowed_columns: set[str]) -> str | None:
+    lookup = _column_lookup(allowed_columns)
+    for name in ("product", "prod_name", "product_name", "item", "sku"):
+        column = lookup.get(name)
+        if column:
+            return column
+    dimensions = infer_dimensions(question, [], allowed_columns)
+    return dimensions[0] if dimensions else None
+
+
+def build_set_difference_plan(question: str, allowed_columns: set[str]) -> QueryPlan | None:
+    q = question.lower()
+    if "and not in" not in q and "but not in" not in q:
+        return None
+    entity_col = _entity_column_for_set_difference(question, allowed_columns)
+    date_col = primary_date_column(allowed_columns)
+    months = _month_indices_in_question(question)
+    if not entity_col or not date_col or len(months) < 2:
+        return None
+
+    include_month, exclude_month = months[0], months[1]
+    sql = (
+        f"SELECT entity_value AS {quote_ident(entity_col)} FROM ("
+        f"SELECT {quote_ident(entity_col)} AS entity_value, "
+        f"MAX(CASE WHEN EXTRACT(month FROM {_timestamp_expression(date_col)}) = ? THEN 1 ELSE 0 END) AS in_include_month, "
+        f"MAX(CASE WHEN EXTRACT(month FROM {_timestamp_expression(date_col)}) = ? THEN 1 ELSE 0 END) AS in_exclude_month "
+        "FROM orders GROUP BY 1"
+        ") AS product_months "
+        "WHERE in_include_month = 1 AND in_exclude_month = 0 "
+        "ORDER BY entity_value LIMIT 500"
+    )
+    return QueryPlan(
+        sql=sql,
+        params=[include_month, exclude_month],
+        display_type="table",
+        title="Set Difference",
+        how=f"Returned {entity_col} values present in month {include_month} and absent in month {exclude_month}.",
+    )
+
+
 def missing_requested_columns_message(question: str, allowed_columns: set[str], source_name: str = "this dataset") -> str | None:
     q = question or ""
     lowered = q.lower()
@@ -856,35 +940,14 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
     deterministic_plan = build_deterministic_query_plan(question, allowed_columns)
     if deterministic_plan is not None:
         return deterministic_plan
+    set_difference_plan = build_set_difference_plan(question, allowed_columns)
+    if set_difference_plan is not None:
+        return set_difference_plan
     
     if intent_type == "clarification":
         raise ValueError(intent.get("clarifying_question") or "I need one more detail to answer that.")
     if intent_type == "unsupported":
         raise ValueError("I can only answer questions grounded in the CSV data.")
-
-    # Special Case: Set Difference ("in X but not in Y")
-    if ("and not in" in q or "but not in" in q) and "product" in allowed_columns:
-        # Heuristic: find the target months
-        include_val = 1 # Jan
-        exclude_val = 2 # Feb
-        if "mar" in q: exclude_val = 3
-        
-        sql = (
-            f"SELECT \"product\" FROM (\n"
-            f"  SELECT \"product\",\n"
-            f"         MAX(CASE WHEN EXTRACT(month FROM {_timestamp_expression('date')}) = ? THEN 1 ELSE 0 END) as in_include_month,\n"
-            f"         MAX(CASE WHEN EXTRACT(month FROM {_timestamp_expression('date')}) = ? THEN 1 ELSE 0 END) as in_exclude_month\n"
-            f"  FROM orders\n"
-            f"  GROUP BY \"product\"\n"
-            f") AS product_months WHERE in_include_month = 1 AND in_exclude_month = 0"
-        )
-        return QueryPlan(
-            sql=sql,
-            params=[include_val, exclude_val],
-            display_type="table",
-            title="Set Difference",
-            how="Computed products in one group but not the other using a subquery."
-        )
 
     # Special Case: Dual metrics ("how many orders ... and how many items ...")
     if "how many orders" in q and "items sold" in q and "vno" in allowed_columns and "quantity" in allowed_columns:
@@ -906,6 +969,32 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
 
     if intent_type == "lookup":
         return build_lookup_plan(intent.get("filters") or [], intent, allowed_columns, question=question)
+
+    multi_metrics = intent.get("metrics") or []
+    if isinstance(multi_metrics, list) and multi_metrics:
+        selects: list[str] = []
+        lookup = _column_lookup(allowed_columns)
+        for metric in multi_metrics[:5]:
+            if not isinstance(metric, dict):
+                continue
+            name = canonical_column(metric.get("name") or metric.get("column") or "metric")
+            requested_column = canonical_column(metric.get("column") or "")
+            column = lookup.get(requested_column, requested_column)
+            aggregation = infer_aggregation(question, metric.get("aggregation"))
+            expr, _alias = metric_expression(column, aggregation, allowed_columns, alias=name, question=question)
+            selects.append(expr)
+        if selects:
+            where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
+            sql = f"SELECT {', '.join(selects)} FROM orders"
+            if where_sql:
+                sql += f" WHERE {where_sql}"
+            return QueryPlan(
+                sql=sql,
+                params=params,
+                display_type="card",
+                title="Key Metrics",
+                how=f"Computed {len(selects)} instruction-defined metric(s); filters: {len(params)} parameter(s).",
+            )
 
     requested_metrics = requested_metric_columns(question, allowed_columns)
     if len(requested_metrics) > 1:
@@ -944,30 +1033,6 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
             title="Key Metrics",
             how=f"Computed {len(aliases)} requested metric(s) from the available schema.",
         )
-
-    multi_metrics = intent.get("metrics") or []
-    if isinstance(multi_metrics, list) and multi_metrics:
-        selects: list[str] = []
-        for metric in multi_metrics[:5]:
-            if not isinstance(metric, dict):
-                continue
-            name = canonical_column(metric.get("name") or metric.get("column") or "metric")
-            column = canonical_column(metric.get("column") or "")
-            aggregation = infer_aggregation(question, metric.get("aggregation"))
-            expr, _alias = metric_expression(column, aggregation, allowed_columns, alias=name, question=question)
-            selects.append(expr)
-        if selects:
-            where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
-            sql = f"SELECT {', '.join(selects)} FROM orders"
-            if where_sql:
-                sql += f" WHERE {where_sql}"
-            return QueryPlan(
-                sql=sql,
-                params=params,
-                display_type="card",
-                title="Key Metrics",
-                how=f"Computed {len(selects)} instruction-defined metric(s); filters: {len(params)} parameter(s).",
-            )
 
     dimensions = infer_dimensions(question, intent.get("dimensions") or [], allowed_columns)
     aggregation = infer_aggregation(question, intent.get("aggregation"))
@@ -1063,13 +1128,30 @@ _DATE_COLUMN_PRIORITY = ("order_datetime", "order_date", "transaction_datetime",
 def primary_date_column(allowed_columns: set[str]) -> str | None:
     """Pick a column to use for time-grouped queries. Prefers a known canonical
     name, falls back to any column with a date-like substring."""
+    lookup = _column_lookup(allowed_columns)
     for col in _DATE_COLUMN_PRIORITY:
-        if col in allowed_columns:
-            return col
-    for col in allowed_columns:
-        if any(hint in col for hint in _DATE_COLUMN_HINTS):
+        if col in lookup:
+            return lookup[col]
+    for col in sorted(allowed_columns):
+        if _is_date_like_column(col):
             return col
     return None
+
+
+def _filter_expression(column: str) -> str:
+    if _is_date_like_column(column):
+        return _timestamp_expression(column)
+    if _metric_like_column(column):
+        return _numeric_expression(column)
+    return quote_ident(column)
+
+
+def _filter_param_expression(column: str) -> str:
+    if _is_date_like_column(column):
+        return "TRY_CAST(? AS TIMESTAMP)"
+    if _metric_like_column(column):
+        return "TRY_CAST(? AS DOUBLE)"
+    return "?"
 
 
 def build_lookup_plan(filters: list[dict[str, Any]], intent: dict[str, Any], allowed_columns: set[str], question: str = "") -> QueryPlan:
@@ -1082,7 +1164,7 @@ def build_lookup_plan(filters: list[dict[str, Any]], intent: dict[str, Any], all
         sql += f" WHERE {where_sql}"
     date_col = primary_date_column(allowed_columns)
     if date_col:
-        sql += f" ORDER BY {quote_ident(date_col)} DESC NULLS LAST"
+        sql += f" ORDER BY {_timestamp_expression(date_col)} DESC NULLS LAST"
     sql += " LIMIT ?"
     params.append(limit)
     return QueryPlan(
@@ -1109,14 +1191,25 @@ def build_filters(filters: list[dict[str, Any]], allowed_columns: set[str], ques
 
     for flt in filters:
         column = canonical_column(flt.get("column", ""))
+        lookup = _column_lookup(allowed_columns)
+        column = lookup.get(column, column)
         if column not in allowed_columns:
             continue
         op = str(flt.get("operator", "=")).lower()
         value = flt.get("value")
         ident = quote_ident(column)
+        expr = _filter_expression(column)
+        param_expr = _filter_param_expression(column)
+
+        if value is None:
+            if op in {"=", "is"}:
+                clauses.append(f"{ident} IS NULL")
+            elif op in {"!=", "<>", "is not"}:
+                clauses.append(f"{ident} IS NOT NULL")
+            continue
         
         # Heuristic: swap date filters for EXTRACT(month) if it looks like a month-only filter
-        if target_month_idx > 0 and column == "date":
+        if target_month_idx > 0 and _is_date_like_column(column):
             month_expr = f"EXTRACT(month FROM {_timestamp_expression(column)})"
             if op == "between" and isinstance(value, list) and len(value) == 2:
                 clauses.append(f"{month_expr} = ?")
@@ -1132,14 +1225,17 @@ def build_filters(filters: list[dict[str, Any]], allowed_columns: set[str], ques
             clauses.append(f"LOWER(CAST({ident} AS VARCHAR)) LIKE ?")
             params.append(f"%{str(value).lower()}%")
         elif op == "in" and isinstance(value, list):
-            placeholders = ", ".join(["?"] * len(value))
-            clauses.append(f"{ident} IN ({placeholders})")
-            params.extend(value)
+            if not value:
+                clauses.append("FALSE")
+            else:
+                placeholders = ", ".join(["?"] * len(value))
+                clauses.append(f"{ident} IN ({placeholders})")
+                params.extend(value)
         elif op == "between" and isinstance(value, list) and len(value) == 2:
-            clauses.append(f"{ident} BETWEEN ? AND ?")
+            clauses.append(f"{expr} BETWEEN {param_expr} AND {param_expr}")
             params.extend(value)
-        elif op in {">=", "<=", ">", "<", "="}:
-            clauses.append(f"{ident} {op} ?")
+        elif op in {">=", "<=", ">", "<", "=", "!=", "<>"}:
+            clauses.append(f"{expr} {op} {param_expr}")
             params.append(value)
     return " AND ".join(clauses), params
 
