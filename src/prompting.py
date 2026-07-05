@@ -91,7 +91,7 @@ def build_intent_prompt(
     {routing_rule}
     <rule>Bias strongly toward answering DATA questions. Return intent_type="clarification" ONLY when (a) the question is on-topic but impossible to answer with the available sources (references a column that does not exist, contradicts itself, has no plausible mapping), or (b) routing is genuinely ambiguous between local and MCP. Do NOT clarify just because details are missing — apply the defaults below silently.</rule>
     <rule>Silent defaults (apply without asking) — these apply to LOCAL routing only:
-      - "metric_column" MUST be the EXACT name of a real column from <local_schema>/<schema_context>. Do NOT invent column names. If the user names a measure ("unit price", "revenue", "shipping cost", "mrp", "list price"), pick the schema column whose name matches most closely (e.g. "unit price" → unit_price; "revenue" → revenue or total_order_val if revenue is absent; "shipping" → shipping_cost). Treat metric_column as a numeric measure to aggregate — NEVER put it in dimensions and NEVER treat it as a date.
+      - First use <project_and_source_instructions>, especially semantic metrics, semantic columns, synonyms, default aggregations, and row grain. Then use schema column names. "metric_column" MUST be the EXACT name of a real column from <local_schema>/<schema_context>. Do NOT invent column names. If the user names a measure ("unit price", "revenue", "shipping cost", "mrp", "list price"), pick the semantic metric or schema column whose name matches most closely (e.g. "unit price" → unit_price; "revenue" → a semantic revenue metric, revenue, sales, or total_order_val if present; "shipping" → shipping_cost). Treat metric_column as a numeric measure to aggregate — NEVER put it in dimensions and NEVER treat it as a date.
       - "aggregation" defaults to "sum". Use "avg" for "average/avg/mean", "count" for "how many/number of/count" (in which case metric_column is null), "max" for "max/maximum", "min" for "min/minimum".
       - "Total X", "sum of X", "X across Y" → aggregation "sum" with metric_column=X.
       - "How many orders/rows/records" with no measure → aggregation "count", metric_column null.
@@ -135,6 +135,63 @@ def build_intent_prompt(
     }}
   </output_contract>
 </chatbot_instruction>"""
+    return trim_to_budget(prompt, char_budget)
+
+
+def build_semantic_profile_prompt(
+    *,
+    schema_context: dict[str, Any],
+    source_name: str,
+    source_kind: str,
+    char_budget: int,
+) -> str:
+    schema_xml = xml_escape(compact_json(schema_context))
+    name_xml = xml_escape(source_name)
+    kind_xml = xml_escape(source_kind)
+    prompt = f"""<semantic_profile_instruction>
+  <role>You create a conservative semantic profile for one tabular data source.</role>
+  <system_rules>
+    <rule>Return only valid JSON matching the output contract.</rule>
+    <rule>Use only columns that appear in schema_context. Never invent column names.</rule>
+    <rule>Infer likely business meaning from column names, types, source name, and schema examples only.</rule>
+    <rule>If uncertain, use role="unknown" and keep synonyms short.</rule>
+    <rule>For metrics, choose default_aggregation from sum|avg|count|count_distinct|min|max.</rule>
+    <rule>Do not include raw secrets, URLs with credentials, personal contact values, or row-level data in meanings.</rule>
+  </system_rules>
+  <source_name>{name_xml}</source_name>
+  <source_kind>{kind_xml}</source_kind>
+  <schema_context>{schema_xml}</schema_context>
+  <output_contract>
+    {{
+      "row_grain": "one short phrase like order, line_item, transaction, account, row, or unknown",
+      "default_date_column": "real_column_name_or_null",
+      "columns": {{
+        "real_column_name": {{
+          "role": "metric|dimension|date|id|text|unknown",
+          "business_name": "short business name",
+          "meaning": "one short meaning",
+          "synonyms": ["short user terms"],
+          "default_aggregation": "sum|avg|count|count_distinct|min|max|null",
+          "entity": "order|customer|product|account|location|null"
+        }}
+      }},
+      "metrics": {{
+        "metric_name": {{
+          "column": "real_column_name",
+          "aggregation": "sum|avg|count|count_distinct|min|max",
+          "synonyms": ["short user terms"]
+        }}
+      }},
+      "entities": {{
+        "entity_name": "real_column_name"
+      }},
+      "data_quality": {{
+        "placeholder_tokens": ["n/a", "unknown"],
+        "notes": ["short checks this source should run"]
+      }}
+    }}
+  </output_contract>
+</semantic_profile_instruction>"""
     return trim_to_budget(prompt, char_budget)
 
 

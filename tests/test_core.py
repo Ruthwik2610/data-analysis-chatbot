@@ -15,7 +15,9 @@ from src.prompting import build_intent_prompt, xml_escape
 from src.project_intelligence import (
     apply_instruction_rules,
     build_instruction_context,
+    build_source_semantic_profile,
     default_source_instructions,
+    normalize_instructions,
 )
 from src.query_engine import (
     build_filters,
@@ -581,6 +583,114 @@ class QueryPlanTests(unittest.TestCase):
         plan = build_query_plan(intent, "give me a table by location", allowed)
         self.assertIn('SUM(COALESCE(TRY_CAST("revenue" AS DOUBLE)', plan.sql)
         self.assertEqual(plan.sql.count('"location" AS "location"'), 1)
+
+    def test_ai_semantic_profile_is_schema_safe_and_derives_metrics(self) -> None:
+        schema = {
+            "columns": [
+                {"name": "gross_amount", "type": "DOUBLE"},
+                {"name": "net_income", "type": "DOUBLE"},
+                {"name": "units_count", "type": "INTEGER"},
+                {"name": "region_name", "type": "VARCHAR"},
+                {"name": "posted_on", "type": "DATE"},
+            ]
+        }
+        instructions = build_source_semantic_profile(
+            schema,
+            "business_data",
+            ai_profile={
+                "row_grain": "transaction",
+                "default_date_column": "posted_on",
+                "columns": {
+                    "gross_amount": {
+                        "role": "metric",
+                        "business_name": "sales",
+                        "meaning": "Gross sales amount",
+                        "synonyms": ["sales", "revenue"],
+                        "default_aggregation": "sum",
+                    },
+                    "net_income": {
+                        "role": "metric",
+                        "business_name": "profit",
+                        "synonyms": ["profit", "loss"],
+                        "default_aggregation": "sum",
+                    },
+                    "units_count": {
+                        "role": "metric",
+                        "business_name": "quantity",
+                        "synonyms": ["quantity", "items"],
+                        "default_aggregation": "sum",
+                    },
+                    "invented_revenue": {
+                        "role": "metric",
+                        "business_name": "bad",
+                        "synonyms": ["bad"],
+                        "default_aggregation": "sum",
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(instructions["profile_source"], "ai")
+        self.assertNotIn("invented_revenue", instructions["semantic_profile"]["columns"])
+        self.assertEqual(instructions["metrics"]["revenue"]["column"], "gross_amount")
+        self.assertEqual(instructions["metrics"]["profit"]["column"], "net_income")
+        self.assertEqual(instructions["metrics"]["items_sold"]["column"], "units_count")
+        self.assertEqual(instructions["default_date_column"], "posted_on")
+
+    def test_semantic_profile_drives_multi_metric_and_loss_filters(self) -> None:
+        allowed = {"gross_amount", "net_income", "units_count", "product_name"}
+        instructions = normalize_instructions(
+            {
+                "semantic_profile": {
+                    "columns": {
+                        "gross_amount": {
+                            "role": "metric",
+                            "business_name": "sales",
+                            "synonyms": ["sales", "revenue"],
+                            "default_aggregation": "sum",
+                        },
+                        "net_income": {
+                            "role": "metric",
+                            "business_name": "profit",
+                            "synonyms": ["profit", "loss"],
+                            "default_aggregation": "sum",
+                        },
+                        "units_count": {
+                            "role": "metric",
+                            "business_name": "quantity",
+                            "synonyms": ["quantity", "items"],
+                            "default_aggregation": "sum",
+                        },
+                        "product_name": {
+                            "role": "dimension",
+                            "business_name": "product",
+                            "synonyms": ["product", "item"],
+                        },
+                    }
+                }
+            },
+            allowed,
+        )
+
+        intent = apply_instruction_rules(
+            {"intent_type": "aggregate", "aggregation": "sum"},
+            "show sales, profit and quantity",
+            allowed,
+            source_instructions=instructions,
+        )
+        plan = build_query_plan(intent, "show sales, profit and quantity", allowed)
+        self.assertIn('AS "revenue"', plan.sql)
+        self.assertIn('AS "profit"', plan.sql)
+        self.assertIn('AS "items_sold"', plan.sql)
+
+        loss_intent = apply_instruction_rules(
+            {"intent_type": "aggregate", "aggregation": "sum"},
+            "show loss-making products",
+            allowed,
+            source_instructions=instructions,
+        )
+        self.assertEqual(loss_intent["filters"], [{"column": "net_income", "operator": "<", "value": 0}])
+        self.assertEqual(loss_intent["dimensions"], ["product_name"])
 
     def test_pizza_instructions_distinguish_items_sold_and_orders(self) -> None:
         allowed = {

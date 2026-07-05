@@ -44,6 +44,21 @@ def test_compact_semantic_context_promotes_metrics_entities_and_relationships() 
     context = compact_semantic_context(
         {
             "row_grain": "line_item",
+            "semantic_profile": {
+                "columns": {
+                    "total_price": {
+                        "role": "metric",
+                        "business_name": "revenue",
+                        "synonyms": ["sales"],
+                        "default_aggregation": "sum",
+                        "meaning": "Gross sales amount",
+                    }
+                },
+                "data_quality": {
+                    "placeholder_tokens": ["unknown"],
+                    "notes": ["Check placeholders"],
+                },
+            },
             "entities": {"order": "order_id", "customer": "customer_id"},
             "metrics": {
                 "revenue": {
@@ -68,6 +83,8 @@ def test_compact_semantic_context_promotes_metrics_entities_and_relationships() 
     )
 
     assert context["row_grain"] == "line_item"
+    assert context["columns"]["total_price"]["role"] == "metric"
+    assert context["columns"]["total_price"]["synonyms"] == ["sales"]
     assert context["metrics"]["revenue"]["expression"] == "sum(total_price)"
     assert context["metrics"]["revenue"]["synonyms"] == ["sales", "gross revenue"]
     assert context["entities"] == {"customer": "customer_id", "order": "order_id"}
@@ -75,6 +92,7 @@ def test_compact_semantic_context_promotes_metrics_entities_and_relationships() 
         "orders.customer_id -> customers.id (many_to_one, approved)"
     ]
     assert context["routing"] == {"good_for": ["sales"], "not_for": ["payroll"]}
+    assert context["data_quality"]["placeholder_tokens"] == ["unknown"]
 
 
 def test_compact_semantic_context_drops_invalid_metric_columns() -> None:

@@ -229,6 +229,7 @@ from src.prompting import build_answer_prompt, build_local_agent_system_prompt, 
 from src.project_intelligence import (
     apply_instruction_rules,
     build_instruction_context,
+    build_source_semantic_profile,
     clarification_suggestions,
     default_source_instructions,
     detect_project_category,
@@ -964,7 +965,7 @@ def _persist_source(source_id: str, source: DataSource, kind: str, origin: dict[
         owner_id=owner_id,
     )
     if DB.get_source_instructions(source_id) is None:
-        DB.upsert_source_instructions(source_id, default_source_instructions(source.schema, source.display_name))
+        DB.upsert_source_instructions(source_id, _source_semantic_instructions(source_id, source, kind, origin))
     DB.set_active_source(source_id, owner_id=owner_id)
     return _serialize_source(source_id, source, kind, active=True, origin=origin)
 
@@ -990,6 +991,51 @@ def _source_origin_from_row(row: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         return {}
     return origin if isinstance(origin, dict) else {}
+
+
+def _safe_semantic_origin(kind: str, origin: dict[str, Any] | None) -> dict[str, Any]:
+    raw = origin or {}
+    safe: dict[str, Any] = {"kind": kind, "type": raw.get("type")}
+    if raw.get("ingest"):
+        safe["ingest"] = raw.get("ingest")
+    if raw.get("sheet"):
+        safe["sheet"] = raw.get("sheet")
+    if raw.get("url"):
+        safe["url"] = redact_url(str(raw.get("url")))
+    if raw.get("path"):
+        path = Path(str(raw.get("path")))
+        safe["file_name"] = path.name
+        safe["suffix"] = path.suffix
+    return {key: value for key, value in safe.items() if value not in {None, ""}}
+
+
+def _source_semantic_instructions(source_id: str, source: DataSource, kind: str, origin: dict[str, Any] | None) -> dict[str, Any]:
+    ai_profile: dict[str, Any] | None = None
+    if ROUTER.available:
+        try:
+            prompt_schema = {
+                **source.schema,
+                "origin": _safe_semantic_origin(kind, origin),
+            }
+            ai_profile, usage = ROUTER.profile_source_schema(
+                request_id=source_id,
+                schema_context=prompt_schema,
+                source_name=source.display_name,
+                source_kind=kind,
+            )
+            log_event(
+                LOGGERS["llm"],
+                "semantic_profile_generated",
+                request_id=source_id,
+                source_kind=kind,
+                prompt_tokens=(usage or {}).get("prompt_tokens", 0),
+                completion_tokens=(usage or {}).get("completion_tokens", 0),
+            )
+        except LLMUnavailable as exc:
+            log_event(LOGGERS["llm"], "semantic_profile_unavailable", request_id=source_id, source_kind=kind, error_type=type(exc).__name__)
+        except Exception as exc:
+            log_event(LOGGERS["llm"], "semantic_profile_failed", request_id=source_id, source_kind=kind, error_type=type(exc).__name__)
+    return build_source_semantic_profile(source.schema, source.display_name, ai_profile=ai_profile)
 
 
 def _source_column_names(schema: dict[str, Any], limit: int = 12) -> list[str]:

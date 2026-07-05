@@ -833,6 +833,67 @@ def test_upload_response_includes_clarification_suggestions(isolated_server, mon
     assert "line item" in data["clarifications"][0]["question"].lower()
 
 
+def test_persist_source_creates_ai_semantic_profile_once(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    from src.data_sources import DataSource
+
+    class FakeRouter:
+        available = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def profile_source_schema(self, **kwargs):
+            self.calls += 1
+            return {
+                "row_grain": "transaction",
+                "default_date_column": "posted_on",
+                "columns": {
+                    "gross_amount": {
+                        "role": "metric",
+                        "business_name": "sales",
+                        "synonyms": ["sales", "revenue"],
+                        "default_aggregation": "sum",
+                    },
+                    "posted_on": {
+                        "role": "date",
+                        "business_name": "posted date",
+                        "synonyms": ["date"],
+                    },
+                    "missing_column": {
+                        "role": "metric",
+                        "business_name": "bad",
+                        "synonyms": ["bad"],
+                        "default_aggregation": "sum",
+                    },
+                },
+            }, {"prompt_tokens": 10, "completion_tokens": 5}
+
+    fake_router = FakeRouter()
+    monkeypatch.setattr(server, "ROUTER", fake_router)
+    source = DataSource(
+        source_kind="API direct",
+        schema={
+            "row_count": 2,
+            "columns": [
+                {"name": "gross_amount", "type": "DOUBLE"},
+                {"name": "posted_on", "type": "DATE"},
+            ],
+        },
+        display_name="business_data",
+        dataframe=pd.DataFrame({"gross_amount": [10, 20], "posted_on": ["2026-01-01", "2026-01-02"]}),
+    )
+
+    server._persist_source("src_profile", source, "api", {"type": "api", "url": "https://example.test/business_data"})
+    server._persist_source("src_profile", source, "api", {"type": "api", "url": "https://example.test/business_data"})
+
+    instructions = storage.get_source_instructions("src_profile")
+    assert fake_router.calls == 1
+    assert instructions["profile_source"] == "ai"
+    assert instructions["metrics"]["revenue"]["column"] == "gross_amount"
+    assert "missing_column" not in instructions["semantic_profile"]["columns"]
+
+
 def test_mcp_tool_filter_prompt_includes_context_for_tool_selection():
     import backend.server as server
 

@@ -87,11 +87,34 @@ def compact_semantic_context(instructions: dict[str, Any] | None, *, allowed_col
     raw = dict(instructions or {})
     context: dict[str, Any] = {
         "row_grain": str(raw.get("row_grain") or "").strip() or None,
+        "columns": {},
         "entities": {},
         "metrics": {},
         "relationships": [],
         "routing": {},
     }
+
+    profile = raw.get("semantic_profile") if isinstance(raw.get("semantic_profile"), dict) else {}
+    for name, payload in sorted((profile.get("columns") or {}).items()):
+        column = str(name or "").strip()
+        if column not in allowed_columns or not isinstance(payload, dict):
+            continue
+        item: dict[str, Any] = {
+            "role": str(payload.get("role") or "unknown")[:40],
+        }
+        business_name = str(payload.get("business_name") or "").strip()
+        if business_name:
+            item["business_name"] = business_name[:80]
+        synonyms = [str(s).strip().lower() for s in payload.get("synonyms", []) if str(s).strip()]
+        if synonyms:
+            item["synonyms"] = synonyms[:8]
+        aggregation = str(payload.get("default_aggregation") or "").strip().lower()
+        if aggregation:
+            item["default_aggregation"] = aggregation
+        meaning = str(payload.get("meaning") or "").strip()
+        if meaning:
+            item["meaning"] = meaning[:160]
+        context["columns"][column] = item
 
     for name, column in sorted((raw.get("entities") or {}).items()):
         col = str(column or "").strip()
@@ -140,6 +163,13 @@ def compact_semantic_context(instructions: dict[str, Any] | None, *, allowed_col
             key: [str(item) for item in value if str(item).strip()]
             for key, value in routing.items()
             if isinstance(value, list)
+        }
+
+    data_quality = profile.get("data_quality") if isinstance(profile.get("data_quality"), dict) else raw.get("data_quality")
+    if isinstance(data_quality, dict):
+        context["data_quality"] = {
+            "placeholder_tokens": [str(item) for item in (data_quality.get("placeholder_tokens") or [])[:20]],
+            "notes": [str(item) for item in (data_quality.get("notes") or [])[:8]],
         }
 
     return context

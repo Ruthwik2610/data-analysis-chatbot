@@ -11,7 +11,13 @@ from opentelemetry import trace
 from openinference.instrumentation.openai import OpenAIInstrumentor
 
 from .logging_config import log_event
-from .prompting import build_answer_prompt, build_intent_prompt, build_mcp_agent_system_prompt, estimate_tokens
+from .prompting import (
+    build_answer_prompt,
+    build_intent_prompt,
+    build_mcp_agent_system_prompt,
+    build_semantic_profile_prompt,
+    estimate_tokens,
+)
 
 
 def setup_phoenix(api_key: str | None, project_name: str, endpoint: str = "https://app.phoenix.arize.com/v1/traces") -> None:
@@ -219,6 +225,26 @@ class LLMRouter:
                 log_event(self.logger, "llm_failure", request_id=request_id, model=self.model, error=str(exc))
                 span.record_exception(exc)
                 raise LLMUnavailable(str(exc)) from exc
+
+    def profile_source_schema(
+        self,
+        *,
+        request_id: str,
+        schema_context: dict[str, Any],
+        source_name: str,
+        source_kind: str,
+    ) -> tuple[dict[str, Any], dict[str, int]]:
+        prompt = build_semantic_profile_prompt(
+            schema_context=schema_context,
+            source_name=source_name,
+            source_kind=source_kind,
+            char_budget=min(self.char_budget, 8000),
+        )
+        try:
+            return self._generate_json(prompt, request_id)
+        except Exception as exc:  # pragma: no cover - network/API dependent
+            log_event(self.logger, "semantic_profile_failure", request_id=request_id, model=self.model, error_type=type(exc).__name__)
+            raise LLMUnavailable(str(exc)) from exc
 
     def summarize_answer(
         self,
