@@ -454,6 +454,23 @@ class QueryPlanTests(unittest.TestCase):
         self.assertIn("'orders' AS metric", plan.sql)
         self.assertIn("top_product_name", plan.sql)
 
+    def test_explicit_data_quality_audit_contract_wins_with_numeric_anomalies_by_column(self) -> None:
+        allowed = {"order_id", "order_date", "category", "sales", "profit", "quantity"}
+        question = (
+            "Run a deterministic data quality audit: nulls, empty strings, placeholders, "
+            "duplicates, invalid dates, and numeric anomalies by column."
+        )
+
+        contract = build_semantic_contract(question, allowed)
+        plan = build_query_plan(contract.to_intent(), question, allowed)
+
+        self.assertEqual(contract.intent, "data_quality_audit")
+        self.assertIsNone(validate_plan_against_contract(plan, contract))
+        self.assertEqual(plan.title, "Data Quality Audit")
+        self.assertIn("column_name", plan.sql)
+        self.assertIn("numeric_anomaly_count", plan.sql)
+        self.assertIn("exact_duplicate_rows", plan.sql)
+
     def test_structured_metric_intent_keeps_per_metric_aggregations(self) -> None:
         plan = build_query_plan(
             {
@@ -696,9 +713,9 @@ class QueryPlanTests(unittest.TestCase):
         self.assertNotIn("invented_revenue", manifest_columns)
         self.assertEqual(instructions["semantic_profile"]["models"][0]["row_grain"], "transaction")
         self.assertEqual(instructions["semantic_profile"]["models"][0]["default_date_column"], "posted_on")
-        self.assertEqual(instructions["metrics"]["revenue"]["column"], "gross_amount")
-        self.assertEqual(instructions["metrics"]["profit"]["column"], "net_income")
-        self.assertEqual(instructions["metrics"]["items_sold"]["column"], "units_count")
+        self.assertEqual(instructions["metrics"]["total_sales"]["column"], "gross_amount")
+        self.assertEqual(instructions["metrics"]["total_profit"]["column"], "net_income")
+        self.assertEqual(instructions["metrics"]["total_quantity"]["column"], "units_count")
         self.assertEqual(instructions["default_date_column"], "posted_on")
 
     def test_semantic_profile_drives_multi_metric_and_loss_filters(self) -> None:
@@ -755,9 +772,9 @@ class QueryPlanTests(unittest.TestCase):
             source_instructions=instructions,
         )
         plan = build_query_plan(intent, "show sales, profit and quantity", allowed)
-        self.assertIn('AS "revenue"', plan.sql)
-        self.assertIn('AS "profit"', plan.sql)
-        self.assertIn('AS "items_sold"', plan.sql)
+        self.assertIn('AS "total_sales"', plan.sql)
+        self.assertIn('AS "total_profit"', plan.sql)
+        self.assertIn('AS "total_quantity"', plan.sql)
 
         loss_intent = apply_instruction_rules(
             {"intent_type": "aggregate", "aggregation": "sum"},
@@ -792,7 +809,7 @@ class QueryPlanTests(unittest.TestCase):
         plan = build_query_plan(intent, "how many items sold vs how many orders", allowed)
 
         self.assertIn('SUM(COALESCE(TRY_CAST("quantity" AS DOUBLE)', plan.sql)
-        self.assertIn('AS "items_sold"', plan.sql)
+        self.assertIn('AS "total_quantity"', plan.sql)
         self.assertIn('COUNT(DISTINCT "order_id") AS "orders"', plan.sql)
 
     def test_pizza_instructions_count_rows_line_items_and_distinct_orders(self) -> None:

@@ -137,11 +137,11 @@ def _entity_name_for_column(name: str) -> str | None:
 def _default_metric_name(column: str, synonyms: list[str]) -> str:
     terms = set(synonyms) | _metric_terms(column)
     if {"sales", "revenue", "turnover"} & terms:
-        return "revenue"
+        return "total_sales"
     if {"profit", "loss", "margin"} & terms:
-        return "profit"
+        return "total_profit"
     if {"quantity", "items", "units"} & terms:
-        return "items_sold"
+        return "total_quantity"
     if "discount" in terms:
         return "discount"
     if {"tax", "gst"} & terms:
@@ -489,13 +489,13 @@ def _default_instruction_payload(schema: dict[str, Any], display_name: str = "")
     if "order_details_id" in allowed:
         entities["line_item"] = "order_details_id"
     if "quantity" in allowed:
-        metrics["items_sold"] = {
+        metrics["total_quantity"] = {
             "column": "quantity",
             "aggregation": "sum",
             "synonyms": ["items sold", "pizzas sold", "units sold", "quantity sold"],
         }
     if "total_price" in allowed:
-        metrics["revenue"] = {
+        metrics["total_sales"] = {
             "column": "total_price",
             "aggregation": "sum",
             "synonyms": ["revenue", "sales", "total sales"],

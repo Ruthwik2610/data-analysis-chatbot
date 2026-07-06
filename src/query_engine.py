@@ -75,6 +75,11 @@ _QUALITY_HINT_RE = re.compile(
     r"empty\s+strings?|placeholders?|duplicates?|invalid\s+dates?|numeric\s+anom(?:aly|alies))\b",
     re.I,
 )
+_EXPLICIT_QUALITY_AUDIT_RE = re.compile(
+    r"\b(data\s+quality|quality\s+audit|audit|quality\s+gaps?|quality\s+issues?|"
+    r"missing\s+values?|nulls?|empty\s+strings?|placeholders?|invalid\s+dates?|numeric\s+anom(?:aly|alies))\b",
+    re.I,
+)
 _LOSS_MAKING_RE = re.compile(r"\b(loss[-\s]?making|losses|negative\s+profit|unprofitable)\b", re.I)
 
 @dataclass
@@ -261,7 +266,7 @@ def requested_metric_columns(question: str, allowed_columns: set[str]) -> list[t
         if column in seen:
             return
         seen.add(column)
-        requested.append((column, f"total_{canonical_column(column)}"))
+        requested.append((column, canonical_metric_alias(column)))
 
     for preferred, terms in METRIC_TERM_GROUPS:
         if any(re.search(rf"\b{re.escape(term)}\b", q) for term in terms):
@@ -325,7 +330,13 @@ def _instruction_metric_matches(
         positions = [q.find(str(term).strip().lower()) for term in terms if str(term).strip() and q.find(str(term).strip().lower()) >= 0]
         if not positions and not any(re.search(rf"\b{re.escape(str(term).strip().lower())}\b", q) for term in terms if str(term).strip()):
             continue
-        alias = canonical_column(name) or canonical_column(column)
+        business_name = canonical_column(metric.get("business_name") or "")
+        column_name = canonical_column(column)
+        metric_name = canonical_column(name)
+        metric_terms = {business_name, column_name, metric_name, *(canonical_column(term) for term in terms)}
+        alias = canonical_metric_alias(column_name, metric_name)
+        if alias == "metric":
+            alias = metric_name or column_name
         matched.append((
             min(positions) if positions else len(q),
             {
@@ -344,6 +355,28 @@ def _instruction_metric_matches(
         seen.add(key)
         out.append(metric)
     return out
+
+
+def canonical_metric_alias(metric_column: Any, alias: Any = None) -> str:
+    column_name = canonical_column(metric_column or "")
+    alias_name = canonical_column(alias or "")
+    sales_terms = {"sales", "sale", "revenue", "turnover", "gmv", "gross_amount", "gross_value", "total_amount", "total_price"}
+    profit_terms = {"profit", "profits", "loss", "losses", "net_income", "net_profit"}
+    quantity_terms = {"quantity", "qty", "items", "item", "units", "unit", "items_sold"}
+    generic_aliases = (
+        sales_terms | profit_terms | quantity_terms |
+        {"total_sales", "total_revenue", "total_profit", "total_quantity"}
+    )
+    if alias_name and alias_name not in generic_aliases and alias_name != column_name:
+        return alias_name
+    metric_terms = {column_name, alias_name}
+    if (sales_terms | {"total_sales", "total_revenue"}) & metric_terms:
+        return "total_sales"
+    if (profit_terms | {"total_profit"}) & metric_terms:
+        return "total_profit"
+    if (quantity_terms | {"total_quantity"}) & metric_terms:
+        return "total_quantity"
+    return alias_name or column_name or "metric"
 
 
 def _metric_contracts_from_question(
@@ -451,20 +484,25 @@ def build_semantic_contract(
     if _LOSS_MAKING_RE.search(question or "") and profit_column:
         filters.append({"column": profit_column, "operator": "<", "value": 0})
         if not any(metric.get("column") == profit_column for metric in metrics):
-            metrics.append({"name": f"total_{canonical_column(profit_column)}", "column": profit_column, "aggregation": "sum"})
+            metrics.append({"name": canonical_metric_alias(profit_column), "column": profit_column, "aggregation": "sum"})
 
-    has_quality = is_data_quality_question(question)
+    has_quality = is_explicit_data_quality_audit_question(question)
     is_executive = bool(re.search(r"\b(executive\s+(summary|analysis)|full\s+(executive\s+)?analysis|business\s+summary|overall\s+summary)\b", q))
-    if is_executive:
+    if has_quality and not is_executive:
+        intent = "data_quality_audit"
+        result_shape = "audit_table"
+        metrics = []
+        dimensions = []
+        filters = []
+        date_grain = None
+        date_column = None
+    elif is_executive:
         intent = "executive_summary"
         result_shape = "summary_table"
         if not metrics:
             metric_column = fallback_metric_column(allowed_columns)
             if metric_column:
-                metrics.append({"name": f"total_{canonical_column(metric_column)}", "column": metric_column, "aggregation": "sum"})
-    elif has_quality and not (metrics or dimensions or filters or date_grain):
-        intent = "data_quality_audit"
-        result_shape = "audit_table"
+                metrics.append({"name": canonical_metric_alias(metric_column), "column": metric_column, "aggregation": "sum"})
     elif date_grain and (metrics or dimensions):
         intent = "trend"
         result_shape = "grouped_table"
@@ -769,6 +807,16 @@ def _is_date_like_column(column: str) -> bool:
 
 def is_data_quality_question(question: str) -> bool:
     return bool(_QUALITY_HINT_RE.search(question or ""))
+
+
+def is_explicit_data_quality_audit_question(question: str) -> bool:
+    q = question or ""
+    if _EXPLICIT_QUALITY_AUDIT_RE.search(q):
+        return True
+    return bool(
+        re.search(r"\bduplicates?\b", q, re.I)
+        and re.search(r"\b(rows?|records?|exact|audit|data\s+quality|nulls?|empty\s+strings?|placeholders?|invalid\s+dates?|numeric\s+anom(?:aly|alies))\b", q, re.I)
+    )
 
 
 def build_data_quality_plan(question: str, allowed_columns: set[str]) -> QueryPlan | None:
@@ -1385,7 +1433,7 @@ def build_query_plan(intent: dict[str, Any], question: str, allowed_columns: set
         where_sql, params = build_filters(intent.get("filters") or [], allowed_columns, question=question)
         sql = (
             f"SELECT COUNT(DISTINCT \"vno\") AS \"orders\", "
-            f"SUM({_numeric_expression('quantity')}) AS \"items_sold\" "
+            f"SUM({_numeric_expression('quantity')}) AS \"total_quantity\" "
             f"FROM orders"
         )
         if where_sql:
@@ -1554,6 +1602,9 @@ def metric_expression(
         agg = "sum"
         
     q = (question or "").lower()
+    normalized_alias = canonical_metric_alias(metric_column, alias)
+    if normalized_alias != "metric":
+        alias = normalized_alias
     # Heuristic: if question asks for "orders" and we have a voucher column, use COUNT(DISTINCT vno)
     if agg == "count" and not metric_column:
         if "order" in q and "vno" in allowed_columns:

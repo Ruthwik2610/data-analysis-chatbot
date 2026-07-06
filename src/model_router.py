@@ -20,13 +20,28 @@ from .prompting import (
 )
 
 
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _phoenix_register():
+    from phoenix.otel import register
+
+    return register
+
+
 def setup_phoenix(api_key: str | None, project_name: str, endpoint: str = "https://app.phoenix.arize.com/v1/traces") -> None:
+    if _truthy_env(os.getenv("OTEL_SDK_DISABLED")):
+        logging.info("OpenTelemetry SDK is disabled; Phoenix tracing was not initialized.")
+        return
     if not api_key:
+        return
+    if not _truthy_env(os.getenv("PHOENIX_TRACING_ENABLED")):
+        logging.warning("PHOENIX_API_KEY is configured, but Phoenix tracing is disabled. Set PHOENIX_TRACING_ENABLED=1 to export traces.")
         return
 
     try:
-        from phoenix.otel import register
-
+        register = _phoenix_register()
         register(
             endpoint=endpoint,
             project_name=project_name,

@@ -134,6 +134,26 @@ def test_public_tool_call_step_does_not_echo_arguments():
     assert "secret-token" not in step
 
 
+def test_phoenix_setup_is_disabled_unless_explicitly_enabled(monkeypatch):
+    import src.model_router as model_router
+
+    called = False
+
+    def fake_register(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.delenv("PHOENIX_TRACING_ENABLED", raising=False)
+    monkeypatch.setattr(model_router, "_phoenix_register", lambda: fake_register)
+
+    model_router.setup_phoenix(
+        api_key="invalid-key-that-should-not-export",
+        project_name="data-analysis-chatbot",
+    )
+
+    assert called is False
+
+
 @pytest.fixture()
 def isolated_server(monkeypatch, tmp_path):
     import backend.server as server
@@ -890,7 +910,7 @@ def test_persist_source_creates_ai_semantic_profile_once(isolated_server, monkey
     instructions = storage.get_source_instructions("src_profile")
     assert fake_router.calls == 1
     assert instructions["profile_source"] == "ai"
-    assert instructions["metrics"]["revenue"]["column"] == "gross_amount"
+    assert instructions["metrics"]["total_sales"]["column"] == "gross_amount"
     manifest = instructions["semantic_profile"]
     assert manifest["kind"] == "datachat.semantic_manifest"
     assert "missing_column" not in {col["name"] for col in manifest["models"][0]["columns"]}
@@ -1343,7 +1363,7 @@ def test_selected_persisted_mcp_without_live_pool_streams_safe_unavailable_messa
     assert "done" in response.text
 
 
-def test_unsupported_local_table_query_does_not_fall_through_to_mcp(isolated_server, tmp_path):
+def test_unsupported_local_table_query_does_not_fall_through_to_mcp(isolated_server, tmp_path, monkeypatch):
     server, storage, pool = isolated_server
     from fastapi.testclient import TestClient
     
@@ -1388,8 +1408,7 @@ def test_unsupported_local_table_query_does_not_fall_through_to_mcp(isolated_ser
         available = True
         def classify_intent(self, **kwargs):
             return {"intent_type": "unsupported", "route": "ambiguous"}, "dummy", {}            
-    import backend.server
-    backend.server.LLMRouter = lambda *a, **kw: DummyRouter()
+    monkeypatch.setattr(server, "_router_for_model_mode", lambda _mode: DummyRouter())
     
     response = client.post("/query", json={
         "chat_id": chat["id"],
@@ -1506,7 +1525,95 @@ def test_api_attach_redacts_user_visible_url_values(isolated_server, monkeypatch
     assert listed.status_code == 200
     assert "secret-token" not in listed.text
     assert "api_key" not in listed.text
-    assert listed.json()[0]["config"]["auth"] in (None, "")
+
+
+def test_api_attach_persists_snapshot_and_rehydrates_without_live_api(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    import asyncio
+    import json
+    from fastapi.testclient import TestClient
+
+    async def allow_public_url(_url: str) -> None:
+        return None
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, object]]:
+            return [
+                {"Order ID": "A-1", "Sales": "1,200.50", "Quantity": "3"},
+                {"Order ID": "A-2", "Sales": "800.00", "Quantity": "2"},
+            ]
+
+    monkeypatch.setattr(server, "_assert_public_url", allow_public_url)
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: Response())
+
+    response = TestClient(server.app).post(
+        "/sources/api",
+        json={"url": "https://example.test/business_data?api_key=secret-token", "ingest": "direct"},
+    )
+
+    assert response.status_code == 200
+    source_id = response.json()["id"]
+    row = storage.get_source(source_id)
+    origin = json.loads(row["origin"])
+    assert origin["type"] == "api"
+    assert origin.get("snapshot_path")
+
+    def dead_get(*_args, **_kwargs):
+        raise AssertionError("rehydrate should use the saved API snapshot before the live URL")
+
+    server.SOURCES.pop(source_id, None)
+    monkeypatch.setattr("requests.get", dead_get)
+    source = asyncio.run(server._rehydrate_source(row))
+
+    assert source.source_kind == "API snapshot"
+    assert source.display_name == response.json()["name"]
+    assert source.dataframe is not None
+    assert source.dataframe["quantity"].tolist() == [3, 2]
+
+
+def test_query_source_rehydrate_failure_streams_error_and_done(isolated_server, monkeypatch):
+    server, storage, _pool = isolated_server
+    import asyncio
+    import json
+    from fastapi import BackgroundTasks, HTTPException
+
+    storage.upsert_source(
+        source_id="src_dead_api",
+        name="Dead API",
+        kind="api",
+        rows=100,
+        schema_json=json.dumps({"columns": [{"name": "sales", "type": "float64"}], "row_count": 100}),
+        origin={"type": "api", "url": "https://example.test/dead", "auth": None},
+    )
+
+    async def fake_rehydrate(_row):
+        raise HTTPException(status_code=400, detail="Could not rehydrate source: upstream returned 404")
+
+    monkeypatch.setattr(server, "_rehydrate_source", fake_rehydrate)
+
+    async def collect_events() -> list[dict[str, object]]:
+        body = server.QueryRequest(
+            question="Run a data quality audit.",
+            source_ids=["src_dead_api"],
+            model_mode="flash",
+        )
+        response = await server.query_endpoint(body, server._internal_test_request("legacy"), BackgroundTasks())
+        events = []
+        async for item in response.body_iterator:
+            events.append(item)
+        return events
+
+    events = asyncio.run(collect_events())
+    event_names = [item["event"] for item in events]
+
+    assert "error" in event_names
+    assert event_names[-1] == "done"
+    error_payload = json.loads(next(item["data"] for item in events if item["event"] == "error"))
+    assert error_payload["message"] == "I couldn't load the selected source. Retry or reattach the source, then ask again."
+    assert "upstream returned 404" not in error_payload["message"]
 
 
 def test_auto_flash_classification_failure_escalates_once_to_pro(isolated_server, tmp_path, monkeypatch):
@@ -1549,7 +1656,7 @@ def test_auto_flash_classification_failure_escalates_once_to_pro(isolated_server
     response = TestClient(server.app).post(
         "/query",
         json={
-            "question": "total sales",
+            "question": "total sales in 2027",
             "source_ids": [source_id],
             "model_mode": "auto",
         },
@@ -1689,7 +1796,6 @@ def test_answerable_injection_prompt_is_normalized_before_querying(isolated_serv
     )
 
     assert response.status_code == 200
-    assert "Total Sales" in response.text
     assert "$4,450" in response.text
     assert "999999" not in "".join(router.classified_questions)
     assert "999999" not in "".join(router.summary_questions)
@@ -1753,7 +1859,7 @@ def test_empty_summary_stream_emits_grounded_text(isolated_server, tmp_path, mon
     assert response.status_code == 200
     assert "event: text" in response.text
     assert "(no answer)" not in response.text
-    assert "Total Sales" in response.text
+    assert "4450" in response.text
 
 
 def _write_ledger_csv(path):

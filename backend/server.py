@@ -213,6 +213,7 @@ from src.travel_orchestrator import AIRLINE_CLARIFY_MARKER, TravelOrchestrator
 from src.data_sources import (
     DataSource,
     dataframe_to_duckdb_source,
+    prepare_api_snapshot_source,
     prepare_api_source,
     prepare_csv_memory_source,
     prepare_csv_source,
@@ -221,6 +222,7 @@ from src.data_sources import (
     prepare_excel_workbook_duckdb_sources,
     prepare_local_file_source,
     prepare_pdf_source,
+    write_api_snapshot,
 )
 from src.logging_config import log_event, redact_url, setup_loggers
 from src.mcp_pool import extract_text_content, get_pool, parse_tool_result_to_dataframe
@@ -1204,6 +1206,9 @@ async def _rehydrate_source(row: dict[str, Any]) -> DataSource:
         if typ == "pdf":
             return await asyncio.to_thread(prepare_pdf_source, Path(origin["path"]), cache_logger)
         if typ == "api":
+            snapshot_path = origin.get("snapshot_path")
+            if snapshot_path and Path(snapshot_path).exists():
+                return await asyncio.to_thread(prepare_api_snapshot_source, Path(snapshot_path), row["name"], cache_logger)
             await _assert_public_url(origin["url"])
             return await asyncio.to_thread(prepare_api_source, origin["url"], cache_logger, origin.get("auth"))
     except FileNotFoundError as exc:
@@ -2589,10 +2594,20 @@ async def attach_api(body: AttachAPI, request: Request) -> dict[str, Any]:
     await _assert_public_url(body.url)
     try:
         source = await asyncio.to_thread(prepare_api_source, body.url, LOGGERS["cache"], auth_header=body.auth)
+        source_id = _make_id()
+        snapshot_path = CONFIG.cache_dir / "api_snapshots" / f"{source_id}.csv"
+        if source.dataframe is not None:
+            await asyncio.to_thread(write_api_snapshot, source, snapshot_path, LOGGERS["cache"])
         if body.ingest == "sql" and source.dataframe is not None:
             source = await asyncio.to_thread(dataframe_to_duckdb_source, source.dataframe, CONFIG.cache_dir, LOGGERS["cache"], body.url, "API SQL cache")
-        origin = {"type": "api", "url": body.url, "auth": body.auth, "ingest": body.ingest}
-        source_id = _make_id()
+        origin = {
+            "type": "api",
+            "url": body.url,
+            "auth": body.auth,
+            "ingest": body.ingest,
+            "snapshot_path": str(snapshot_path),
+            "snapshot_format": "csv",
+        }
         result = _persist_source(source_id, source, "api", origin, owner_id=_current_user_id(request))
         if body.save_connector:
             DB.add_connector(kind="api", label=redact_url(body.url), config={"url": body.url, "auth": body.auth}, owner_id=_current_user_id(request))
@@ -4738,15 +4753,23 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
         selected_mcp_ids = {s.id for s in selected_mcp_states}
         unavailable_mcp_ids = set(requested_mcp_ids) - selected_mcp_ids
         has_selected_mcp = bool(selected_mcp_states)
-        selected_sources = await _load_query_sources(
-            requested_source_ids,
-            active_row,
-            use_active_fallback=not body.source_ids,
-            owner_id=owner_id,
-        )
+        source_load_error: str | None = None
+        try:
+            selected_sources = await _load_query_sources(
+                requested_source_ids,
+                active_row,
+                use_active_fallback=not body.source_ids,
+                owner_id=owner_id,
+            )
+        except HTTPException as exc:
+            selected_sources = []
+            source_load_error = str(exc.detail or "Could not load the selected source.")
+        except Exception as exc:
+            selected_sources = []
+            source_load_error = str(exc)
         pre_source_history = _load_history(chat_id, owner_id=owner_id, include_legacy=include_legacy)
 
-        if not selected_sources and not requested_mcp_ids and _query_requires_source(question, "", pre_source_history, has_selected_mcp):
+        if not selected_sources and not requested_mcp_ids and not source_load_error and _query_requires_source(question, "", pre_source_history, has_selected_mcp):
             raise HTTPException(status_code=400, detail="Attach a source first")
 
         active_for_legacy = selected_sources[0] if len(selected_sources) == 1 else None
@@ -4857,6 +4880,18 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                     selected_label = str(model_selection.get("effective_model_mode") or "flash").capitalize()
                     yield {"event": "thinking", "data": json.dumps({"step": f"Auto selected {selected_label}"})}
 
+                if source_load_error and not selected_sources:
+                    content = "I couldn't load the selected source. Retry or reattach the source, then ask again."
+                    msg = DB.add_message(
+                        chat_id,
+                        "assistant",
+                        content,
+                        payload={"kind": "error", "detail": source_load_error},
+                    )
+                    yield _public_error_event(content)
+                    yield {"event": "done", "data": json.dumps({"message_id": msg["id"], "chat_id": chat_id})}
+                    return
+
                 if unavailable_mcp_ids and not selected_sources and not selected_mcp_states:
                     names: list[str] = []
                     for connector_id in sorted(unavailable_mcp_ids):
@@ -4953,9 +4988,16 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         source_instructions=source_instructions,
                         project_instructions=project_instructions,
                     )
+                    has_metric_filter_cues = bool(
+                        re.search(
+                            r"\b(?:in|for|during|from|to|between|after|before|on|since|until|last|next|today|yesterday|tomorrow)\b.*\b(?:\d{4}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|week|month|quarter|year)\b",
+                            question,
+                            re.I,
+                        )
+                    )
                     contract_eligible = (
                         semantic_contract.intent in {"executive_summary", "trend", "grouped_metric", "data_quality_audit"}
-                        or (semantic_contract.intent == "metric" and bool(semantic_contract.metrics) and not semantic_contract.filters)
+                        or (semantic_contract.intent == "metric" and bool(semantic_contract.metrics) and not semantic_contract.filters and not has_metric_filter_cues)
                     )
                     active_contract = semantic_contract if contract_eligible and semantic_contract.actionable else None
                     if active_contract is not None:
@@ -5051,7 +5093,7 @@ async def query_endpoint(body: QueryRequest, request: Request, background_tasks:
                         return
 
                     # Compound question that needs sequential SQL — route to local agent loop.
-                    if intent.get("intent_type") == "multi_step" and source is not None and ledger_plan is None and deterministic_plan is None:
+                    if active_contract is None and intent.get("intent_type") == "multi_step" and source is not None and ledger_plan is None and deterministic_plan is None:
                         async for ev in _run_local_agent(chat_id, question, source, analysis_history, request_id, model_used, llm_router, user_msg["id"], model_selection):
                             yield ev
                         return

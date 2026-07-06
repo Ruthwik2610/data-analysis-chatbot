@@ -694,6 +694,27 @@ def prepare_api_source(api_url: str, logger: Any, auth_header: str | None = None
     return DataSource(source_kind="API direct", schema=schema, display_name=display_name, memory_key=memory_key, dataframe=df)
 
 
+def write_api_snapshot(source: DataSource, snapshot_path: Path, logger: Any = None) -> Path:
+    if source.dataframe is None:
+        raise ValueError("API source has no tabular snapshot to persist.")
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    source.dataframe.to_csv(snapshot_path, index=False)
+    if logger:
+        log_event(logger, "api_snapshot_saved", rows=len(source.dataframe), columns=len(source.dataframe.columns), path=str(snapshot_path))
+    return snapshot_path
+
+
+def prepare_api_snapshot_source(snapshot_path: Path, display_name: str, logger: Any = None) -> DataSource:
+    source = prepare_csv_memory_source(snapshot_path, logger)
+    return DataSource(
+        source_kind="API snapshot",
+        schema=source.schema,
+        display_name=display_name,
+        memory_key=source.memory_key,
+        dataframe=source.dataframe,
+    )
+
+
 def dataframe_to_duckdb_source(df: pd.DataFrame, cache_dir: Path, logger: Any, display_name: str, source_kind: str) -> DataSource:
     import duckdb
 
