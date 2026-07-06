@@ -363,8 +363,9 @@ def canonical_metric_alias(metric_column: Any, alias: Any = None) -> str:
     sales_terms = {"sales", "sale", "revenue", "turnover", "gmv", "gross_amount", "gross_value", "total_amount", "total_price"}
     profit_terms = {"profit", "profits", "loss", "losses", "net_income", "net_profit"}
     quantity_terms = {"quantity", "qty", "items", "item", "units", "unit", "items_sold"}
+    order_terms = {"orders", "order_count", "orders_count", "count_orders", "number_of_orders"}
     generic_aliases = (
-        sales_terms | profit_terms | quantity_terms |
+        sales_terms | profit_terms | quantity_terms | order_terms |
         {"total_sales", "total_revenue", "total_profit", "total_quantity"}
     )
     if alias_name and alias_name not in generic_aliases and alias_name != column_name:
@@ -376,6 +377,8 @@ def canonical_metric_alias(metric_column: Any, alias: Any = None) -> str:
         return "total_profit"
     if (quantity_terms | {"total_quantity"}) & metric_terms:
         return "total_quantity"
+    if order_terms & metric_terms:
+        return "orders"
     return alias_name or column_name or "metric"
 
 

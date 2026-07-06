@@ -418,6 +418,27 @@ class QueryPlanTests(unittest.TestCase):
         self.assertIn('COUNT(DISTINCT "order_id") AS "orders"', plan.sql)
         self.assertIn("GROUP BY period", plan.sql)
 
+    def test_order_count_profile_alias_normalizes_to_orders(self) -> None:
+        allowed = {"order_id", "order_date", "sales", "profit", "quantity"}
+        question = "Analyze monthly sales, profit, quantity, and order count trends across the whole dataset."
+        instructions = {
+            "metrics": {
+                "order_count": {
+                    "column": "order_id",
+                    "aggregation": "count_distinct",
+                    "synonyms": ["order count", "number of orders"],
+                }
+            }
+        }
+
+        contract = build_semantic_contract(question, allowed, source_instructions=instructions)
+        plan = build_query_plan(contract.to_intent(), question, allowed)
+
+        self.assertIn("orders", contract.required_aliases)
+        self.assertNotIn("order_count", contract.required_aliases)
+        self.assertIsNone(validate_plan_against_contract(plan, contract))
+        self.assertIn('COUNT(DISTINCT "order_id") AS "orders"', plan.sql)
+
     def test_loss_making_items_contract_keeps_grouping_and_all_metrics(self) -> None:
         allowed = {"order_id", "product_name", "segment", "region", "sales", "profit", "quantity"}
         question = "Which items generated the most revenue and quantity, and which items are loss-making?"
